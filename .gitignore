@@ -18,6 +18,11 @@ venv/
 dist/
 build/
 
+# Relic data stores (Kuzu graph, SQLite registry, raw artifacts)
+data/
+*.kuzu
+*.db
+
 # Node
 node_modules/
 npm-debug.log*

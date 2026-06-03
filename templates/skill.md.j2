@@ -1,0 +1,29 @@
+# << skill.title >>       ·   v<< skill.semver >>
+
+> << skill.description >>
+
+**Skill ID:** `<< skill.skill_id >>`
+**Scope:** << skill.scope >>
+**Status:** << skill.status >>
+**Owner:** << skill.owner >>
+<% if skill.last_verified_at %>**Last verified:** << skill.last_verified_at.strftime("%Y-%m-%d") >><% endif %>
+
+## Inputs
+<% for name, spec in skill.inputs.items() %>- `<< name >>` (<< spec.type >><% if not spec.required %>, optional<% endif %>): << spec.description >>
+<% endfor %>
+
+## Outputs
+<% for name, spec in skill.outputs.items() %>- `<< name >>` (<< spec.type >>): << spec.description >>
+<% endfor %>
+
+## Preconditions
+<% for p in skill.preconditions %>- << p >>
+<% endfor %>
+
+## Safety checks
+<% for s in skill.safety_checks %>- << s >>
+<% endfor %>
+
+## Sources
+<% for c in skill.citations %>- [<< c.label >>](<< c.url >>)
+<% endfor %>

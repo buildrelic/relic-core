@@ -9,6 +9,7 @@ is best-effort and never raises.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,12 +18,20 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
+class Source:
+    """Where a recalled fact came from: an episode label and, if known, its URL."""
+
+    label: str
+    url: str | None = None
+
+
+@dataclass(slots=True)
 class RecalledFact:
     """A fact recalled from the graph, with the episodes that support it."""
 
     fact: str
     relation: str
-    sources: list[str] = field(default_factory=list)
+    sources: list[Source] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -67,27 +76,50 @@ async def recall(
     return RecallAnswer(query=query, facts=facts)
 
 
-async def _resolve_sources(graphiti: Graphiti, episode_uuids: list[Any]) -> list[str]:
-    """Resolve episode uuids to human labels (episode names), best-effort.
+async def _resolve_sources(graphiti: Graphiti, episode_uuids: list[Any]) -> list[Source]:
+    """Resolve episode uuids to sources (episode name plus source URL), best-effort.
 
     Falls back to the uuid string when a lookup fails, so provenance degrades
-    rather than disappears. Order is preserved and duplicates are dropped.
+    rather than disappears. Order is preserved and duplicate labels are dropped.
     """
     from graphiti_core.nodes import EpisodicNode
 
-    labels: list[str] = []
+    sources: list[Source] = []
     seen: set[str] = set()
     for uuid in episode_uuids:
         key = str(uuid)
         try:
             episode = await EpisodicNode.get_by_uuid(graphiti.driver, key)
-            label = episode.name or key
+            source = Source(label=episode.name or key, url=_extract_url(episode.content))
         except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
-            label = key
-        if label not in seen:
-            seen.add(label)
-            labels.append(label)
-    return labels
+            source = Source(label=key)
+        if source.label not in seen:
+            seen.add(source.label)
+            sources.append(source)
+    return sources
+
+
+def _extract_url(content: Any) -> str | None:
+    """Pull the canonical source URL out of an episode body, if present.
+
+    The ingest mappers store the PR or issue under those keys with a ``url``
+    field. The repo URL is intentionally ignored: it is not the source of the
+    fact.
+    """
+    if not isinstance(content, str):
+        return None
+    try:
+        body = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    for key in ("pull_request", "issue"):
+        section = body.get(key)
+        if isinstance(section, dict) and isinstance(section.get("url"), str):
+            return section["url"]
+    top = body.get("url")
+    return top if isinstance(top, str) else None
 
 
 def format_answer(answer: RecallAnswer) -> str:
@@ -97,6 +129,7 @@ def format_answer(answer: RecallAnswer) -> str:
     lines = [f'Memory for "{answer.query}":', ""]
     for item in answer.facts:
         lines.append(f"- {item.fact}")
-        if item.sources:
-            lines.append(f"  sources: {', '.join(item.sources)}")
+        for source in item.sources:
+            suffix = f" ({source.url})" if source.url else ""
+            lines.append(f"  source: {source.label}{suffix}")
     return "\n".join(lines)

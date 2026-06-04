@@ -57,8 +57,9 @@ uv run relic deprecate pr-review-routing
 
 ### Recall
 
-Query the memory graph and get facts back with their sources, from the CLI or
-over MCP (`relic serve` exposes a `recall_memory` tool):
+Query the memory graph and get facts back with their sources, linking to the PR
+or issue where available, from the CLI or over MCP (`relic serve` exposes a
+`recall_memory` tool):
 
 ```bash
 uv run relic recall "who usually reviews auth changes?"

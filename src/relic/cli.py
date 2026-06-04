@@ -132,14 +132,15 @@ def verify(skill_id: Annotated[str, typer.Argument(help="skill id to promote")])
 
 @app.command()
 def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/")]) -> None:
-    """Write verified skills to a repo's .claude/skills/ folder (Phase 6)."""
+    """Write verified skills and a catalog index to a repo's .claude/skills/ folder."""
     from relic.config import get_settings
     from relic.registry.store import connect
-    from relic.serve.emit_files import emit_verified
+    from relic.serve.emit_files import emit_catalog, emit_verified
 
     conn = connect(get_settings().registry_db_path)
     try:
         paths = emit_verified(conn, repo)
+        index = emit_catalog(conn, repo)
     finally:
         conn.close()
     if not paths:
@@ -148,6 +149,23 @@ def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/
     console.print(f"[green]emitted[/] {len(paths)} skill(s) to [bold]{repo}[/]")
     for path in paths:
         console.print(f"  [dim]{path}[/]")
+    if index is not None:
+        console.print(f"  [dim]{index} (index)[/]")
+
+
+@app.command()
+def catalog() -> None:
+    """Print a browsable markdown index of verified skills."""
+    from relic.config import get_settings
+    from relic.registry.store import connect, list_skills
+    from relic.serve.catalog import render_catalog
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        skills = list_skills(conn, status="verified")
+    finally:
+        conn.close()
+    print(render_catalog(skills))
 
 
 @app.command()

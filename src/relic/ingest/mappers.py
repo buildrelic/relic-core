@@ -44,6 +44,7 @@ class PullRequestRec:
     author_url: str | None
     created_at: str
     merged_at: str | None
+    body: str | None = None
     reviews: list[ReviewRec] = field(default_factory=list)
     requested_reviewers: list[str] = field(default_factory=list)
     files: list[FileChange] = field(default_factory=list)
@@ -101,6 +102,21 @@ def _parse_aware(value: str) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+_MAX_DESC_CHARS = 4000
+
+
+def _clip(text: str | None) -> str | None:
+    """Trim a description to keep episodes (and extraction cost) bounded.
+
+    The PR body is the substance the extractor needs, but an unbounded body would
+    blow up the per-episode token cost. Cap it and drop empty bodies to null.
+    """
+    if not text or not text.strip():
+        return None
+    trimmed = text.strip()
+    return trimmed if len(trimmed) <= _MAX_DESC_CHARS else trimmed[:_MAX_DESC_CHARS] + "..."
+
+
 def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
     """Map a merged PR to a JSON episode whose keys mirror the entity attributes."""
     body = {
@@ -108,6 +124,7 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
         "pull_request": {
             "number": pr.number,
             "title": pr.title,
+            "description": _clip(pr.body),
             "url": pr.url,
             "state": pr.state,
             "created_at": pr.created_at,
@@ -125,10 +142,7 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
             for r in pr.reviews
         ],
         "requested_reviewers": pr.requested_reviewers,
-        "files": [
-            {"path": f.path, "additions": f.additions, "deletions": f.deletions, "status": f.status}
-            for f in pr.files
-        ],
+        "files": [{"path": f.path} for f in pr.files],
     }
     return EpisodeSpec(
         name=f"PR {repo.full_name}#{pr.number}",

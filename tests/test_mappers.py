@@ -48,6 +48,7 @@ def test_pr_to_episode_shape_and_group() -> None:
             )
         ],
         requested_reviewers=["abhinavp5"],
+        body="Provision GCP and Terraform.",
         files=[FileChange(path="infra/gcp.tf", additions=100, deletions=2, status="added")],
     )
     spec = pr_to_episode(pr, _repo())
@@ -61,7 +62,9 @@ def test_pr_to_episode_shape_and_group() -> None:
     assert body["pull_request"]["author"]["login"] == "paris-phan"
     assert body["reviews"][0]["state"] == "COMMENTED"
     assert body["requested_reviewers"] == ["abhinavp5"]
+    assert body["pull_request"]["description"] == "Provision GCP and Terraform."
     assert body["files"][0]["path"] == "infra/gcp.tf"
+    assert "additions" not in body["files"][0]  # per-file stats dropped to keep episodes lean
 
 
 def test_pr_to_episode_no_reviews_falls_back_to_created_at() -> None:
@@ -80,6 +83,7 @@ def test_pr_to_episode_no_reviews_falls_back_to_created_at() -> None:
     body = json.loads(spec.body)
     assert body["reviews"] == []
     assert body["files"] == []
+    assert body["pull_request"]["description"] is None
 
 
 def test_issue_to_episode() -> None:

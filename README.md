@@ -65,6 +65,14 @@ or issue where available, from the CLI or over MCP (`relic serve` exposes a
 uv run relic recall "who usually reviews auth changes?"
 ```
 
+### MCP server
+
+`relic serve` exposes one MCP endpoint over stdio:
+
+- each verified skill as a tool (call it for the steps) and a resource at `skill://<id>`
+- `search_skills` to find a skill by text or scope
+- `recall_memory` to query the graph and get facts with their sources
+
 ## Development
 
 ```bash

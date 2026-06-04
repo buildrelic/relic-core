@@ -24,7 +24,8 @@ async def test_draft_to_served_skill_end_to_end(
 
     # 2. nothing is emitted or served while it is still a draft
     assert emit_verified(conn, repo) == []
-    assert await build_server(conn).list_tools() == []
+    draft_tools = {t.name for t in await build_server(conn).list_tools()}
+    assert "pr-review-routing" not in draft_tools
 
     # 3. verify promotes it and stamps the verification time
     skill = mark_verified(conn, "pr-review-routing", now=datetime(2026, 6, 4, tzinfo=UTC))
@@ -36,5 +37,5 @@ async def test_draft_to_served_skill_end_to_end(
     assert "# Route auth PRs" in paths[0].read_text()
 
     # 5. ... and is served as an MCP tool
-    tools = await build_server(conn).list_tools()
-    assert [t.name for t in tools] == ["pr-review-routing"]
+    tool_names = {t.name for t in await build_server(conn).list_tools()}
+    assert "pr-review-routing" in tool_names

@@ -115,6 +115,7 @@ async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]
         author_url=author.get("html_url"),
         created_at=pr.get("created_at", ""),
         merged_at=pr.get("merged_at"),
+        body=pr.get("body"),
         reviews=reviews,
         requested_reviewers=[r for r in requested_reviewers if r],
         files=files,

@@ -63,10 +63,13 @@ async def test_real_serve_subprocess_speaks_mcp(
 
     # No OPENAI_API_KEY: recall is disabled, which exercises serve's stderr diagnostic.
     # If that diagnostic went to stdout it would corrupt the MCP stream and this would fail.
+    # cwd=tmp_path so the subprocess does not read the repo's .env, which may hold a real key.
     env = {**os.environ, "REGISTRY_DB_PATH": str(db)}
     env.pop("OPENAI_API_KEY", None)
 
-    transport = StdioTransport(command=sys.executable, args=["-m", "relic", "serve"], env=env)
+    transport = StdioTransport(
+        command=sys.executable, args=["-m", "relic", "serve"], env=env, cwd=str(tmp_path)
+    )
     async with Client(transport, init_timeout=30) as client:
         await client.ping()
         tools = {t.name for t in await client.list_tools()}

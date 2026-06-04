@@ -9,7 +9,7 @@
 <% if skill.last_verified_at %>**Last verified:** << skill.last_verified_at.strftime("%Y-%m-%d") >><% endif %>
 
 ## Inputs
-<% for name, spec in skill.inputs.items() %>- `<< name >>` (<< spec.type >><% if not spec.required %>, optional<% endif %>): << spec.description >>
+<% for name, spec in skill.inputs.items() %>- `<< name >>` (<< spec.type >><% if not spec.required %>, optional<% endif %><% if spec.default is not none %>, default: << spec.default >><% endif %>): << spec.description >>
 <% endfor %>
 
 ## Outputs

@@ -23,3 +23,24 @@ def test_render_includes_grounded_fields() -> None:
     assert "reviewer" in out
     assert "[PR #12](https://example.com/pr/12)" in out
     assert "**Scope:** repo" in out
+
+
+def test_render_marks_optional_and_default_inputs() -> None:
+    skill = SkillIR(
+        skill_id="paged-search",
+        semver="1.0.0",
+        title="Paged search",
+        description="Search with paging.",
+        scope="repo",
+        inputs={
+            "query": FieldSpec(type="string", description="search text"),
+            "limit": FieldSpec(
+                type="integer", description="max results", required=False, default=10
+            ),
+        },
+        owner="person_paris",
+    )
+    out = render(skill)
+    assert "`query` (string): search text" in out
+    assert "optional" in out
+    assert "default: 10" in out

@@ -28,8 +28,33 @@ cp .env.example .env   # then fill in keys
 uv run relic --help
 ```
 
-Commands: `ingest`, `resolve`, `compile`, `verify`, `emit`, `query`. Only the
-skeleton is wired up so far; each command lands in its phase.
+Commands: `ingest`, `resolve`, `compile`, `register`, `list`, `show`, `verify`,
+`emit`, `serve`, `deprecate`, `query`. The graph-backed commands (`ingest`,
+`resolve`, `compile`, `query`) land in their phases; the registry-backed skill
+lifecycle below is wired up.
+
+### Skill lifecycle
+
+Skills live in a SQLite registry, independent of ingestion. A skill enters as a
+draft — from the Phase 4 compiler, or hand-authored and loaded with `register` —
+and is promoted once trusted:
+
+```bash
+# load a hand-authored skill as a draft
+uv run relic register examples/skills/pr-review-routing.json
+uv run relic list
+
+# inspect, then promote
+uv run relic show pr-review-routing
+uv run relic verify pr-review-routing
+
+# emit verified skills to a repo's .claude/skills/, and/or serve them over MCP
+uv run relic emit --repo /path/to/target-repo
+uv run relic serve
+
+# retire a skill so it stops being emitted or served
+uv run relic deprecate pr-review-routing
+```
 
 ## Development
 

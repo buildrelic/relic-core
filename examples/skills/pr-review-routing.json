@@ -1,0 +1,44 @@
+{
+  "skill_id": "pr-review-routing",
+  "semver": "1.0.0",
+  "title": "Route auth PRs to the right reviewer",
+  "description": "Use when opening or reviewing a pull request that touches src/auth/**. Routes the review to an active auth maintainer.",
+  "scope": "repo",
+  "inputs": {
+    "pr_url": {
+      "type": "string",
+      "description": "URL of the pull request being opened"
+    },
+    "touched_paths": {
+      "type": "array",
+      "description": "Repo-relative paths changed by the PR",
+      "required": false
+    }
+  },
+  "outputs": {
+    "reviewer": {
+      "type": "string",
+      "description": "GitHub login to request review from"
+    }
+  },
+  "preconditions": [
+    "PR touches one or more files under src/auth/**"
+  ],
+  "safety_checks": [
+    "Chosen reviewer is an active maintainer (a commit in the last 90 days)",
+    "Never auto-assign the PR author as their own reviewer"
+  ],
+  "citations": [
+    {
+      "label": "PR #12 — auth review routing convention",
+      "url": "https://github.com/buildrelic/relic-core/pull/12",
+      "source_type": "pr"
+    },
+    {
+      "label": "REL-42 — reviewer rotation policy",
+      "url": "https://linear.app/buildrelic/issue/REL-42",
+      "source_type": "issue"
+    }
+  ],
+  "owner": "person_paris"
+}

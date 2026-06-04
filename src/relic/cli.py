@@ -5,6 +5,7 @@ import-clean. Heavier work is imported inside each command as it lands in its
 phase.
 """
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -106,13 +107,153 @@ def compile_skill(skill: Annotated[str, typer.Option(help="archetype to compile"
 @app.command()
 def verify(skill_id: Annotated[str, typer.Argument(help="skill id to promote")]) -> None:
     """Promote a draft skill to verified and stamp last_verified_at (Phase 5)."""
-    _todo("Phase 5")
+    from relic.config import get_settings
+    from relic.registry.store import connect, mark_verified
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        skill = mark_verified(conn, skill_id)
+    except KeyError:
+        console.print(f"[red]no such skill:[/] {skill_id}")
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from None
+    finally:
+        conn.close()
+    stamp = skill.last_verified_at.strftime("%Y-%m-%d %H:%M") if skill.last_verified_at else "?"
+    console.print(f"[green]verified[/] [bold]{skill.skill_id}[/] v{skill.semver} ({stamp})")
 
 
 @app.command()
 def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/")]) -> None:
     """Write verified skills to a repo's .claude/skills/ folder (Phase 6)."""
-    _todo("Phase 6")
+    from relic.config import get_settings
+    from relic.registry.store import connect
+    from relic.serve.emit_files import emit_verified
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        paths = emit_verified(conn, repo)
+    finally:
+        conn.close()
+    if not paths:
+        console.print("[yellow]no verified skills to emit[/]")
+        return
+    console.print(f"[green]emitted[/] {len(paths)} skill(s) to [bold]{repo}[/]")
+    for path in paths:
+        console.print(f"  [dim]{path}[/]")
+
+
+@app.command()
+def serve() -> None:
+    """Serve verified skills as MCP tools over stdio (Phase 6)."""
+    from relic.config import get_settings
+    from relic.registry.store import connect
+    from relic.serve.mcp_server import build_server
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        server = build_server(conn)
+    finally:
+        conn.close()
+    server.run()
+
+
+@app.command()
+def register(
+    path: Annotated[
+        Path, typer.Argument(help="path to a SkillIR JSON file", exists=True, dir_okay=False)
+    ],
+) -> None:
+    """Load a SkillIR JSON file into the registry as a skill (manual authoring path)."""
+    from pydantic import ValidationError
+
+    from relic.config import get_settings
+    from relic.ontology.skill_ir import SkillIR
+    from relic.registry.store import connect, upsert_skill
+
+    try:
+        skill = SkillIR.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        console.print(f"[red]invalid SkillIR in {path}:[/]\n{exc}")
+        raise typer.Exit(code=1) from None
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        upsert_skill(conn, skill)
+    finally:
+        conn.close()
+    console.print(
+        f"[green]registered[/] [bold]{skill.skill_id}[/] v{skill.semver} ([dim]{skill.status}[/])"
+    )
+
+
+@app.command("list")
+def list_skills_command(
+    status: Annotated[str | None, typer.Option(help="filter by draft|verified|deprecated")] = None,
+) -> None:
+    """List registered skills."""
+    from rich.table import Table
+
+    from relic.config import get_settings
+    from relic.registry.store import connect, list_skills
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        skills = list_skills(conn, status=status)
+    finally:
+        conn.close()
+    if not skills:
+        console.print("[yellow]no skills registered[/]")
+        return
+    colors = {"verified": "green", "draft": "yellow", "deprecated": "dim"}
+    table = Table(box=None)
+    for column in ("skill_id", "ver", "status", "scope", "title"):
+        table.add_column(column)
+    for skill in skills:
+        color = colors.get(skill.status, "")
+        status_cell = f"[{color}]{skill.status}[/]" if color else skill.status
+        table.add_row(skill.skill_id, skill.semver, status_cell, skill.scope, skill.title)
+    console.print(table)
+
+
+@app.command()
+def show(
+    skill_id: Annotated[str, typer.Argument(help="skill id to show")],
+    as_json: Annotated[bool, typer.Option("--json", help="output raw SkillIR JSON")] = False,
+) -> None:
+    """Show a skill's rendered SKILL.md, or its raw SkillIR JSON with --json."""
+    from relic.compile.render import render
+    from relic.config import get_settings
+    from relic.registry.store import connect, get_skill
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        skill = get_skill(conn, skill_id)
+    finally:
+        conn.close()
+    if skill is None:
+        console.print(f"[red]no such skill:[/] {skill_id}")
+        raise typer.Exit(code=1)
+    print(skill.model_dump_json(indent=2) if as_json else render(skill))
+
+
+@app.command()
+def deprecate(skill_id: Annotated[str, typer.Argument(help="skill id to deprecate")]) -> None:
+    """Mark a skill as deprecated so it is no longer emitted or served."""
+    from relic.config import get_settings
+    from relic.registry.store import connect, set_status
+
+    conn = connect(get_settings().registry_db_path)
+    try:
+        skill = set_status(conn, skill_id, "deprecated")
+    except KeyError:
+        console.print(f"[red]no such skill:[/] {skill_id}")
+        raise typer.Exit(code=1) from None
+    finally:
+        conn.close()
+    console.print(f"[yellow]deprecated[/] [bold]{skill.skill_id}[/] v{skill.semver}")
 
 
 @app.command()

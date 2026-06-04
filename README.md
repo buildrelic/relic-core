@@ -29,15 +29,14 @@ uv run relic --help
 ```
 
 Commands: `ingest`, `resolve`, `compile`, `register`, `list`, `show`, `verify`,
-`emit`, `serve`, `deprecate`, `query`. The graph-backed commands (`ingest`,
-`resolve`, `compile`, `query`) land in their phases; the registry-backed skill
-lifecycle below is wired up.
+`emit`, `serve`, `recall`, `deprecate`, `query`. `resolve` and `compile` land in
+later phases. Everything else is wired up.
 
 ### Skill lifecycle
 
 Skills live in a SQLite registry, independent of ingestion. A skill enters as a
-draft — from the Phase 4 compiler, or hand-authored and loaded with `register` —
-and is promoted once trusted:
+draft, either from the Phase 4 compiler or hand-authored and loaded with
+`register`, and is promoted once trusted:
 
 ```bash
 # load a hand-authored skill as a draft
@@ -54,6 +53,15 @@ uv run relic serve
 
 # retire a skill so it stops being emitted or served
 uv run relic deprecate pr-review-routing
+```
+
+### Recall
+
+Query the memory graph and get facts back with their sources, from the CLI or
+over MCP (`relic serve` exposes a `recall_memory` tool):
+
+```bash
+uv run relic recall "who usually reviews auth changes?"
 ```
 
 ## Development

@@ -88,7 +88,7 @@ async def _ingest(repo: str) -> None:
         stats = await load_episodes(engram, episodes, group_id=group_id)
     finally:
         await engram.close()
-    console.print(f"[green]ingested[/] {stats.episodes} episodes into group [bold]{group_id}[/]")
+    console.print(f"[green]ingested[/] {stats.episodes} episodes from [bold]{repo}[/]")
 
 
 @app.command()
@@ -116,27 +116,22 @@ def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/
 
 
 @app.command()
-def query(
-    text: Annotated[str, typer.Argument(help="graph query string")],
-    repo: Annotated[str | None, typer.Option(help="restrict to a repo, owner/name")] = None,
-) -> None:
+def query(text: Annotated[str, typer.Argument(help="graph query string")]) -> None:
     """Query the graph, e.g. reviewers of a path (Phase 2)."""
     import asyncio
 
-    asyncio.run(_query(text, repo))
+    asyncio.run(_query(text))
 
 
-async def _query(text: str, repo: str | None) -> None:
+async def _query(text: str) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.queries import reviewers_of
-    from relic.ingest.mappers import repo_group_id
 
     settings = get_settings()
     engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
-    group_id = repo_group_id(repo) if repo else None
     try:
-        hits = await reviewers_of(engram, text, group_id=group_id)
+        hits = await reviewers_of(engram, text)
     finally:
         await engram.close()
 

@@ -7,8 +7,6 @@ update in place instead of accumulating duplicate episodic nodes.
 
 from __future__ import annotations
 
-import hashlib
-import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -22,11 +20,6 @@ if TYPE_CHECKING:
 class LoadStats:
     episodes: int
     group_id: str
-
-
-def _episode_uuid(group_id: str, name: str) -> str:
-    digest = hashlib.sha1(f"{group_id}:{name}".encode(), usedforsecurity=False).hexdigest()
-    return str(uuid.UUID(digest[:32]))
 
 
 async def load_episodes(
@@ -51,8 +44,10 @@ async def load_episodes(
             source_description=spec.source_description,
             reference_time=spec.reference_time,
             source=EpisodeType.json,
-            group_id=group_id,
-            uuid=_episode_uuid(group_id, spec.name),
+            # group_id left default and uuid auto-generated: Kuzu is single-database
+            # (Graphiti's custom-group_id path needs a multi-database driver), and a
+            # provided uuid must already exist. Re-ingest is additive; delete the Kuzu
+            # store to reload clean. Per-repo partitioning returns with FalkorDB.
             entity_types=ENTITY_TYPES,
             edge_types=EDGE_TYPES,
             edge_type_map=EDGE_TYPE_MAP,

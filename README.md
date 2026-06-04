@@ -29,8 +29,18 @@ uv run relic --help
 ```
 
 Commands: `ingest`, `resolve`, `compile`, `register`, `list`, `show`, `verify`,
-`emit`, `serve`, `recall`, `deprecate`, `query`. `resolve` and `compile` land in
-later phases. Everything else is wired up.
+`emit`, `serve`, `recall`, `deprecate`, `doctor`, `query`. `resolve` and
+`compile` land in later phases. Everything else is wired up.
+
+### Doctor
+
+`relic doctor` reports your setup at a glance: where the registry lives and how
+many skills it holds by status, where the engram graph lives and whether it is
+built, and which API keys are configured. It reads only and changes nothing.
+
+```bash
+uv run relic doctor
+```
 
 ### Skill lifecycle
 

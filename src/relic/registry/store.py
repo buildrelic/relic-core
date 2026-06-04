@@ -109,6 +109,16 @@ def list_skills(conn: sqlite3.Connection, *, status: str | None = None) -> list[
     return [SkillIR.model_validate_json(row["document"]) for row in rows]
 
 
+def count_by_status(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return a count of skills per status, omitting statuses with no skills.
+
+    Reads the scalar ``status`` column directly, so it never deserializes a
+    document: cheap enough for a status check over a large registry.
+    """
+    rows = conn.execute("SELECT status, COUNT(*) AS n FROM skills GROUP BY status").fetchall()
+    return {row["status"]: row["n"] for row in rows}
+
+
 def set_status(
     conn: sqlite3.Connection,
     skill_id: str,

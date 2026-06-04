@@ -335,6 +335,15 @@ async def _recall(query: str, num_results: int) -> None:
 
 
 @app.command()
+def doctor() -> None:
+    """Report registry, graph, and key status for this setup. Reads only, changes nothing."""
+    from relic.config import get_settings
+    from relic.doctor import diagnose, format_report
+
+    print(format_report(diagnose(get_settings())))
+
+
+@app.command()
 def query(text: Annotated[str, typer.Argument(help="graph query string")]) -> None:
     """Query the graph, e.g. reviewers of a path (Phase 2)."""
     import asyncio

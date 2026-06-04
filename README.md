@@ -47,8 +47,9 @@ uv run relic list
 uv run relic show pr-review-routing
 uv run relic verify pr-review-routing
 
-# emit verified skills to a repo's .claude/skills/, and/or serve them over MCP
+# emit verified skills (with a catalog index) to a repo's .claude/skills/, or serve over MCP
 uv run relic emit --repo /path/to/target-repo
+uv run relic catalog   # print the index of verified skills
 uv run relic serve
 
 # retire a skill so it stops being emitted or served

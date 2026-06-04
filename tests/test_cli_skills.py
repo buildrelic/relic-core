@@ -90,6 +90,16 @@ def test_show_missing_skill_errors(cli: Path) -> None:
     assert "no such skill" in result.output
 
 
+def test_catalog_prints_verified_index(cli: Path, make_skill: Callable[..., SkillIR]) -> None:
+    skill_json = _write_skill(cli / "skill.json", make_skill("demo-skill"))
+    runner.invoke(app, ["register", str(skill_json)])
+    runner.invoke(app, ["verify", "demo-skill"])
+    result = runner.invoke(app, ["catalog"])
+    assert result.exit_code == 0
+    assert "# Skills" in result.output
+    assert "demo-skill" in result.output
+
+
 def test_deprecate_removes_from_emit(cli: Path, make_skill: Callable[..., SkillIR]) -> None:
     skill_json = _write_skill(cli / "skill.json", make_skill("demo-skill"))
     runner.invoke(app, ["register", str(skill_json)])

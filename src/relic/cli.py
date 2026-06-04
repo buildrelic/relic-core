@@ -6,10 +6,15 @@ phase.
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from graphiti_core import Graphiti
 
 app = typer.Typer(
     name="relic",
@@ -147,17 +152,45 @@ def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/
 
 @app.command()
 def serve() -> None:
-    """Serve verified skills as MCP tools over stdio (Phase 6)."""
+    """Serve verified skills and memory recall as MCP tools over stdio."""
+    import asyncio
+
+    asyncio.run(_serve())
+
+
+def _make_recall_fn(engram: "Graphiti") -> "Callable[[str, int], Awaitable[str]]":
+    async def recall_fn(query: str, num_results: int = 10) -> str:
+        from relic.graph.recall import format_answer, recall
+
+        return format_answer(await recall(engram, query, num_results=num_results))
+
+    return recall_fn
+
+
+async def _serve() -> None:
     from relic.config import get_settings
     from relic.registry.store import connect
     from relic.serve.mcp_server import build_server
 
-    conn = connect(get_settings().registry_db_path)
+    settings = get_settings()
+    conn = connect(settings.registry_db_path)
+    engram = None
+    recall_fn = None
     try:
-        server = build_server(conn)
+        from relic.graph.engram import make_engram
+
+        engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+        recall_fn = _make_recall_fn(engram)
+    except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
+        console.print(f"[yellow]recall disabled: {exc}[/]")
+
+    server = build_server(conn, recall_fn=recall_fn)
+    try:
+        await server.run_stdio_async()
     finally:
         conn.close()
-    server.run()
+        if engram is not None:
+            await engram.close()
 
 
 @app.command()
@@ -254,6 +287,31 @@ def deprecate(skill_id: Annotated[str, typer.Argument(help="skill id to deprecat
     finally:
         conn.close()
     console.print(f"[yellow]deprecated[/] [bold]{skill.skill_id}[/] v{skill.semver}")
+
+
+@app.command("recall")
+def recall_command(
+    query: Annotated[str, typer.Argument(help="what to recall from team memory")],
+    num_results: Annotated[int, typer.Option(help="max facts to return")] = 10,
+) -> None:
+    """Recall facts from the memory graph, with their sources."""
+    import asyncio
+
+    asyncio.run(_recall(query, num_results))
+
+
+async def _recall(query: str, num_results: int) -> None:
+    from relic.config import get_settings
+    from relic.graph.engram import make_engram
+    from relic.graph.recall import format_answer, recall
+
+    settings = get_settings()
+    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    try:
+        answer = await recall(engram, query, num_results=num_results)
+    finally:
+        await engram.close()
+    print(format_answer(answer))
 
 
 @app.command()

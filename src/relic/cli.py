@@ -340,6 +340,38 @@ async def _recall(query: str, num_results: int) -> None:
     print(format_answer(answer))
 
 
+@app.command("eval")
+def eval_recall(
+    path: Annotated[
+        Path, typer.Option(help="scorecard gold set JSON")
+    ] = Path("eval/github_recall.json"),
+    num_results: Annotated[int, typer.Option(help="facts per question")] = 10,
+) -> None:
+    """Score recall against a gold set: does it cite the PR that holds each answer?"""
+    import asyncio
+
+    asyncio.run(_eval(path, num_results))
+
+
+async def _eval(path: Path, num_results: int) -> None:
+    from relic.config import get_settings
+    from relic.graph.engram import make_engram
+    from relic.graph.recall import recall
+    from relic.scorecard import load_gold, score_case, summarize
+
+    gold = load_gold(path)
+    settings = get_settings()
+    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    results = []
+    try:
+        for case in gold.cases:
+            answer = await recall(engram, case.question, num_results=num_results)
+            results.append(score_case(case, gold.repo, answer))
+    finally:
+        await engram.close()
+    print(summarize(results))
+
+
 @app.command()
 def doctor() -> None:
     """Report registry, graph, and key status for this setup. Reads only, changes nothing."""

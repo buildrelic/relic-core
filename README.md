@@ -64,7 +64,12 @@ uv run relic serve
 
 # retire a skill so it stops being emitted or served
 uv run relic deprecate pr-review-routing
+uv run relic emit --repo /path/to/target-repo   # re-emit removes the deprecated skill's files
 ```
+
+`emit` reconciles the target: it writes verified skills and removes the files of
+any skill it has since deprecated. It only touches skill directories it knows
+from the registry, so hand-authored skills under `.claude/skills/` are left alone.
 
 ### Recall
 

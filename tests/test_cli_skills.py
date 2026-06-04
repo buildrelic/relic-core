@@ -112,3 +112,26 @@ def test_deprecate_removes_from_emit(cli: Path, make_skill: Callable[..., SkillI
     target = cli / "repo"
     runner.invoke(app, ["emit", "--repo", str(target)])
     assert not (target / ".claude").exists()
+
+
+def test_emit_prunes_deprecated_after_emit(cli: Path, make_skill: Callable[..., SkillIR]) -> None:
+    """A skill emitted while verified is removed from the target on the next emit
+    once it is deprecated. Without this, the stale SKILL.md lingers."""
+    skill_json = _write_skill(cli / "skill.json", make_skill("demo-skill"))
+    target = cli / "repo"
+    runner.invoke(app, ["register", str(skill_json)])
+    runner.invoke(app, ["verify", "demo-skill"])
+
+    first = runner.invoke(app, ["emit", "--repo", str(target)])
+    assert first.exit_code == 0, first.output
+    skill_md = target / ".claude" / "skills" / "demo-skill" / "SKILL.md"
+    index = target / ".claude" / "skills" / "README.md"
+    assert skill_md.exists()
+    assert index.exists()
+
+    runner.invoke(app, ["deprecate", "demo-skill"])
+    second = runner.invoke(app, ["emit", "--repo", str(target)])
+    assert second.exit_code == 0, second.output
+    assert "pruned" in second.output
+    assert not skill_md.parent.exists()  # the whole demo-skill/ dir is gone
+    assert not index.exists()  # stale catalog index is gone too

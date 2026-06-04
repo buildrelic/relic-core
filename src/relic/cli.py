@@ -136,22 +136,28 @@ def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/
     """Write verified skills and a catalog index to a repo's .claude/skills/ folder."""
     from relic.config import get_settings
     from relic.registry.store import connect
-    from relic.serve.emit_files import emit_catalog, emit_verified
+    from relic.serve.emit_files import emit_catalog, emit_verified, prune_unverified
 
     conn = connect(get_settings().registry_db_path)
     try:
         paths = emit_verified(conn, repo)
+        pruned = prune_unverified(conn, repo)
         index = emit_catalog(conn, repo)
     finally:
         conn.close()
-    if not paths:
+    if not paths and not pruned:
         console.print("[yellow]no verified skills to emit[/]")
         return
-    console.print(f"[green]emitted[/] {len(paths)} skill(s) to [bold]{repo}[/]")
-    for path in paths:
-        console.print(f"  [dim]{path}[/]")
-    if index is not None:
-        console.print(f"  [dim]{index} (index)[/]")
+    if paths:
+        console.print(f"[green]emitted[/] {len(paths)} skill(s) to [bold]{repo}[/]")
+        for path in paths:
+            console.print(f"  [dim]{path}[/]")
+        if index is not None:
+            console.print(f"  [dim]{index} (index)[/]")
+    if pruned:
+        console.print(f"[yellow]pruned[/] {len(pruned)} deprecated skill(s) from [bold]{repo}[/]")
+        for directory in pruned:
+            console.print(f"  [dim]{directory}[/]")
 
 
 @app.command()

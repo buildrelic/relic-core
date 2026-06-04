@@ -23,6 +23,7 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+err_console = Console(stderr=True)
 
 
 def _todo(phase: str) -> None:
@@ -200,7 +201,8 @@ async def _serve() -> None:
         engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
         recall_fn = _make_recall_fn(engram)
     except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
-        console.print(f"[yellow]recall disabled: {exc}[/]")
+        # stderr, not stdout: stdout is the MCP transport and any bytes on it corrupt the stream
+        err_console.print(f"[yellow]recall disabled: {exc}[/]")
 
     server = build_server(conn, recall_fn=recall_fn)
     try:

@@ -74,6 +74,16 @@ uv run relic recall "who usually reviews auth changes?"
 - `search_skills` to find a skill by text or scope
 - `recall_memory` to query the graph and get facts with their sources
 
+Point any MCP client at it over stdio. For Claude Code, add it to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "relic": { "command": "uv", "args": ["run", "relic", "serve"] }
+  }
+}
+```
+
 ## Development
 
 ```bash

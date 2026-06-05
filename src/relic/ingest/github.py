@@ -105,6 +105,7 @@ async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]
                 state=rd.get("state", ""),
                 submitted_at=rd.get("submitted_at"),
                 url=rd.get("html_url"),
+                body=rd.get("body"),
             )
         )
 
@@ -155,6 +156,7 @@ async def _fetch_issues(
                 title=data.get("title", ""),
                 url=data.get("html_url", ""),
                 state=data.get("state", ""),
+                body=data.get("body"),
                 assignees=[a for a in assignees if a],
                 labels=label_names,
                 created_at=data.get("created_at"),

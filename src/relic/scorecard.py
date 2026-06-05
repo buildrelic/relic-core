@@ -10,7 +10,7 @@ and the ruler itself costs nothing per run beyond the recall calls it measures.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,10 +20,11 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class EvalCase:
-    """One question and the PR number(s) whose content answers it."""
+    """One question and the PR or issue number(s) whose content answers it."""
 
     question: str
-    expect_prs: list[int]
+    expect_prs: list[int] = field(default_factory=list)
+    expect_issues: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -49,11 +50,20 @@ def pr_url(repo: str, number: int) -> str:
     return f"https://github.com/{repo}/pull/{number}"
 
 
+def issue_url(repo: str, number: int) -> str:
+    """Canonical GitHub issue url, the source identifier for issue-backed cases."""
+    return f"https://github.com/{repo}/issues/{number}"
+
+
 def load_gold(path: str | Path) -> GoldSet:
     """Load a scorecard gold set from JSON."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     cases = [
-        EvalCase(question=case["question"], expect_prs=list(case["expect_prs"]))
+        EvalCase(
+            question=case["question"],
+            expect_prs=list(case.get("expect_prs", [])),
+            expect_issues=list(case.get("expect_issues", [])),
+        )
         for case in data["cases"]
     ]
     return GoldSet(repo=data["repo"], cases=cases)
@@ -62,6 +72,7 @@ def load_gold(path: str | Path) -> GoldSet:
 def score_case(case: EvalCase, repo: str, answer: RecallAnswer) -> CaseResult:
     """Score one case: a hit if any expected PR url appears among the answer's sources."""
     expected = [pr_url(repo, number) for number in case.expect_prs]
+    expected += [issue_url(repo, number) for number in case.expect_issues]
     found = [source.url for fact in answer.facts for source in fact.sources if source.url]
     hit = any(url in found for url in expected)
     return CaseResult(question=case.question, expected_urls=expected, found_urls=found, hit=hit)
@@ -72,7 +83,7 @@ def summarize(results: list[CaseResult]) -> str:
     total = len(results)
     hits = sum(1 for result in results if result.hit)
     pct = round(100 * hits / total) if total else 0
-    lines = [f"recall scorecard: {hits}/{total} cited the right PR ({pct}%)", ""]
+    lines = [f"recall scorecard: {hits}/{total} cited the right source ({pct}%)", ""]
     for result in results:
         mark = "PASS" if result.hit else "MISS"
         lines.append(f"[{mark}] {result.question}")

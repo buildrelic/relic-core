@@ -1,0 +1,13 @@
+{
+  "repo": "buildrelic/relic-core",
+  "cases": [
+    {"question": "what was added so recall answers cite their sources?", "expect_prs": [3]},
+    {"question": "what does the relic MCP server expose to agents?", "expect_prs": [1, 4]},
+    {"question": "how are skills exposed as resources over MCP?", "expect_prs": [4]},
+    {"question": "how is memory recall exposed over the CLI and MCP?", "expect_prs": [2]},
+    {"question": "what generates the browsable catalog of verified skills?", "expect_prs": [5]},
+    {"question": "how was the MCP server tested end to end?", "expect_prs": [6]},
+    {"question": "what does the doctor command report about a setup?", "expect_prs": [7]},
+    {"question": "how does emit handle a deprecated skill's files?", "expect_prs": [8]}
+  ]
+}

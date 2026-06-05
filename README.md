@@ -29,8 +29,21 @@ uv run relic --help
 ```
 
 Commands: `ingest`, `resolve`, `compile`, `register`, `list`, `show`, `verify`,
-`emit`, `serve`, `recall`, `deprecate`, `doctor`, `query`. `resolve` and
+`emit`, `serve`, `recall`, `eval`, `deprecate`, `doctor`, `query`. `resolve` and
 `compile` land in later phases. Everything else is wired up.
+
+### Scorecard
+
+`relic eval` measures recall against a gold set: each case is a question plus the
+PR number(s) whose content actually answers it. It runs recall and checks the
+cited sources for an expected PR url, then reports the hit rate. Deterministic,
+no LLM judge, so the ruler stays cheap. Use it to tell whether an ingestion or
+retrieval change actually moved recall, instead of eyeballing a few answers.
+
+```bash
+uv run relic eval                          # scores eval/github_recall.json
+uv run relic eval --path eval/my-set.json  # or your own gold set
+```
 
 ### Doctor
 

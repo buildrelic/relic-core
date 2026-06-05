@@ -32,18 +32,23 @@ def _todo(phase: str) -> None:
 
 
 @app.command()
-def ingest(repo: Annotated[str, typer.Option(help="owner/name to ingest")]) -> None:
+def ingest(
+    repo: Annotated[str, typer.Option(help="owner/name to ingest")],
+    limit: Annotated[
+        int | None, typer.Option(help="cap merged PRs and issues pulled, most recent first")
+    ] = None,
+) -> None:
     """Pull merged PRs, reviews, and issues into the graph (Phase 2)."""
     import asyncio
 
-    asyncio.run(_ingest(repo))
+    asyncio.run(_ingest(repo, limit))
 
 
 def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
 
 
-async def _ingest(repo: str) -> None:
+async def _ingest(repo: str, limit: int | None = None) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.load import load_episodes
@@ -60,7 +65,9 @@ async def _ingest(repo: str) -> None:
 
     token = resolve_github_token(settings)
     async with make_github(token) as gh:
-        bundle = await fetch_repo(gh, owner, name, concurrency=settings.semaphore_limit)
+        bundle = await fetch_repo(
+            gh, owner, name, concurrency=settings.semaphore_limit, limit=limit
+        )
     console.print(f"fetched {len(bundle.pull_requests)} merged PRs, {len(bundle.issues)} issues")
 
     for pr in bundle.pull_requests:
@@ -338,6 +345,38 @@ async def _recall(query: str, num_results: int) -> None:
     finally:
         await engram.close()
     print(format_answer(answer))
+
+
+@app.command("eval")
+def eval_recall(
+    path: Annotated[
+        Path, typer.Option(help="scorecard gold set JSON")
+    ] = Path("eval/github_recall.json"),
+    num_results: Annotated[int, typer.Option(help="facts per question")] = 10,
+) -> None:
+    """Score recall against a gold set: does it cite the PR that holds each answer?"""
+    import asyncio
+
+    asyncio.run(_eval(path, num_results))
+
+
+async def _eval(path: Path, num_results: int) -> None:
+    from relic.config import get_settings
+    from relic.graph.engram import make_engram
+    from relic.graph.recall import recall
+    from relic.scorecard import load_gold, score_case, summarize
+
+    gold = load_gold(path)
+    settings = get_settings()
+    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    results = []
+    try:
+        for case in gold.cases:
+            answer = await recall(engram, case.question, num_results=num_results)
+            results.append(score_case(case, gold.repo, answer))
+    finally:
+        await engram.close()
+    print(summarize(results))
 
 
 @app.command()

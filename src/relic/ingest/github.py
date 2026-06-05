@@ -40,8 +40,14 @@ def _dump(model: Any) -> dict[str, Any]:
     return model.model_dump(mode="json", exclude_unset=True)
 
 
-async def fetch_repo(gh: GitHub, owner: str, name: str, *, concurrency: int = 10) -> RepoBundle:
-    """Fetch merged PRs (with files + reviews) and non-PR issues for `owner/name`."""
+async def fetch_repo(
+    gh: GitHub, owner: str, name: str, *, concurrency: int = 10, limit: int | None = None
+) -> RepoBundle:
+    """Fetch merged PRs (with files + reviews) and non-PR issues for `owner/name`.
+
+    ``limit`` caps how many merged PRs and how many issues are pulled, most recent
+    first, to bound API calls and per-episode LLM cost when ingesting a large repo.
+    """
     full_name = f"{owner}/{name}"
     bundle = RepoBundle(
         full_name=full_name, url=f"https://github.com/{full_name}", default_branch="main"
@@ -54,6 +60,8 @@ async def fetch_repo(gh: GitHub, owner: str, name: str, *, concurrency: int = 10
         data = _dump(pr)
         if data.get("merged_at"):
             merged.append(data)
+            if limit is not None and len(merged) >= limit:
+                break
 
     sem = asyncio.Semaphore(concurrency)
 
@@ -62,7 +70,7 @@ async def fetch_repo(gh: GitHub, owner: str, name: str, *, concurrency: int = 10
             return await _fetch_pr_detail(gh, owner, name, pr_data)
 
     bundle.pull_requests = list(await asyncio.gather(*[_hydrate(d) for d in merged]))
-    bundle.issues = await _fetch_issues(gh, owner, name)
+    bundle.issues = await _fetch_issues(gh, owner, name, limit=limit)
     return bundle
 
 
@@ -123,7 +131,9 @@ async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]
     )
 
 
-async def _fetch_issues(gh: GitHub, owner: str, name: str) -> list[IssueRec]:
+async def _fetch_issues(
+    gh: GitHub, owner: str, name: str, *, limit: int | None = None
+) -> list[IssueRec]:
     full_name = f"{owner}/{name}"
     issues: list[IssueRec] = []
     async for raw_issue in gh.rest.paginate(
@@ -152,4 +162,6 @@ async def _fetch_issues(gh: GitHub, owner: str, name: str) -> list[IssueRec]:
                 raw=data,
             )
         )
+        if limit is not None and len(issues) >= limit:
+            break
     return issues

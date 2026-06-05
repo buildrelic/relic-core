@@ -32,18 +32,23 @@ def _todo(phase: str) -> None:
 
 
 @app.command()
-def ingest(repo: Annotated[str, typer.Option(help="owner/name to ingest")]) -> None:
+def ingest(
+    repo: Annotated[str, typer.Option(help="owner/name to ingest")],
+    limit: Annotated[
+        int | None, typer.Option(help="cap merged PRs and issues pulled, most recent first")
+    ] = None,
+) -> None:
     """Pull merged PRs, reviews, and issues into the graph (Phase 2)."""
     import asyncio
 
-    asyncio.run(_ingest(repo))
+    asyncio.run(_ingest(repo, limit))
 
 
 def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
 
 
-async def _ingest(repo: str) -> None:
+async def _ingest(repo: str, limit: int | None = None) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.load import load_episodes
@@ -60,7 +65,9 @@ async def _ingest(repo: str) -> None:
 
     token = resolve_github_token(settings)
     async with make_github(token) as gh:
-        bundle = await fetch_repo(gh, owner, name, concurrency=settings.semaphore_limit)
+        bundle = await fetch_repo(
+            gh, owner, name, concurrency=settings.semaphore_limit, limit=limit
+        )
     console.print(f"fetched {len(bundle.pull_requests)} merged PRs, {len(bundle.issues)} issues")
 
     for pr in bundle.pull_requests:

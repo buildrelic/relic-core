@@ -91,9 +91,12 @@ Descriptions:
 
 - **Memory engine: Graphiti** (getzep/graphiti). Read its docs before touching
   ingestion or retrieval; it moves fast, heed version notes.
-- Graph DB behind Graphiti: Neo4j or FalkorDB (decide and record which here).
-- Graphiti uses an LLM for entity/relationship extraction and embeddings for
-  search. Pin which models here.
+- Graph DB behind Graphiti: embedded **Kuzu** today (`./data/engram.kuzu`, no
+  server to run, see `graph/engram.py`). Move to FalkorDB or Neo4j when
+  multi-tenancy and scale call for it. Use `graphiti.search`, not backend Cypher,
+  so retrieval rides the migration.
+- Graphiti uses **OpenAI** for extraction, embeddings, and reranking:
+  `gpt-4o-mini` and `text-embedding-3-small` (`graph/engram.py`).
 - Supabase (Postgres) is available for app/auth/relational data, not the memory
   graph itself.
 - MCP server as the primary interface.

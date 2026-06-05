@@ -7,12 +7,51 @@ This repo holds the prototype pipeline: ingest engineering history, structure it
 in a graph, detect recurring procedures, and compile them into grounded skills a
 coding agent can follow.
 
+## How it works
+
+Relic is two halves over one contract. `SkillIR`
+([`src/relic/ontology/skill_ir.py`](src/relic/ontology/skill_ir.py)) is the seam:
+it is the compiler's output, the registry record, and the MCP tool schema, all
+one type.
+
+**Capture, memory, recall (the graph side).**
+
+- `ingest` pulls merged PRs (title, description, files, reviewers) and issues
+  from GitHub and feeds them to Graphiti, which extracts typed entities and
+  relationships into a temporal knowledge graph. The store is an embedded Kuzu
+  database at `./data/engram.kuzu`, so there is no graph server to run. `--limit`
+  bounds how many PRs and issues it pulls, most recent first, to keep ingestion
+  cheap.
+- `recall` queries that graph (semantic plus keyword, via `graphiti.search`) and
+  returns facts, each carrying the PR or issue it came from. Provenance is the
+  point: every answer cites its source.
+- `eval` scores recall against a gold set, so a change to ingestion or retrieval
+  is measured, not guessed.
+
+**Skills, serve (the registry side).**
+
+- Skills are typed `SkillIR` records in a SQLite registry at
+  `./data/registry.db`, separate from the graph. Lifecycle: draft, verified,
+  deprecated. Today they are hand-authored and loaded with `register`. The
+  Phase 4 compiler (procedure to grounded `SkillIR`) is the pending piece that
+  will produce them from the graph.
+- `emit` renders verified skills into a repo's `.claude/skills/`, `catalog`
+  builds a human index, and `serve` exposes skills and recall over MCP.
+
+Two stores, kept apart on purpose: the Kuzu graph holds memory, the SQLite
+registry holds skills. Graphiti uses OpenAI for extraction and embeddings
+(`gpt-4o-mini`, `text-embedding-3-small`). The graph backend will move to
+FalkorDB or Neo4j when multi-tenancy and scale call for it.
+
 ## Requirements
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- `gh` CLI (reads your GitHub history)
-- API keys for Anthropic, Gemini or OpenAI, GitHub, and Linear
+- `gh` CLI logged in, or a `GITHUB_TOKEN` (to read history)
+- An OpenAI API key (Graphiti uses it for extraction, embeddings, and recall)
+- Optional: an Anthropic key (the Phase 4 compiler), a Linear key (a second source)
+
+Run `relic doctor` to see what is configured.
 
 ## Setup
 
@@ -83,6 +122,16 @@ uv run relic emit --repo /path/to/target-repo   # re-emit removes the deprecated
 `emit` reconciles the target: it writes verified skills and removes the files of
 any skill it has since deprecated. It only touches skill directories it knows
 from the registry, so hand-authored skills under `.claude/skills/` are left alone.
+
+### Ingest
+
+Pull engineering history into the graph. `--limit` caps the pull, most recent
+first, which keeps a first run on a large repo cheap.
+
+```bash
+uv run relic ingest --repo astral-sh/uv             # pull merged PRs and issues
+uv run relic ingest --repo astral-sh/uv --limit 20  # bound the pull
+```
 
 ### Recall
 

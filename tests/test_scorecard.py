@@ -8,7 +8,7 @@ the ruler is testable offline.
 from pathlib import Path
 
 from relic.graph.recall import RecallAnswer, RecalledFact, Source
-from relic.scorecard import EvalCase, load_gold, pr_url, score_case, summarize
+from relic.scorecard import EvalCase, issue_url, load_gold, pr_url, score_case, summarize
 
 REPO = "buildrelic/relic-core"
 
@@ -25,6 +25,13 @@ def test_score_case_hit_when_expected_pr_cited() -> None:
     result = score_case(case, REPO, _answer(pr_url(REPO, 3), pr_url(REPO, 7)))
     assert result.hit is True
     assert pr_url(REPO, 3) in result.expected_urls
+
+
+def test_score_case_hit_on_expected_issue() -> None:
+    case = EvalCase(question="q", expect_issues=[42])
+    result = score_case(case, REPO, _answer(issue_url(REPO, 42)))
+    assert result.hit is True
+    assert issue_url(REPO, 42) in result.expected_urls
 
 
 def test_score_case_miss_when_expected_pr_absent() -> None:

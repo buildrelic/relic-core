@@ -45,6 +45,7 @@ def test_pr_to_episode_shape_and_group() -> None:
                 state="COMMENTED",
                 submitted_at="2025-08-04T09:00:00Z",
                 url="https://github.com/paris-phan/course-scheduler/pull/4#r1",
+                body="please add a regression test",
             )
         ],
         requested_reviewers=["abhinavp5"],
@@ -61,6 +62,7 @@ def test_pr_to_episode_shape_and_group() -> None:
     assert body["pull_request"]["number"] == 4
     assert body["pull_request"]["author"]["login"] == "paris-phan"
     assert body["reviews"][0]["state"] == "COMMENTED"
+    assert body["reviews"][0]["comment"] == "please add a regression test"
     assert body["requested_reviewers"] == ["abhinavp5"]
     assert body["pull_request"]["description"] == "Provision GCP and Terraform."
     assert body["files"][0]["path"] == "infra/gcp.tf"
@@ -93,6 +95,7 @@ def test_issue_to_episode() -> None:
         title="Bug in scheduler",
         url="https://github.com/paris-phan/course-scheduler/issues/7",
         state="open",
+        body="scheduler crashes on empty input",
         assignees=["paris-phan"],
         labels=["bug"],
         created_at="2025-02-02T00:00:00Z",
@@ -104,3 +107,4 @@ def test_issue_to_episode() -> None:
     body = json.loads(spec.body)
     assert body["issue"]["labels"] == ["bug"]
     assert body["issue"]["assignees"] == ["paris-phan"]
+    assert body["issue"]["description"] == "scheduler crashes on empty input"

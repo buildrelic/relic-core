@@ -32,6 +32,7 @@ class ReviewRec:
     state: str
     submitted_at: str | None
     url: str | None
+    body: str | None = None
 
 
 @dataclass(slots=True)
@@ -58,6 +59,7 @@ class IssueRec:
     title: str
     url: str
     state: str
+    body: str | None = None
     assignees: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
     created_at: str | None = None
@@ -138,6 +140,7 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
                 "state": r.state,
                 "submitted_at": r.submitted_at,
                 "url": r.url,
+                "comment": _clip(r.body),
             }
             for r in pr.reviews
         ],
@@ -159,6 +162,7 @@ def issue_to_episode(issue: IssueRec, repo: RepoBundle) -> EpisodeSpec:
         "issue": {
             "identifier": issue.identifier,
             "title": issue.title,
+            "description": _clip(issue.body),
             "state": issue.state,
             "url": issue.url,
             "assignees": issue.assignees,

@@ -94,7 +94,10 @@ async def _ingest(repo: str, limit: int | None = None) -> None:
         return
 
     engram = make_engram(
-        settings.engram_db_path,
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=settings.falkordb_database,
         api_key=settings.openai_api_key,
         max_coroutines=settings.semaphore_limit,
     )
@@ -389,22 +392,39 @@ def doctor() -> None:
 
 
 @app.command()
-def query(text: Annotated[str, typer.Argument(help="graph query string")]) -> None:
+def query(
+    text: Annotated[str, typer.Argument(help="graph query string")],
+    repo: Annotated[
+        str | None, typer.Option(help="owner/name to scope the query, defaults to TARGET_REPO")
+    ] = None,
+) -> None:
     """Query the graph, e.g. reviewers of a path (Phase 2)."""
     import asyncio
 
-    asyncio.run(_query(text))
+    asyncio.run(_query(text, repo))
 
 
-async def _query(text: str) -> None:
+async def _query(text: str, repo: str | None) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.queries import reviewers_of
+    from relic.ingest.mappers import repo_group_id
 
     settings = get_settings()
-    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    # FalkorDB partitions each repo into its own graph named by group_id, so the
+    # client must target that graph. Without a repo we query the default database,
+    # which only holds ungrouped data.
+    repo = repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
+    engram = make_engram(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=group_id or settings.falkordb_database,
+        api_key=settings.openai_api_key,
+    )
     try:
-        hits = await reviewers_of(engram, text)
+        hits = await reviewers_of(engram, text, group_id=group_id)
     finally:
         await engram.close()
 

@@ -1,8 +1,9 @@
 """Land structured episodes into Graphiti via constrained LLM extraction.
 
-Episodes are added sequentially: Kuzu serializes writes and Graphiti expects each
-episode awaited before the next. A deterministic per-episode uuid makes re-ingest
-update in place instead of accumulating duplicate episodic nodes.
+Episodes are added sequentially: each episode is awaited before the next so its
+extracted entities are resolvable when later episodes reference them. FalkorDB is
+multi-tenant, so each episode lands under its repo's group_id, partitioning the
+graph per source.
 """
 
 from __future__ import annotations
@@ -33,9 +34,9 @@ async def load_episodes(
     from graphiti_core.nodes import EpisodeType
     from rich.progress import track
 
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, ensure_fts_indexes
+    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, ensure_indexes
 
-    await ensure_fts_indexes(graphiti)
+    await ensure_indexes(graphiti)
     items = track(episodes, description="loading episodes") if progress else episodes
     for spec in items:
         await graphiti.add_episode(
@@ -44,10 +45,9 @@ async def load_episodes(
             source_description=spec.source_description,
             reference_time=spec.reference_time,
             source=EpisodeType.json,
-            # group_id left default and uuid auto-generated: Kuzu is single-database
-            # (Graphiti's custom-group_id path needs a multi-database driver), and a
-            # provided uuid must already exist. Re-ingest is additive; delete the Kuzu
-            # store to reload clean. Per-repo partitioning returns with FalkorDB.
+            # Partition per repo: FalkorDB is multi-tenant, so each episode lands under
+            # its source's group_id. Search and the Cypher fallback both filter on it.
+            group_id=spec.group_id,
             entity_types=ENTITY_TYPES,
             edge_types=EDGE_TYPES,
             edge_type_map=EDGE_TYPE_MAP,

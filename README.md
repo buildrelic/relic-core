@@ -18,8 +18,8 @@ one type.
 
 - `ingest` pulls merged PRs (title, description, files, reviewers) and issues
   from GitHub and feeds them to Graphiti, which extracts typed entities and
-  relationships into a temporal knowledge graph. The store is an embedded Kuzu
-  database at `./data/engram.kuzu`, so there is no graph server to run. `--limit`
+  relationships into a temporal knowledge graph. The store is a FalkorDB graph
+  running on localhost, so you must start it with Docker first. `--limit`
   bounds how many PRs and issues it pulls, most recent first, to keep ingestion
   cheap.
 - `recall` queries that graph (semantic plus keyword, via `graphiti.search`) and
@@ -38,18 +38,18 @@ one type.
 - `emit` renders verified skills into a repo's `.claude/skills/`, `catalog`
   builds a human index, and `serve` exposes skills and recall over MCP.
 
-Two stores, kept apart on purpose: the Kuzu graph holds memory, the SQLite
-registry holds skills. Graphiti uses OpenAI for extraction and embeddings
-(`gpt-4o-mini`, `text-embedding-3-small`). The graph backend will move to
-FalkorDB or Neo4j when multi-tenancy and scale call for it.
+Two stores, kept apart on purpose: the FalkorDB graph holds memory, the SQLite
+registry holds skills. Graphiti uses OpenAI for extraction, embeddings, and
+reranking (`gpt-4o-mini`, `text-embedding-3-small`).
 
 ## Requirements
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
+- Docker (runs the FalkorDB graph backend)
 - `gh` CLI logged in, or a `GITHUB_TOKEN` (to read history)
 - An OpenAI API key (Graphiti uses it for extraction, embeddings, and recall)
-- Optional: an Anthropic key (the Phase 4 compiler), a Linear key (a second source)
+- Optional: API keys for Anthropic (the Phase 4 compiler), Gemini, and Linear (a second source)
 
 Run `relic doctor` to see what is configured.
 
@@ -59,7 +59,11 @@ Run `relic doctor` to see what is configured.
 uv python install 3.12
 uv sync --dev
 cp .env.example .env   # then fill in keys
+docker compose up -d falkordb   # graph backend on localhost:6379, UI on :3000
 ```
+
+The graph lives in FalkorDB, not a local file. Start it before `relic ingest` or
+`relic query`. Connection settings are the `FALKORDB_*` vars in `.env`.
 
 ## Usage
 

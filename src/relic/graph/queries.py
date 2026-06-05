@@ -1,8 +1,8 @@
 """Graph queries: people connected to work matching a query, with provenance.
 
 `reviewers_of` tries Graphiti hybrid search first, then falls back to a
-deterministic Cypher walk over REVIEWED/AUTHORED edges so the query works even if
-Kuzu FTS indexes are unavailable. It never raises.
+deterministic Cypher walk over REVIEWED/AUTHORED edges so the query still returns
+something if search comes back empty. It never raises.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ async def reviewers_of(
         hits = await _edges_to_hits(graphiti, edges)
         if hits:
             return hits
-    except Exception:  # noqa: BLE001 - search may fail if Kuzu FTS is unavailable
+    except Exception:  # noqa: BLE001 - fall back to the deterministic Cypher walk
         pass
     return await _cypher_fallback(graphiti, query_text, group_id=group_id, limit=num_results)
 
@@ -72,13 +72,13 @@ async def _cypher_fallback(
     limit: int,
 ) -> list[ReviewerHit]:
     cypher = """
-        MATCH (person:Entity)-[:RELATES_TO]->(rel:RelatesToNode_)-[:RELATES_TO]->(work:Entity)
+        MATCH (person:Entity)-[rel:RELATES_TO]->(work:Entity)
         WHERE rel.name IN ['REVIEWED', 'AUTHORED']
           AND ($group_id IS NULL OR rel.group_id = $group_id)
           AND (
-            lower(rel.fact) CONTAINS lower($q)
-            OR lower(work.name) CONTAINS lower($q)
-            OR lower(coalesce(work.summary, '')) CONTAINS lower($q)
+            toLower(rel.fact) CONTAINS toLower($q)
+            OR toLower(work.name) CONTAINS toLower($q)
+            OR toLower(coalesce(work.summary, '')) CONTAINS toLower($q)
           )
         RETURN person.name AS name, person.attributes AS attrs,
                rel.name AS relation, rel.fact AS fact, rel.episodes AS episodes

@@ -130,13 +130,67 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
 }
 
 
+_falkordb_patched = False
+
+
+def _patch_falkordb_empty_query() -> None:
+    """Work around a graphiti-core <=0.29.1 bug on the FalkorDB fulltext builders.
+
+    When an extracted entity's name sanitizes to nothing (all punctuation or
+    stopwords, common in real history: version tags, file paths, single symbols),
+    the builders emit `(@group_id:"x") ()` with empty trailing parens. RediSearch
+    rejects that with a syntax error, aborting `add_episode`. Graphiti already
+    treats an empty string as "skip the fulltext search", so we make the builders
+    return '' when the text portion is empty. Remove this once upstream guards it.
+    """
+    global _falkordb_patched
+    if _falkordb_patched:
+        return
+
+    import re
+
+    from graphiti_core.driver import falkordb_driver
+    from graphiti_core.driver.falkordb.operations import search_ops
+
+    _empty_parens = re.compile(r"\(\s*\)\s*$")
+    _group_filter = re.compile(r"\(@group_id:[^)]+\)")
+
+    def _guard(fn):
+        def wrapper(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            if not isinstance(out, str):
+                return out
+            if _empty_parens.search(out):
+                return ""
+            # RediSearch treats - as a negation operator even inside quotes, so we must
+            # escape hyphens in group_ids with backslashes. We do this on the final query
+            # string to avoid failing upstream group_id string character validation.
+            return _group_filter.sub(lambda m: m.group(0).replace("-", "\\-"), out)
+
+        return wrapper
+
+    search_ops._build_falkor_fulltext_query = _guard(search_ops._build_falkor_fulltext_query)
+    falkordb_driver.FalkorDriver.build_fulltext_query = _guard(
+        falkordb_driver.FalkorDriver.build_fulltext_query
+    )
+    _falkordb_patched = True
+
+
 def make_engram(
-    db_path: str,
     *,
+    host: str | None = None,
+    port: int | None = None,
+    password: str | None = None,
+    database: str | None = None,
     api_key: str | None = None,
     max_coroutines: int | None = None,
 ) -> Graphiti:
-    """Build a Graphiti client on embedded Kuzu, using OpenAI for LLM/embeddings/rerank.
+    """Build a Graphiti client on FalkorDB, using OpenAI for LLM/embeddings/rerank.
+
+    Connection params fall back to settings (FALKORDB_*) when unset, so callers can
+    pass nothing for the default local instance. FalkorDB is a networked, multi-tenant
+    graph server: run one locally (e.g. `docker compose up -d falkordb`) before
+    `relic ingest` or `relic query`.
 
     The OpenAI key is taken from `api_key`, else OPENAI_API_KEY, else settings. A
     clear error is raised if none is found (the OpenAI SDK would otherwise raise a
@@ -147,15 +201,22 @@ def make_engram(
 
     from graphiti_core import Graphiti
     from graphiti_core.cross_encoder import OpenAIRerankerClient
-    from graphiti_core.driver.kuzu_driver import KuzuDriver
+    from graphiti_core.driver.falkordb_driver import FalkorDriver
     from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
     from graphiti_core.llm_client import LLMConfig, OpenAIClient
 
+    _patch_falkordb_empty_query()
+
     key = api_key or os.environ.get("OPENAI_API_KEY")
-    if not key:
+    if not key or host is None or port is None or database is None:
         from relic.config import get_settings
 
-        key = get_settings().openai_api_key
+        settings = get_settings()
+        key = key or settings.openai_api_key
+        host = host if host is not None else settings.falkordb_host
+        port = port if port is not None else settings.falkordb_port
+        password = password if password is not None else settings.falkordb_password
+        database = database if database is not None else settings.falkordb_database
     if not key:
         raise RuntimeError(
             "OPENAI_API_KEY is required for `relic ingest` and `relic query`. "
@@ -167,7 +228,9 @@ def make_engram(
         OpenAIEmbedderConfig(api_key=key, embedding_model="text-embedding-3-small")
     )
     return Graphiti(
-        graph_driver=KuzuDriver(db=db_path),
+        graph_driver=FalkorDriver(
+            host=host, port=port, password=password, database=database
+        ),
         llm_client=OpenAIClient(config=llm_config),
         embedder=embedder,
         cross_encoder=OpenAIRerankerClient(config=LLMConfig(api_key=key, model="gpt-4o-mini")),
@@ -175,19 +238,11 @@ def make_engram(
     )
 
 
-async def ensure_fts_indexes(graphiti: Graphiti) -> bool:
-    """Create Kuzu full-text-search indexes if missing; return True on success.
+async def ensure_indexes(graphiti: Graphiti) -> None:
+    """Build Graphiti's indices and constraints (idempotent).
 
-    Graphiti's `build_indices_and_constraints()` is a no-op on Kuzu, so search
-    would otherwise fail for lack of FTS indexes. This is non-fatal: if it fails,
-    `query` degrades to the deterministic Cypher fallback. CREATE_FTS_INDEX has no
-    IF NOT EXISTS, so an "already exists" error counts as success.
+    Unlike Kuzu, FalkorDB honours `build_indices_and_constraints()`, so search works
+    once it has run. The FalkorDriver also schedules this in its constructor, but we
+    await it explicitly here so indexes exist before the first episode lands.
     """
-    ops = graphiti.driver.graph_ops
-    if ops is None:
-        return False
-    try:
-        await ops.build_indices_and_constraints(graphiti.driver)
-    except Exception as exc:  # noqa: BLE001 - search degrades to the Cypher fallback
-        return "exist" in str(exc).lower()
-    return True
+    await graphiti.build_indices_and_constraints()

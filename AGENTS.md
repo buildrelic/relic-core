@@ -89,18 +89,19 @@ Descriptions:
 
 ## Stack
 
-- **Memory engine: Graphiti** (getzep/graphiti). Read its docs before touching
-  ingestion or retrieval; it moves fast, heed version notes.
-- Graph DB behind Graphiti: embedded **Kuzu** today (`./data/engram.kuzu`, no
-  server to run, see `graph/engram.py`). Move to FalkorDB or Neo4j when
-  multi-tenancy and scale call for it. Use `graphiti.search`, not backend Cypher,
-  so retrieval rides the migration.
-- Graphiti uses **OpenAI** for extraction, embeddings, and reranking:
-  `gpt-4o-mini` and `text-embedding-3-small` (`graph/engram.py`).
-- Supabase (Postgres) is available for app/auth/relational data, not the memory
-  graph itself.
-- MCP server as the primary interface.
-- Everything else is open. Read the relevant docs before writing code.
+- **Memory engine.** Graphiti (getzep/graphiti). Read its docs before touching
+  ingestion or retrieval: it moves fast, heed version notes.
+- **Graph DB.** FalkorDB. For now, while in dev, self-hosted via Docker
+  (`docker compose up -d falkordb`, localhost:6379): a managed/hosted instance
+  is the likely move once we are past dogfooding. Chosen over embedded Kuzu for
+  multi-tenant group_id partitioning (per-repo graphs) and working full-text
+  search. Connection is configured by the `FALKORDB_*` env vars.
+- **Graphiti models.** OpenAI `gpt-4o-mini` for extraction and reranking, and
+  `text-embedding-3-small` for search (`src/relic/graph/engram.py`).
+- **Relational DB.** Supabase (Postgres) is available for app/auth/relational
+  data, not the memory graph itself.
+- **Primary interface.** MCP server.
+- **Other libraries.** Everything else is open. Read the relevant docs before writing code.
 
 ## Maintaining this file
 

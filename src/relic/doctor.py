@@ -69,13 +69,27 @@ class DoctorReport:
         return any(key.name == "openai" and key.configured for key in self.keys)
 
 
+def _falkordb_reachable(host: str, port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def diagnose(settings: Settings) -> DoctorReport:
     """Inspect the setup described by ``settings`` and return a report. Never raises."""
+    host = settings.falkordb_host
+    port = settings.falkordb_port
+    db = settings.falkordb_database
+    path = f"falkordb://{host}:{port}/{db}"
+    exists = _falkordb_reachable(host, port)
     return DoctorReport(
         registry=_registry_status(settings.registry_db_path),
         graph=GraphStatus(
-            path=settings.engram_db_path,
-            exists=Path(settings.engram_db_path).exists(),
+            path=path,
+            exists=exists,
         ),
         keys=[
             KeyStatus(name=name, purpose=purpose, configured=getattr(settings, attr) is not None)

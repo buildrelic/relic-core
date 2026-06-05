@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     linear_api_key: str | None = None
 
     graphiti_llm_provider: str = "openai"
-    engram_db_path: str = "./data/engram.kuzu"
+    falkordb_host: str = "localhost"
+    falkordb_port: int = 6379
+    falkordb_password: str | None = None
+    falkordb_database: str = "relic"
     registry_db_path: str = "./data/registry.db"
     target_repo: str | None = None
     semaphore_limit: int = 10

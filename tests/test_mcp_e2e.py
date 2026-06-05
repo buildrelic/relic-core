@@ -54,8 +54,9 @@ async def test_inmemory_client_full_protocol(
 
 
 async def test_real_serve_subprocess_speaks_mcp(
-    tmp_path, make_skill: Callable[..., SkillIR]
+    tmp_path, make_skill: Callable[..., SkillIR], monkeypatch
 ) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     db = tmp_path / "registry.db"
     conn = connect(db)
     upsert_skill(conn, make_skill("verified-skill", status="verified"))
@@ -63,12 +64,18 @@ async def test_real_serve_subprocess_speaks_mcp(
 
     # No OPENAI_API_KEY: recall is disabled, which exercises serve's stderr diagnostic.
     # If that diagnostic went to stdout it would corrupt the MCP stream and this would fail.
-    # cwd=tmp_path so the subprocess does not read the repo's .env, which may hold a real key.
+    # To prevent any imported AI libraries (like graphiti_core) from searching for and loading the
+    # repo's root .env, we mock out dotenv.load_dotenv before starting the app.
+    cmd = (
+        "import dotenv; dotenv.load_dotenv = lambda *args, **kwargs: False; "
+        "import sys; sys.argv = ['relic', 'serve']; "
+        "from relic.cli import app; app()"
+    )
     env = {**os.environ, "REGISTRY_DB_PATH": str(db)}
     env.pop("OPENAI_API_KEY", None)
 
     transport = StdioTransport(
-        command=sys.executable, args=["-m", "relic", "serve"], env=env, cwd=str(tmp_path)
+        command=sys.executable, args=["-c", cmd], env=env, cwd=str(tmp_path)
     )
     async with Client(transport, init_timeout=30) as client:
         await client.ping()

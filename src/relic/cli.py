@@ -214,7 +214,13 @@ async def _serve() -> None:
     try:
         from relic.graph.engram import make_engram
 
-        engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+        engram = make_engram(
+            host=settings.falkordb_host,
+            port=settings.falkordb_port,
+            password=settings.falkordb_password,
+            database=settings.falkordb_database,
+            api_key=settings.openai_api_key,
+        )
         recall_fn = _make_recall_fn(engram)
     except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
         # stderr, not stdout: stdout is the MCP transport and any bytes on it corrupt the stream
@@ -328,23 +334,35 @@ def deprecate(skill_id: Annotated[str, typer.Argument(help="skill id to deprecat
 @app.command("recall")
 def recall_command(
     query: Annotated[str, typer.Argument(help="what to recall from team memory")],
+    repo: Annotated[
+        str | None, typer.Option(help="owner/name to scope the recall, defaults to TARGET_REPO")
+    ] = None,
     num_results: Annotated[int, typer.Option(help="max facts to return")] = 10,
 ) -> None:
     """Recall facts from the memory graph, with their sources."""
     import asyncio
 
-    asyncio.run(_recall(query, num_results))
+    asyncio.run(_recall(query, repo, num_results))
 
 
-async def _recall(query: str, num_results: int) -> None:
+async def _recall(query: str, repo: str | None, num_results: int) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.recall import format_answer, recall
+    from relic.ingest.mappers import repo_group_id
 
     settings = get_settings()
-    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    repo = repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
+    engram = make_engram(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=group_id or settings.falkordb_database,
+        api_key=settings.openai_api_key,
+    )
     try:
-        answer = await recall(engram, query, num_results=num_results)
+        answer = await recall(engram, query, group_id=group_id, num_results=num_results)
     finally:
         await engram.close()
     print(format_answer(answer))
@@ -368,14 +386,23 @@ async def _eval(path: Path, num_results: int) -> None:
     from relic.graph.engram import make_engram
     from relic.graph.recall import recall
     from relic.scorecard import load_gold, score_case, summarize
+    from relic.ingest.mappers import repo_group_id
 
     gold = load_gold(path)
     settings = get_settings()
-    engram = make_engram(settings.engram_db_path, api_key=settings.openai_api_key)
+    repo = gold.repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
+    engram = make_engram(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=group_id or settings.falkordb_database,
+        api_key=settings.openai_api_key,
+    )
     results = []
     try:
         for case in gold.cases:
-            answer = await recall(engram, case.question, num_results=num_results)
+            answer = await recall(engram, case.question, group_id=group_id, num_results=num_results)
             results.append(score_case(case, gold.repo, answer))
     finally:
         await engram.close()

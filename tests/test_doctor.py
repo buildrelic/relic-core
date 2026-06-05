@@ -44,13 +44,16 @@ def clean_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
     base: dict[str, Any] = {
         "registry_db_path": str(tmp_path / "registry.db"),
-        "engram_db_path": str(tmp_path / "engram.kuzu"),
+        "falkordb_host": "localhost",
+        "falkordb_port": 6379,
+        "falkordb_database": "relic",
     }
     base.update(overrides)
     return Settings(**base)
 
 
-def test_diagnose_empty_setup(tmp_path: Path, clean_env: None) -> None:
+def test_diagnose_empty_setup(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
     report = diagnose(_settings(tmp_path))
     assert report.registry.exists is False
     assert report.registry.total == 0
@@ -96,21 +99,22 @@ def test_diagnose_detects_configured_keys(tmp_path: Path, clean_env: None) -> No
     assert report.openai_configured is True
 
 
-def test_graph_present_with_openai_reads_ready(tmp_path: Path, clean_env: None) -> None:
-    (tmp_path / "engram.kuzu").write_text("", encoding="utf-8")  # stand in for a built store
+def test_graph_present_with_openai_reads_ready(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
     report = diagnose(_settings(tmp_path, openai_api_key="sk-test"))
     assert report.graph.exists is True
     assert "recall and ingest ready" in format_report(report)
 
 
-def test_graph_present_without_openai_flags_missing_key(tmp_path: Path, clean_env: None) -> None:
-    (tmp_path / "engram.kuzu").write_text("", encoding="utf-8")
+def test_graph_present_without_openai_flags_missing_key(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
     report = diagnose(_settings(tmp_path))
     assert report.graph.exists is True
     assert "OPENAI_API_KEY is missing" in format_report(report)
 
 
-def test_format_report_empty_setup_is_readable(tmp_path: Path, clean_env: None) -> None:
+def test_format_report_empty_setup_is_readable(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
     text = format_report(diagnose(_settings(tmp_path)))
     assert "relic doctor" in text
     assert "not created yet" in text  # registry
@@ -124,6 +128,7 @@ def test_doctor_command_runs(
 ) -> None:
     settings = _settings(tmp_path)
     monkeypatch.setattr("relic.config.get_settings", lambda: settings)
+    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "registry:" in result.output

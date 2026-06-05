@@ -153,11 +153,19 @@ def _patch_falkordb_empty_query() -> None:
     from graphiti_core.driver.falkordb.operations import search_ops
 
     _empty_parens = re.compile(r"\(\s*\)\s*$")
+    _group_filter = re.compile(r"\(@group_id:[^)]+\)")
 
     def _guard(fn):
         def wrapper(*args, **kwargs):
             out = fn(*args, **kwargs)
-            return "" if isinstance(out, str) and _empty_parens.search(out) else out
+            if not isinstance(out, str):
+                return out
+            if _empty_parens.search(out):
+                return ""
+            # RediSearch treats - as a negation operator even inside quotes, so we must
+            # escape hyphens in group_ids with backslashes. We do this on the final query
+            # string to avoid failing upstream group_id string character validation.
+            return _group_filter.sub(lambda m: m.group(0).replace("-", "\\-"), out)
 
         return wrapper
 

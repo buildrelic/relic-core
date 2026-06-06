@@ -370,9 +370,9 @@ async def _recall(query: str, repo: str | None, num_results: int) -> None:
 
 @app.command("eval")
 def eval_recall(
-    path: Annotated[
-        Path, typer.Option(help="scorecard gold set JSON")
-    ] = Path("eval/github_recall.json"),
+    path: Annotated[Path, typer.Option(help="scorecard gold set JSON")] = Path(
+        "eval/github_recall.json"
+    ),
     num_results: Annotated[int, typer.Option(help="facts per question")] = 10,
 ) -> None:
     """Score recall against a gold set: does it cite the PR that holds each answer?"""
@@ -385,8 +385,8 @@ async def _eval(path: Path, num_results: int) -> None:
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.recall import recall
-    from relic.scorecard import load_gold, score_case, summarize
     from relic.ingest.mappers import repo_group_id
+    from relic.scorecard import load_gold, score_case, summarize
 
     gold = load_gold(path)
     settings = get_settings()

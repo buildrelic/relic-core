@@ -27,4 +27,5 @@ def test_empty_text_yields_no_query_normal_text_survives() -> None:
 
     # Group IDs containing hyphens must have the hyphens escaped to avoid RediSearch syntax errors.
     group_with_hyphen = ["buildrelic__relic-core"]
-    assert build("auth login", group_with_hyphen) == '(@group_id:"buildrelic__relic\\-core") (auth | login)'
+    expected = '(@group_id:"buildrelic__relic\\-core") (auth | login)'
+    assert build("auth login", group_with_hyphen) == expected

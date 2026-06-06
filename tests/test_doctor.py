@@ -52,7 +52,9 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(**base)
 
 
-def test_diagnose_empty_setup(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_diagnose_empty_setup(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
     report = diagnose(_settings(tmp_path))
     assert report.registry.exists is False
@@ -99,21 +101,27 @@ def test_diagnose_detects_configured_keys(tmp_path: Path, clean_env: None) -> No
     assert report.openai_configured is True
 
 
-def test_graph_present_with_openai_reads_ready(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_graph_present_with_openai_reads_ready(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
     report = diagnose(_settings(tmp_path, openai_api_key="sk-test"))
     assert report.graph.exists is True
     assert "recall and ingest ready" in format_report(report)
 
 
-def test_graph_present_without_openai_flags_missing_key(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_graph_present_without_openai_flags_missing_key(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
     report = diagnose(_settings(tmp_path))
     assert report.graph.exists is True
     assert "OPENAI_API_KEY is missing" in format_report(report)
 
 
-def test_format_report_empty_setup_is_readable(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_format_report_empty_setup_is_readable(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
     text = format_report(diagnose(_settings(tmp_path)))
     assert "relic doctor" in text

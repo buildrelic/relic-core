@@ -46,6 +46,7 @@ reranking (`gpt-4o-mini`, `text-embedding-3-small`).
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
+- [just](https://github.com/casey/just) (the task runner)
 - Docker (runs the FalkorDB graph backend)
 - `gh` CLI logged in, or a `GITHUB_TOKEN` (to read history)
 - An OpenAI API key (Graphiti uses it for extraction, embeddings, and recall)
@@ -55,15 +56,21 @@ Run `relic doctor` to see what is configured.
 
 ## Setup
 
+From a fresh clone:
+
 ```bash
-uv python install 3.12
-uv sync --dev
-cp .env.example .env   # then fill in keys
-docker compose up -d falkordb   # graph backend on localhost:6379, UI on :3000
+just setup
 ```
 
-The graph lives in FalkorDB, not a local file. Start it before `relic ingest` or
-`relic query`. Connection settings are the `FALKORDB_*` vars in `.env`.
+`just setup` installs Python 3.12 with uv, syncs dependencies, creates `.env`,
+starts the FalkorDB graph backend and waits for it to report healthy, installs the
+pre-commit hook, then runs `relic doctor`. It is safe to re-run. Fill your keys
+into `.env` and run `just doctor` to confirm.
+
+The graph lives in FalkorDB, not a local file (UI on http://localhost:3000). Start
+it before `relic ingest` or `relic query`: `just up` and `just down` control it.
+Connection settings are the `FALKORDB_*` vars in `.env`. Run `just` to list every
+recipe.
 
 ## Usage
 
@@ -168,7 +175,9 @@ Point any MCP client at it over stdio. For Claude Code, add it to `.mcp.json`:
 ## Development
 
 ```bash
-uv run ruff check
-uv run pyright
-uv run pytest
+just check   # lint, types, and tests, what CI runs
+just fmt     # format with ruff
 ```
+
+`just` with no arguments lists every recipe. See
+[`docs/development.md`](docs/development.md) for the full setup.

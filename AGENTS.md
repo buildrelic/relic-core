@@ -73,19 +73,45 @@ Write like a sharp teammate dumping context, not a brand writing copy.
 
 ## Git, commits, PRs
 
-The skimmable rules govern the **title** (commit subject, PR title). The
-**description** is where the detail goes.
+We track work in Linear. Branches, commits, and PRs all tie back to the Linear
+issue they belong to.
+
+### Branches
+
+Work on an issue from the branch Linear generates for it. Copy the branch name
+off the issue (Linear's "Copy git branch name") and use it as is, for example
+`paris/rel-10-ingest-run-observability`. The name carries the owner, the issue
+ID, and a slug, so the branch maps back to the issue on sight.
+
+### Commits
+
+The skimmable rules govern the **title** (commit subject). The **description** is
+where the detail goes.
 
 Titles:
 - Short and skimmable.
 - Read like a person dashed it off, not like an AI wrote it.
 - No `feat:` / `fix:` / `chore:` prefixes unless this repo adopts them. No emoji.
+- When the commit relates to a Linear issue, append `[part of <issue-ID>]`, for
+  example `tighten ingest retry backoff [part of REL-10]`. This links the commit
+  to the issue in Linear.
 
 Descriptions:
 - This is where detail lives: what changed and why, context, tradeoffs, anything
   the next person needs. Length is fine, structure (paragraphs, bullets) is fine.
 - Write the reasoning the diff cannot show. The title says what at a glance; the
   body says why and how.
+
+### Pull requests
+
+The title follows the same rules as a commit title. The body is a walkthrough,
+not a one-liner. Cover three things:
+- **What changed.** Walk through every change, grouped so a reviewer can follow
+  it.
+- **Consequences.** What each change affects: behavior, other components,
+  migrations, anything downstream.
+- **How to test it.** The exact steps to verify it, commands and expected
+  results included.
 
 ## Stack
 

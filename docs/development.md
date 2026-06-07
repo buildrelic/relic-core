@@ -63,14 +63,19 @@ The house voice for all prose (docs, UI, errors, commit messages) is in
 dashes, specifics over adjectives, real names only, lowercase product terms
 (memory, capture, recall).
 
-## Commits and PRs
+## Branches, commits, and PRs
 
-From [`AGENTS.md`](../AGENTS.md):
+We track work in Linear. From [`AGENTS.md`](../AGENTS.md):
 
-- Titles are short and skimmable, read like a person dashed them off, no
-  `feat:`/`fix:` prefixes, no emoji.
-- Descriptions carry the detail: what changed and why, context, tradeoffs. Write
-  the reasoning the diff cannot show.
+- **Branches.** Work on an issue from the branch Linear generates for it, used as
+  is, for example `paris/rel-10-ingest-run-observability`.
+- **Commit titles.** Short and skimmable, read like a person dashed them off, no
+  `feat:`/`fix:` prefixes, no emoji. When the commit relates to a Linear issue,
+  append `[part of <issue-ID>]`, for example `... [part of REL-10]`.
+- **Commit descriptions.** Carry the detail: what changed and why, context,
+  tradeoffs. Write the reasoning the diff cannot show.
+- **PR bodies.** A walkthrough, not a one-liner: every change, its consequences,
+  and how to test it.
 
 ## Tests
 

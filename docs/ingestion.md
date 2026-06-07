@@ -36,7 +36,7 @@ sequenceDiagram
         G->>OAI: extract entities + edges, embed
         G->>DB: write to the repo's group_id graph
     end
-    CLI-->>CLI: print "ingested N episodes"
+    CLI-->>CLI: log "ingested N episodes (M skipped, K failed)"
 ```
 
 ## Step 1: fetch from GitHub
@@ -71,7 +71,7 @@ raw store.
 guarded behind `LINEAR_API_KEY`. `fetch_issues` paginates all issues (identifier,
 title, url, state, assignee, labels, created and completed timestamps) and maps
 each to the same `IssueRec` used for GitHub issues, with `source="linear"`. When
-the key is unset, `ingest` prints that Linear was skipped and moves on.
+the key is unset, `ingest` logs that Linear was skipped and moves on.
 
 ## Step 3: keep a raw copy
 
@@ -113,11 +113,19 @@ The episode JSON keys mirror the flat `*Node` attributes (see
   episode's `group_id`. Graphiti routes the write to the FalkorDB graph named by
   that `group_id`, partitioning the graph per repo (see
   [memory-and-recall.md](memory-and-recall.md)).
-- A `rich` progress bar tracks the loop.
+- The loop is **resilient**: one episode that fails extraction (a rate limit, a
+  malformed entity) is caught, counted, and logged, and the run carries on. A
+  single bad PR never aborts the whole ingest.
+- It returns `LoadStats`: `loaded`, `skipped`, `failed`, the list of failures, and
+  the wall-clock duration. The CLI logs a one-line summary from it.
 
 The engram client for ingestion is built by `make_engram` with the default
 `FALKORDB_DATABASE` and `max_coroutines=SEMAPHORE_LIMIT`. It is always closed in a
 `finally` so the connection does not leak.
+
+Before any of this, `ingest` runs a fast TCP probe (`falkordb_reachable`). If the
+graph is down it stops with one line (`FalkorDB not reachable at ...`) and a
+non-zero exit, before spending a single GitHub or OpenAI call.
 
 ## Cost control
 
@@ -132,12 +140,47 @@ API already gives you.
 - **Clipped bodies.** 4000-character cap per description.
 - **`gpt-4o-mini`.** The cheap model does extraction and reranking.
 
-## Re-ingesting
+## Resumability and re-ingesting
 
-Re-running `ingest` is additive: Graphiti generates episode uuids, so the same PR
-ingested twice lands as two episodes. To reload a repo clean, clear that repo's
-graph in FalkorDB first (the per-`group_id` graph). The raw store overwrites by
-id, so it stays a single current copy per item.
+Graphiti mints a fresh uuid per `add_episode`, so the same PR added twice would
+land as two episodes. A checkpoint stops that.
+
+[`checkpoint.py`](../src/relic/ingest/checkpoint.py) keeps a per-repo ledger of the
+episodes that have landed, at `./data/ingest/<group_id>.log`, one episode name per
+line. The name (`PR owner/name#42`, `Issue REL-10`) is deterministic and unique
+per item. `load_episodes` skips any episode already in the ledger and appends each
+new one as it lands, flushing per line.
+
+Two things fall out of this:
+
+- **Resume.** A run cut short by a rate limit or a crash picks up where it left
+  off. The episodes already landed are skipped, not re-paid for and not
+  duplicated. The summary reports the skipped count.
+- **Re-run is cheap and idempotent.** Re-running `ingest` on the same repo loads
+  only what is new since last time.
+
+To reload a repo from scratch, pass `--fresh`: it clears the checkpoint so every
+episode is added again. Clearing the checkpoint and clearing the repo's graph go
+together. Drop the per-`group_id` graph in FalkorDB first (see the `just
+reset-graph` note), or you will get duplicates. The raw store overwrites by id, so
+it stays a single current copy per item regardless.
+
+## Observability
+
+Logs are diagnostics, so they go to **stderr**. stdout stays clean for piping. The
+result of `ingest` is the populated graph, not its console output.
+
+- **Counts and timing.** `ingest` logs the fetch counts and how long the fetch
+  took, whether Linear ran, and a final summary: episodes loaded, skipped, and
+  failed, with the wall-clock duration.
+- **Failures.** Each failed episode logs one `WARNING` line with its name and the
+  error. A run that loads nothing but hits failures exits non-zero. A whole-run
+  failure (no token, graph down, bad key) logs one `ERROR` line, not a traceback.
+- **Verbose.** `relic --verbose ingest ...` (or `-v`) drops the level to `DEBUG`:
+  per-episode tracebacks, the raw-payload count, and any background-task errors.
+- **Quiet by default.** Logging attaches to the `relic` logger only, so
+  graphiti/httpx/openai `INFO` chatter stays suppressed unless you ask for it
+  ([`obs.py`](../src/relic/obs.py)).
 
 ## What is verified
 

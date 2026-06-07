@@ -7,6 +7,12 @@ command. The CLI prints `--help` when given no arguments.
 Commands group into the capture and memory side, the skills side, diagnostics, and
 two stubs that land in later phases.
 
+## Global options
+
+- `--verbose` / `-v`: drop logging to debug level. Goes before the command:
+  `relic --verbose ingest --repo owner/name`. Logs go to stderr, results to
+  stdout, so `relic recall "q" > out.txt` keeps logs off the file.
+
 ## Capture and memory
 
 ### relic ingest
@@ -14,17 +20,25 @@ two stubs that land in later phases.
 Pull merged PRs, reviews, and issues into the graph.
 
 ```
-relic ingest --repo OWNER/NAME [--limit N]
+relic ingest --repo OWNER/NAME [--limit N] [--fresh]
 ```
 
 - `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
 - `--limit` (optional): cap merged PRs and issues pulled, most recent first.
+- `--fresh` (optional): ignore the checkpoint and reload every episode. Pair it
+  with clearing the repo's graph, or you get duplicates.
 
 Needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB. Pulls Linear too
-when `LINEAR_API_KEY` is set. See [ingestion.md](ingestion.md).
+when `LINEAR_API_KEY` is set. Resumable: a re-run skips episodes already landed
+(the per-repo checkpoint under `./data/ingest/`). See [ingestion.md](ingestion.md).
+
+Exit codes: `0` on success (including a no-op re-run where everything was already
+loaded), `2` for a malformed `--repo`, `1` when the graph is unreachable or the run
+loaded nothing because every episode failed.
 
 ```bash
 uv run relic ingest --repo astral-sh/uv --limit 20
+uv run relic --verbose ingest --repo astral-sh/uv   # debug logging
 ```
 
 ### relic recall
@@ -179,7 +193,7 @@ relic compile --skill ARCHETYPE
 
 | Command | Required args | Key flags | Needs graph |
 |---|---|---|---|
-| `ingest` | `--repo` | `--limit` | yes |
+| `ingest` | `--repo` | `--limit`, `--fresh` | yes |
 | `recall` | `query` | `--repo`, `--num-results` | yes |
 | `query` | `text` | `--repo` | yes |
 | `eval` | none | `--path`, `--num-results` | yes |

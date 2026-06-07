@@ -228,14 +228,28 @@ def make_engram(
         OpenAIEmbedderConfig(api_key=key, embedding_model="text-embedding-3-small")
     )
     return Graphiti(
-        graph_driver=FalkorDriver(
-            host=host, port=port, password=password, database=database
-        ),
+        graph_driver=FalkorDriver(host=host, port=port, password=password, database=database),
         llm_client=OpenAIClient(config=llm_config),
         embedder=embedder,
         cross_encoder=OpenAIRerankerClient(config=LLMConfig(api_key=key, model="gpt-4o-mini")),
         max_coroutines=max_coroutines,
     )
+
+
+def falkordb_reachable(host: str, port: int, *, timeout: float = 0.5) -> bool:
+    """True if a TCP connection to ``host:port`` opens within ``timeout`` seconds.
+
+    A cheap liveness probe, no graph query. Callers use it to fail fast with a
+    clear message when FalkorDB is down, rather than letting the driver raise deep
+    in a constructor-scheduled background task.
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 async def ensure_indexes(graphiti: Graphiti) -> None:

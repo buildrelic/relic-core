@@ -31,49 +31,112 @@ def _todo(phase: str) -> None:
     raise typer.Exit(code=1)
 
 
+@app.callback()
+def _main(
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="debug-level logging to stderr")
+    ] = False,
+) -> None:
+    """Set up logging before any command runs. Logs go to stderr, results to stdout."""
+    from relic.obs import configure_logging
+
+    configure_logging(verbose=verbose)
+
+
 @app.command()
 def ingest(
     repo: Annotated[str, typer.Option(help="owner/name to ingest")],
     limit: Annotated[
         int | None, typer.Option(help="cap merged PRs and issues pulled, most recent first")
     ] = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
+    ] = False,
 ) -> None:
     """Pull merged PRs, reviews, and issues into the graph (Phase 2)."""
     import asyncio
 
-    asyncio.run(_ingest(repo, limit))
+    from relic.obs import get_logger
+
+    try:
+        asyncio.run(_ingest(repo, limit, fresh=fresh))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - report infra failures concisely, not as a traceback
+        # A missing token, an unreachable graph, a bad key: log one line, keep the
+        # traceback for `--verbose`. Episodes already loaded stay checkpointed.
+        log = get_logger("ingest")
+        log.error("ingest failed: %s", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+        log.debug("ingest traceback", exc_info=exc)
+        raise typer.Exit(code=1) from exc
 
 
 def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
 
 
-async def _ingest(repo: str, limit: int | None = None) -> None:
+async def _ingest(repo: str, limit: int | None = None, *, fresh: bool = False) -> None:
+    import asyncio
+    import time
+
     from relic.config import get_settings
-    from relic.graph.engram import make_engram
+    from relic.graph.engram import falkordb_reachable, make_engram
     from relic.graph.load import load_episodes
+    from relic.ingest.checkpoint import checkpoint_path, clear, load_done, record_done
     from relic.ingest.github import fetch_repo, make_github, resolve_github_token
     from relic.ingest.linear import fetch_issues, linear_enabled
     from relic.ingest.mappers import RepoBundle, issue_to_episode, pr_to_episode, repo_group_id
     from relic.ingest.raw_store import dump_raw
+    from relic.obs import get_logger
+
+    log = get_logger("ingest")
+
+    # The FalkorDB driver schedules an index build in its constructor as a detached
+    # task. If the graph is unhealthy it fails there too, and asyncio dumps a full
+    # traceback to stderr. Route those orphaned-task errors to debug: the run's own
+    # error reporting already covers the failure on the foreground path.
+    def _on_loop_error(_loop: object, context: dict) -> None:
+        log.debug(
+            "background task error: %s", context.get("message"), exc_info=context.get("exception")
+        )
+
+    asyncio.get_running_loop().set_exception_handler(_on_loop_error)
 
     if "/" not in repo:
-        console.print("[red]--repo must be owner/name[/]")
+        err_console.print("[red]--repo must be owner/name[/]")
         raise typer.Exit(code=2)
     settings = get_settings()
     owner, name = repo.split("/", 1)
 
+    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    fetch_start = time.monotonic()
     token = resolve_github_token(settings)
     async with make_github(token) as gh:
         bundle = await fetch_repo(
             gh, owner, name, concurrency=settings.semaphore_limit, limit=limit
         )
-    console.print(f"fetched {len(bundle.pull_requests)} merged PRs, {len(bundle.issues)} issues")
+    log.info(
+        "fetched %d merged PRs, %d issues from %s in %.1fs",
+        len(bundle.pull_requests),
+        len(bundle.issues),
+        repo,
+        time.monotonic() - fetch_start,
+    )
 
+    raw_count = 0
     for pr in bundle.pull_requests:
         dump_raw(pr.raw, source="github", ident=f"pr-{pr.number}")
+        raw_count += 1
     for issue in bundle.issues:
         dump_raw(issue.raw, source="github", ident=_safe_ident(issue.identifier))
+        raw_count += 1
 
     episodes = [pr_to_episode(pr, bundle) for pr in bundle.pull_requests]
     episodes += [issue_to_episode(issue, bundle) for issue in bundle.issues]
@@ -84,14 +147,22 @@ async def _ingest(repo: str, limit: int | None = None) -> None:
         linear_repo = RepoBundle(full_name="linear", url="https://linear.app", default_branch="")
         for issue in linear_issues:
             dump_raw(issue.raw, source="linear", ident=_safe_ident(issue.identifier))
+            raw_count += 1
         episodes += [issue_to_episode(issue, linear_repo) for issue in linear_issues]
-        console.print(f"fetched {len(linear_issues)} Linear issues")
+        log.info("fetched %d Linear issues", len(linear_issues))
     else:
-        console.print("[dim]Linear skipped (LINEAR_API_KEY not set)[/]")
+        log.info("Linear skipped (LINEAR_API_KEY not set)")
+
+    log.debug("wrote %d raw payloads under data/raw", raw_count)
 
     if not episodes:
-        console.print("[yellow]nothing to ingest[/]")
+        log.warning("nothing to ingest")
         return
+
+    ledger = checkpoint_path(group_id)
+    if fresh:
+        clear(ledger)
+    done = load_done(ledger)
 
     engram = make_engram(
         host=settings.falkordb_host,
@@ -102,10 +173,26 @@ async def _ingest(repo: str, limit: int | None = None) -> None:
         max_coroutines=settings.semaphore_limit,
     )
     try:
-        stats = await load_episodes(engram, episodes, group_id=group_id)
+        stats = await load_episodes(
+            engram,
+            episodes,
+            group_id=group_id,
+            skip=done,
+            on_loaded=lambda name: record_done(ledger, name),
+        )
     finally:
         await engram.close()
-    console.print(f"[green]ingested[/] {stats.episodes} episodes from [bold]{repo}[/]")
+
+    summary = (
+        f"ingested {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
+        f"({stats.skipped} skipped, {stats.failed} failed)"
+    )
+    if stats.failed:
+        log.warning(summary)
+    else:
+        log.info(summary)
+    if stats.loaded == 0 and stats.failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -204,9 +291,11 @@ def _make_recall_fn(engram: "Graphiti") -> "Callable[[str, int], Awaitable[str]]
 
 async def _serve() -> None:
     from relic.config import get_settings
+    from relic.obs import get_logger
     from relic.registry.store import connect
     from relic.serve.mcp_server import build_server
 
+    log = get_logger("serve")
     settings = get_settings()
     conn = connect(settings.registry_db_path)
     engram = None
@@ -223,8 +312,9 @@ async def _serve() -> None:
         )
         recall_fn = _make_recall_fn(engram)
     except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
-        # stderr, not stdout: stdout is the MCP transport and any bytes on it corrupt the stream
-        err_console.print(f"[yellow]recall disabled: {exc}[/]")
+        # The logger writes to stderr: stdout is the MCP transport and any bytes on it
+        # would corrupt the stream.
+        log.warning("recall disabled: %s", exc)
 
     server = build_server(conn, recall_fn=recall_fn)
     try:

@@ -77,16 +77,23 @@ team's verified skills and its memory to any MCP client over stdio.
 
 The capture pipeline. Pulls engineering history into the graph.
 
-- **Invocation.** `relic ingest --repo owner/name [--limit N]`.
+- **Invocation.** `relic ingest --repo owner/name [--limit N] [--fresh]`.
 - **Reads.** GitHub REST (merged PRs with files and reviews, plus non-PR issues);
-  Linear GraphQL when `LINEAR_API_KEY` is set.
+  Linear GraphQL when `LINEAR_API_KEY` is set; the per-repo checkpoint ledger.
 - **Writes.** The FalkorDB graph (one episode per PR and per issue, landed under
-  the repo's `group_id`); the raw store at `./data/raw/<source>/<id>.json`.
+  the repo's `group_id`); the raw store at `./data/raw/<source>/<id>.json`; the
+  checkpoint at `./data/ingest/<group_id>.log`.
 - **Depends on.** A GitHub token (from `GITHUB_TOKEN` or `gh auth token`),
   `OPENAI_API_KEY` (Graphiti extraction and embeddings), and FalkorDB.
-- **Flow.** Fetch concurrently (bounded by `SEMAPHORE_LIMIT`), dump raw, map to
-  deterministic episodes, then add episodes to Graphiti sequentially so later
-  episodes can resolve entities from earlier ones.
+- **Flow.** Probe the graph, fetch concurrently (bounded by `SEMAPHORE_LIMIT`),
+  dump raw, map to deterministic episodes, then add episodes to Graphiti
+  sequentially so later episodes can resolve entities from earlier ones.
+- **Resumable.** The checkpoint records each episode that lands, so a re-run skips
+  what already loaded and a failed run resumes where it stopped. `--fresh` clears
+  it and reloads everything.
+- **Observable.** Logs the fetch counts and timing, per-episode failures, and a
+  final loaded/skipped/failed summary, all to stderr. `relic --verbose ingest`
+  adds debug detail.
 - **`--limit`.** Caps PRs and issues pulled, most recent first, to bound API and
   per-episode LLM cost on a large repo.
 

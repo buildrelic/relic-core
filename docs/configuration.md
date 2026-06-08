@@ -49,7 +49,7 @@ half-filled `.env` fails clean rather than sending a garbage credential.
 
 ## The stores
 
-Three stores, all under `./data/` by default (gitignored).
+Four stores, all under `./data/` by default (gitignored).
 
 - **The graph (memory).** FalkorDB, addressed by `FALKORDB_*`. Not a local file:
   it is a networked service. Per-repo graphs are named by `group_id`; the
@@ -59,6 +59,17 @@ Three stores, all under `./data/` by default (gitignored).
   See [skills.md](skills.md).
 - **The raw store.** Plain JSON under `./data/raw/<source>/<id>.json`, written by
   `ingest`. See [ingestion.md](ingestion.md).
+- **The ingest checkpoint.** A per-repo ledger at `./data/ingest/<group_id>.log`,
+  one landed episode name per line. Lets a re-run skip what already loaded and
+  resume a failed run. `ingest --fresh` clears it. See [ingestion.md](ingestion.md).
+
+## Logging
+
+Logs are diagnostics and go to stderr; a command's result goes to stdout. The
+default level is `INFO` (phase counts, the run summary). `relic --verbose` (or
+`-v`, before the command) drops it to `DEBUG`. Logging attaches to the `relic`
+logger only, so third-party `INFO` chatter stays suppressed
+([`obs.py`](../src/relic/obs.py)).
 
 ## What keys unlock
 

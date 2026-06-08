@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from relic.config import Settings
+from relic.graph.engram import falkordb_reachable as _falkordb_reachable
 
 # (display name, Settings attribute, what the key unlocks)
 _KEYS: list[tuple[str, str, str]] = [
@@ -67,15 +68,6 @@ class DoctorReport:
     @property
     def openai_configured(self) -> bool:
         return any(key.name == "openai" and key.configured for key in self.keys)
-
-
-def _falkordb_reachable(host: str, port: int) -> bool:
-    import socket
-    try:
-        with socket.create_connection((host, port), timeout=0.5):
-            return True
-    except OSError:
-        return False
 
 
 def diagnose(settings: Settings) -> DoctorReport:

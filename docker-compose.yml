@@ -8,6 +8,14 @@ services:
     volumes:
       - falkordb-data:/data
     restart: unless-stopped
+    # FalkorDB speaks the Redis protocol, so a PING is enough to call it ready.
+    # `docker compose up -d --wait` blocks on this before returning.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 volumes:
   falkordb-data:

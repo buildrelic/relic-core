@@ -18,9 +18,8 @@ venv/
 dist/
 build/
 
-# Relic data stores (Kuzu graph, SQLite registry, raw artifacts)
+# Relic data stores (SQLite registry, raw artifacts; the graph lives in FalkorDB)
 data/
-*.kuzu
 *.db
 
 # Node

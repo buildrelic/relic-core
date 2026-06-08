@@ -93,9 +93,9 @@ Descriptions:
   ingestion or retrieval: it moves fast, heed version notes.
 - **Graph DB.** FalkorDB. For now, while in dev, self-hosted via Docker
   (`docker compose up -d falkordb`, localhost:6379): a managed/hosted instance
-  is the likely move once we are past dogfooding. Chosen over embedded Kuzu for
-  multi-tenant group_id partitioning (per-repo graphs) and working full-text
-  search. Connection is configured by the `FALKORDB_*` env vars.
+  is the likely move once we are past dogfooding. Chosen for its multi-tenant
+  group_id partitioning (per-repo graphs) and working full-text search.
+  Connection is configured by the `FALKORDB_*` env vars.
 - **Graphiti models.** OpenAI `gpt-4o-mini` for extraction and reranking, and
   `text-embedding-3-small` for search (`src/relic/graph/engram.py`).
 - **Relational DB.** Supabase (Postgres) is available for app/auth/relational

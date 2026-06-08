@@ -241,8 +241,8 @@ def make_engram(
 async def ensure_indexes(graphiti: Graphiti) -> None:
     """Build Graphiti's indices and constraints (idempotent).
 
-    Unlike Kuzu, FalkorDB honours `build_indices_and_constraints()`, so search works
-    once it has run. The FalkorDriver also schedules this in its constructor, but we
-    await it explicitly here so indexes exist before the first episode lands.
+    FalkorDB honours `build_indices_and_constraints()`, so search works once it has
+    run. The FalkorDriver also schedules this in its constructor, but we await it
+    explicitly here so indexes exist before the first episode lands.
     """
     await graphiti.build_indices_and_constraints()

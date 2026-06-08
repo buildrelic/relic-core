@@ -2,9 +2,8 @@
 
 A generalization of ``graph.queries.reviewers_of``: instead of filtering to
 people, recall returns the relevant facts (edges) for a query, each carrying the
-source episodes it came from. Built on ``graphiti.search`` (the portable API) so
-it rides the Kuzu to FalkorDB migration without changes. Provenance resolution
-is best-effort and never raises.
+source episodes it came from. Built on ``graphiti.search`` (the portable,
+backend-agnostic API). Provenance resolution is best-effort and never raises.
 """
 
 from __future__ import annotations
@@ -57,7 +56,7 @@ async def recall(
     group_ids = [group_id] if group_id else None
     try:
         edges = await graphiti.search(query, group_ids=group_ids, num_results=num_results)
-    except Exception:  # noqa: BLE001 - search may fail if Kuzu FTS is unavailable
+    except Exception:  # noqa: BLE001 - search may fail if the FalkorDB backend is unavailable
         return RecallAnswer(query=query)
 
     facts: list[RecalledFact] = []

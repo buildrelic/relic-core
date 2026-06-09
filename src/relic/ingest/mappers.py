@@ -203,8 +203,14 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
         },
         "reviews": [
             {
-                "login": r.login,
-                "profile_url": r.profile_url,
+                # Same treatment as the PR author: a ghost/deleted reviewer gets
+                # reviewer: null, not an identity-less Person. The review itself
+                # (state, comment) still carries signal, so it is kept.
+                "reviewer": (
+                    {"login": r.login, "profile_url": r.profile_url}
+                    if r.login or r.profile_url
+                    else None
+                ),
                 "state": r.state,
                 "submitted_at": r.submitted_at,
                 "url": r.url,

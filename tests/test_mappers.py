@@ -62,6 +62,7 @@ def test_pr_to_episode_shape_and_group() -> None:
     body = json.loads(spec.body)
     assert body["pull_request"]["number"] == 4
     assert body["pull_request"]["author"]["login"] == "paris-phan"
+    assert body["reviews"][0]["reviewer"]["login"] == "paris-phan"
     assert body["reviews"][0]["state"] == "COMMENTED"
     assert body["reviews"][0]["comment"] == "please add a regression test"
     assert body["requested_reviewers"] == ["abhinavp5"]
@@ -154,6 +155,27 @@ def test_ghost_author_is_omitted_not_emitted_empty() -> None:
     pr = _pr(author_login=None, author_url=None)
     body = json.loads(pr_to_episode(pr, _repo()).body)
     assert body["pull_request"]["author"] is None
+
+
+def test_ghost_reviewer_is_omitted_not_emitted_empty() -> None:
+    # Same class as the ghost author: a review by a deleted account keeps its
+    # state/comment signal but emits reviewer: null, not an identity-less Person.
+    pr = _pr(
+        reviews=[
+            ReviewRec(
+                login=None,
+                profile_url=None,
+                state="APPROVED",
+                submitted_at="2025-01-01T12:00:00Z",
+                url="https://github.com/paris-phan/course-scheduler/pull/1#r1",
+                body="lgtm",
+            )
+        ]
+    )
+    review = json.loads(pr_to_episode(pr, _repo()).body)["reviews"][0]
+    assert review["reviewer"] is None
+    assert review["state"] == "APPROVED"
+    assert review["comment"] == "lgtm"
 
 
 def test_coauthored_by_trailers_become_co_authors() -> None:

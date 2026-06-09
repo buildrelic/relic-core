@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 from typing import TYPE_CHECKING, Any
 
@@ -150,6 +151,25 @@ async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]
     )
 
 
+_PARENT_URL_RE = re.compile(r"/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)")
+
+
+def _parent_identifier(parent_issue_url: str | None) -> str | None:
+    """Turn a GitHub ``parent_issue_url`` into our ``owner/repo#number`` identifier.
+
+    Sub-issues carry their parent's REST URL inline in the issues list response, so
+    no extra call is needed. Parsing it into the same identifier shape
+    ``_fetch_issues`` builds lets the child and parent line up in the graph. A
+    cross-repo parent keeps its own owner/repo.
+    """
+    if not parent_issue_url:
+        return None
+    match = _PARENT_URL_RE.search(parent_issue_url)
+    if not match:
+        return None
+    return f"{match['owner']}/{match['repo']}#{match['number']}"
+
+
 async def _fetch_issues(
     gh: GitHub, owner: str, name: str, *, limit: int | None = None
 ) -> list[IssueRec]:
@@ -179,6 +199,7 @@ async def _fetch_issues(
                 labels=label_names,
                 created_at=data.get("created_at"),
                 closed_at=data.get("closed_at"),
+                parent=_parent_identifier(data.get("parent_issue_url")),
                 raw=data,
             )
         )

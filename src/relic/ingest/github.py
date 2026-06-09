@@ -44,13 +44,15 @@ def _dump(model: Any) -> dict[str, Any]:
 async def fetch_repo(
     gh: GitHub, owner: str, name: str, *, concurrency: int = 10, limit: int | None = None
 ) -> RepoBundle:
-    """Fetch PRs of every state (with files + reviews) and non-PR issues for `owner/name`.
+    """Fetch terminal-state PRs (with files + reviews) and non-PR issues for `owner/name`.
 
-    All PR states are pulled, not just merged: a draft, an open PR, or one closed
-    without merging each carries signal (notably "we tried this and dropped it").
-    ``_pr_state`` records which is which. ``limit`` caps how many PRs and how many
-    issues are pulled, most recent first, to bound API calls and per-episode LLM
-    cost when ingesting a large repo.
+    Both merged and closed-without-merge PRs are pulled — GitHub's ``state="closed"``
+    returns both — because a close without a merge still carries signal ("we tried
+    this and dropped it"). Open and draft PRs are skipped on purpose: they are
+    mutable, and the name-keyed checkpoint can't update an episode once it lands, so
+    an ingested draft would freeze at its in-progress state and never reflect the
+    eventual merge. ``_pr_state`` labels each as merged vs closed. ``limit`` caps how
+    many PRs and issues are pulled, most recent first, to bound API and LLM cost.
     """
     full_name = f"{owner}/{name}"
     bundle = RepoBundle(
@@ -59,7 +61,7 @@ async def fetch_repo(
 
     selected: list[dict[str, Any]] = []
     async for pr in gh.rest.paginate(
-        gh.rest.pulls.async_list, owner=owner, repo=name, state="all", per_page=100
+        gh.rest.pulls.async_list, owner=owner, repo=name, state="closed", per_page=100
     ):
         selected.append(_dump(pr))
         if limit is not None and len(selected) >= limit:

@@ -53,7 +53,7 @@ def ingest(
         bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
     ] = False,
 ) -> None:
-    """Pull PRs (all states), reviews, and issues into the graph (Phase 2)."""
+    """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2)."""
     import asyncio
 
     from relic.obs import get_logger

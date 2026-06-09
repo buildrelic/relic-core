@@ -151,6 +151,9 @@ def _parse_coauthors(body: str | None) -> list[dict[str, str]]:
     """
     if not body:
         return []
+    # GitHub returns bodies with CRLF; normalize so the `$`-anchored trailer regex
+    # matches (a stray \r before \n otherwise fails the line and drops the author).
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
     seen: set[tuple[str, str]] = set()
     out: list[dict[str, str]] = []
     for match in _COAUTHOR_RE.finditer(body):

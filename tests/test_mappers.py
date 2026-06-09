@@ -171,6 +171,19 @@ def test_coauthored_by_trailers_become_co_authors() -> None:
     assert len(co) == 2
 
 
+def test_parse_coauthors_handles_crlf_line_endings() -> None:
+    # GitHub returns PR bodies with CRLF; the trailers must still parse (regression).
+    body = (
+        "Implements it.\r\n\r\n"
+        "Co-authored-by: Bob <bob@x.com>\r\n"
+        "Co-authored-by: Carol <carol@y.com>\r\n"
+    )
+    out = _parse_coauthors(body)
+    assert {"name": "Bob", "email": "bob@x.com"} in out
+    assert {"name": "Carol", "email": "carol@y.com"} in out
+    assert len(out) == 2
+
+
 def test_parse_coauthors_dedupes_and_allows_missing_email() -> None:
     body = (
         "Co-authored-by: Bob <bob@x.com>\n"

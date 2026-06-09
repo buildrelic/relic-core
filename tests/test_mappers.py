@@ -196,6 +196,13 @@ def test_parse_coauthors_dedupes_and_allows_missing_email() -> None:
     assert len(out) == 2
 
 
+def test_parse_coauthors_email_only_trailer_yields_email_only_entry() -> None:
+    # Git-generated trailers always carry a name, but a hand-typed email-only one
+    # still identifies a person: keep it as an email-only entry rather than drop it.
+    out = _parse_coauthors("Co-authored-by: <bob@x.com>\nCo-authored-by: Carol <c@y.com>\n")
+    assert out == [{"email": "bob@x.com"}, {"name": "Carol", "email": "c@y.com"}]
+
+
 def test_code_fences_in_body_are_defused() -> None:
     # A ``` in a quoted commit message / code block must not survive as a run of
     # three, or it would close the fenced block the extractor wraps the body in.

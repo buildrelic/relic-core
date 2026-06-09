@@ -148,6 +148,11 @@ def _parse_coauthors(body: str | None) -> list[dict[str, str]]:
     credit several people beyond the opener. Surfacing them lets the extractor link
     every contributor to the PR (and feeds cross-source person unification). Parsed
     from the raw body, before clipping, since trailers sit at the very end.
+
+    Partial trailers degrade gracefully: a name-only or email-only trailer yields
+    an entry with just that field. One limitation, accepted on purpose: the whole
+    body is scanned, so a trailer quoted inside a code block (someone documenting
+    the format) is credited as a real co-author.
     """
     if not body:
         return []

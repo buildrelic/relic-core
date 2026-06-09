@@ -187,7 +187,7 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
         "repo": {"full_name": repo.full_name, "url": repo.url},
         "pull_request": {
             "number": pr.number,
-            "title": pr.title,
+            "title": _defuse_fences(pr.title),
             "description": _clip(pr.body),
             "url": pr.url,
             "state": pr.state,
@@ -227,7 +227,7 @@ def issue_to_episode(issue: IssueRec, repo: RepoBundle) -> EpisodeSpec:
     body = {
         "issue": {
             "identifier": issue.identifier,
-            "title": issue.title,
+            "title": _defuse_fences(issue.title),
             "description": _clip(issue.body),
             "state": issue.state,
             "url": issue.url,

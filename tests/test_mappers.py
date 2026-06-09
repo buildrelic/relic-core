@@ -206,6 +206,26 @@ def test_code_fences_in_body_are_defused() -> None:
     assert "python" in desc
 
 
+def test_code_fences_in_titles_are_defused() -> None:
+    # Titles bypass _clip (never nulled or truncated) but still need defusing: a
+    # ``` in a PR or issue title would close the extractor's fence just like a body.
+    pr = _pr(title="fix ``` handling in parser")
+    pr_title = json.loads(pr_to_episode(pr, _repo()).body)["pull_request"]["title"]
+    assert "```" not in pr_title
+    assert "fix" in pr_title and "handling in parser" in pr_title
+
+    issue = IssueRec(
+        source="github",
+        identifier="paris-phan/course-scheduler#9",
+        title="docs show ``` blocks unrendered",
+        url="https://github.com/paris-phan/course-scheduler/issues/9",
+        state="open",
+        created_at="2025-02-02T00:00:00Z",
+    )
+    issue_title = json.loads(issue_to_episode(issue, _repo()).body)["issue"]["title"]
+    assert "```" not in issue_title
+
+
 def test_subissue_parent_is_carried_into_episode() -> None:
     issue = IssueRec(
         source="linear",

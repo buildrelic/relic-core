@@ -19,6 +19,7 @@ query Issues($after: String) {
       state { name }
       assignee { name }
       labels { nodes { name } }
+      parent { identifier }
       createdAt
       completedAt
     }
@@ -62,6 +63,7 @@ def _node_to_issue(node: dict[str, Any]) -> IssueRec:
     assignee = node.get("assignee") or {}
     assignees = [assignee["name"]] if assignee.get("name") else []
     labels = [lab["name"] for lab in (node.get("labels") or {}).get("nodes", []) if lab.get("name")]
+    parent = (node.get("parent") or {}).get("identifier")
     return IssueRec(
         source="linear",
         identifier=node.get("identifier", ""),
@@ -72,5 +74,6 @@ def _node_to_issue(node: dict[str, Any]) -> IssueRec:
         labels=labels,
         created_at=node.get("createdAt"),
         closed_at=node.get("completedAt"),
+        parent=parent,
         raw=node,
     )

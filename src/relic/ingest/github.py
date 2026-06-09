@@ -43,25 +43,26 @@ def _dump(model: Any) -> dict[str, Any]:
 async def fetch_repo(
     gh: GitHub, owner: str, name: str, *, concurrency: int = 10, limit: int | None = None
 ) -> RepoBundle:
-    """Fetch merged PRs (with files + reviews) and non-PR issues for `owner/name`.
+    """Fetch PRs of every state (with files + reviews) and non-PR issues for `owner/name`.
 
-    ``limit`` caps how many merged PRs and how many issues are pulled, most recent
-    first, to bound API calls and per-episode LLM cost when ingesting a large repo.
+    All PR states are pulled, not just merged: a draft, an open PR, or one closed
+    without merging each carries signal (notably "we tried this and dropped it").
+    ``_pr_state`` records which is which. ``limit`` caps how many PRs and how many
+    issues are pulled, most recent first, to bound API calls and per-episode LLM
+    cost when ingesting a large repo.
     """
     full_name = f"{owner}/{name}"
     bundle = RepoBundle(
         full_name=full_name, url=f"https://github.com/{full_name}", default_branch="main"
     )
 
-    merged: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     async for pr in gh.rest.paginate(
-        gh.rest.pulls.async_list, owner=owner, repo=name, state="closed", per_page=100
+        gh.rest.pulls.async_list, owner=owner, repo=name, state="all", per_page=100
     ):
-        data = _dump(pr)
-        if data.get("merged_at"):
-            merged.append(data)
-            if limit is not None and len(merged) >= limit:
-                break
+        selected.append(_dump(pr))
+        if limit is not None and len(selected) >= limit:
+            break
 
     sem = asyncio.Semaphore(concurrency)
 
@@ -69,9 +70,26 @@ async def fetch_repo(
         async with sem:
             return await _fetch_pr_detail(gh, owner, name, pr_data)
 
-    bundle.pull_requests = list(await asyncio.gather(*[_hydrate(d) for d in merged]))
+    bundle.pull_requests = list(await asyncio.gather(*[_hydrate(d) for d in selected]))
     bundle.issues = await _fetch_issues(gh, owner, name, limit=limit)
     return bundle
+
+
+def _pr_state(pr: dict[str, Any]) -> str:
+    """Collapse GitHub's state + draft + merged_at into one label.
+
+    GitHub models a PR's status across three fields (``state`` is only open/closed,
+    ``draft`` is a separate flag, and a merge is just a populated ``merged_at``).
+    Flatten them to one of merged / closed / draft / open, with merge and closure
+    taking precedence over the draft flag.
+    """
+    if pr.get("merged_at"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    if pr.get("draft"):
+        return "draft"
+    return "open"
 
 
 async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]) -> PullRequestRec:
@@ -119,7 +137,7 @@ async def _fetch_pr_detail(gh: GitHub, owner: str, name: str, pr: dict[str, Any]
         number=number,
         title=pr.get("title", ""),
         url=pr.get("html_url", ""),
-        state="merged",
+        state=_pr_state(pr),
         author_login=author.get("login"),
         author_url=author.get("html_url"),
         created_at=pr.get("created_at", ""),

@@ -133,8 +133,9 @@ Linear issues, since both map to the `IssueRec` record.
 Each `EpisodeSpec` also carries a `name` (for example `PR buildrelic/relic-core#12`),
 a `source_description` (`github pull request`, `github issue`, `linear issue`), a
 `reference_time` (the merge or creation timestamp, parsed tz-aware), and the
-`group_id` (the slugified repo). Bodies are clipped to 4000 characters to bound
-extraction cost ([`_clip`](../src/relic/ingest/mappers.py)).
+`group_id` (the slugified repo). Bodies are clipped to 2000 characters and reviews are
+capped per PR (bots dropped) to bound extraction cost
+([`_clip`](../src/relic/ingest/mappers.py), `_select_reviews`).
 
 ## Layer 3: SkillIR
 

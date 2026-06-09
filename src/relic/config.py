@@ -20,13 +20,27 @@ class Settings(BaseSettings):
     linear_api_key: str | None = None
 
     graphiti_llm_provider: str = "openai"
+    # Model used when graphiti_llm_provider == "gemini". Configurable so a wrong or
+    # region-specific model id is an env change, not a code change. Flash-Lite is the
+    # fastest/cheapest Flash variant, suited to the high-volume extraction in a backfill.
+    gemini_model: str = "gemini-2.5-flash-lite"
     falkordb_host: str = "localhost"
     falkordb_port: int = 6379
     falkordb_password: str | None = None
     falkordb_database: str = "relic"
     registry_db_path: str = "./data/registry.db"
     target_repo: str | None = None
-    semaphore_limit: int = 10
+
+    # Two distinct concurrency budgets, deliberately separate. The GitHub fetch wants a
+    # modest fan-out to stay under API rate limits; the Graphiti load wants a higher
+    # internal LLM concurrency (graphiti's own default is 20). A single shared knob would
+    # force one to compromise the other. ``semaphore_limit`` is the deprecated shared knob,
+    # kept so existing .env files keep working.
+    semaphore_limit: int = 10  # deprecated: use fetch_concurrency / graphiti_max_coroutines
+    fetch_concurrency: int = 10  # concurrent GitHub hydration requests (rate-limit safe)
+    graphiti_max_coroutines: int = 20  # graphiti internal LLM concurrency during load
+    bulk_load: bool = False  # route the load through add_episode_bulk (see `relic ingest --bulk`)
+    bulk_batch_size: int = 10  # episodes per add_episode_bulk call; smaller = less TPM burst
 
     @field_validator(
         "anthropic_api_key",

@@ -104,7 +104,10 @@ def _parse_aware(value: str) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-_MAX_DESC_CHARS = 4000
+_MAX_DESC_CHARS = 2000
+_MAX_REVIEWS_PER_PR = 10
+# States that carry a decision; preferred over plain COMMENTED when capping reviews.
+_DECIDED_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 
 
 def _clip(text: str | None) -> str | None:
@@ -117,6 +120,32 @@ def _clip(text: str | None) -> str | None:
         return None
     trimmed = text.strip()
     return trimmed if len(trimmed) <= _MAX_DESC_CHARS else trimmed[:_MAX_DESC_CHARS] + "..."
+
+
+def _is_bot(login: str | None) -> bool:
+    """True for GitHub app/bot accounts, whose login ends in ``[bot]``."""
+    return bool(login) and login.endswith("[bot]")  # type: ignore[union-attr]
+
+
+def _select_reviews(reviews: list[ReviewRec]) -> list[ReviewRec]:
+    """Drop bot reviews and cap to ``_MAX_REVIEWS_PER_PR``, preserving order.
+
+    Bot reviews (CI, dependabot) add tokens without informing reviewer-routing, so
+    they are dropped. When a PR has more human reviews than the cap, the most
+    informative are kept — decided states (approve / changes-requested) over plain
+    comments, then most recent — but the survivors are emitted in their original
+    order so the episode body stays stable and chronological.
+    """
+    human = [(i, r) for i, r in enumerate(reviews) if not _is_bot(r.login)]
+    if len(human) <= _MAX_REVIEWS_PER_PR:
+        return [r for _, r in human]
+    ranked = sorted(
+        human,
+        key=lambda ir: (ir[1].state in _DECIDED_STATES, ir[1].submitted_at or ""),
+        reverse=True,
+    )
+    keep = {i for i, _ in ranked[:_MAX_REVIEWS_PER_PR]}
+    return [r for i, r in human if i in keep]
 
 
 def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
@@ -142,7 +171,7 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
                 "url": r.url,
                 "comment": _clip(r.body),
             }
-            for r in pr.reviews
+            for r in _select_reviews(pr.reviews)
         ],
         "requested_reviewers": pr.requested_reviewers,
         "files": [{"path": f.path} for f in pr.files],

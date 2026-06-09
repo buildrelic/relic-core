@@ -20,7 +20,7 @@ from relic.graph.engram import falkordb_reachable as _falkordb_reachable
 _KEYS: list[tuple[str, str, str]] = [
     ("openai", "openai_api_key", "graph ingest, recall"),
     ("anthropic", "anthropic_api_key", "skill compiler"),
-    ("gemini", "gemini_api_key", "alternate graph llm"),
+    ("gemini", "gemini_api_key", "graph extraction (gemini provider, hybrid)"),
     ("github", "github_token", "github ingest"),
     ("linear", "linear_api_key", "linear ingest"),
 ]

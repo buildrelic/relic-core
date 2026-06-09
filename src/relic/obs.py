@@ -14,9 +14,30 @@ module to emit under ``relic.ingest``.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 _NAMESPACE = "relic"
 _configured = False
+_stderr_console: Console | None = None
+
+
+def stderr_console() -> Console:
+    """Return the shared stderr ``rich.Console`` (created on first use).
+
+    One console for both the log handler and any live display (e.g. the ingest
+    progress bar). They must share a console so rich coordinates them: a ``Progress``
+    renders log lines *above* its live bar instead of being clobbered by them. A
+    separate console writing to the same stream would fight the live region.
+    """
+    global _stderr_console
+    if _stderr_console is None:
+        from rich.console import Console
+
+        _stderr_console = Console(stderr=True)
+    return _stderr_console
 
 
 def configure_logging(*, verbose: bool = False) -> None:
@@ -26,7 +47,6 @@ def configure_logging(*, verbose: bool = False) -> None:
     timing, full tracebacks); the default is INFO (phase counts and the run
     summary). Re-calling only adjusts the level: it never stacks handlers.
     """
-    from rich.console import Console
     from rich.logging import RichHandler
 
     global _configured
@@ -39,7 +59,7 @@ def configure_logging(*, verbose: bool = False) -> None:
 
     if not _configured:
         handler = RichHandler(
-            console=Console(stderr=True),
+            console=stderr_console(),
             show_time=False,
             show_path=False,
             markup=False,

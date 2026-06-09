@@ -119,9 +119,10 @@ Pending: `resolve` (Phase 3, person identity across GitHub and Linear) and
 - **Flat and rich models are duplicated.** Graphiti needs flat scalar models with
   no reserved attribute names, so the graph-facing models in `engram.py` mirror
   the rich `ontology/` models. Keep them in sync by hand.
-- **Cost controls.** `--limit` caps PRs and GitHub issues (most recent first), and
-  episode bodies are clipped to 4000 chars. `--limit` does not apply to Linear,
-  which always pulls all issues.
+- **Cost controls.** `--months` windows the fetch (default 12), `--limit` caps PRs and
+  GitHub issues (most recent first), bot reviews are dropped and human reviews capped per
+  PR, and episode bodies are clipped to 2000 chars. Neither bound applies to Linear, which
+  always pulls all issues.
 - **Served recall is not repo-scoped.** CLI `recall` scopes to a repo's
   `group_id`. The MCP `recall_memory` tool queries the default graph with no
   `group_id`. Align this before multi-repo serving.

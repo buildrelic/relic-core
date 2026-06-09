@@ -137,6 +137,14 @@ a `source_description` (`github pull request`, `github issue`, `linear issue`), 
 capped per PR (bots dropped) to bound extraction cost
 ([`_clip`](../src/relic/ingest/mappers.py), `_select_reviews`).
 
+> **Raw payload shapes are not uniform.** The episode JSON above is stable, but the
+> verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
+> so their raw payload is the **camelCase GraphQL node** (`createdAt`, `mergedAt`,
+> `author { login }`); issues still come over REST, so theirs is the **snake_case REST**
+> body (`created_at`, `html_url`), as are PRs from any pre-GraphQL ingest. A future pass
+> that re-maps from `data/raw/` must branch on shape (or on `source`) rather than assume
+> one casing.
+
 ## Layer 3: SkillIR
 
 [`skill_ir.py`](../src/relic/ontology/skill_ir.py) is the contract for a compiled

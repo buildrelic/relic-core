@@ -52,9 +52,9 @@ query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
         mergedAt
         updatedAt
         author { login url }
-        files(first: __FILES__) { nodes { path additions deletions } }
-        reviews(first: __REVIEWS__) {
-          nodes { state submittedAt url body author { login url } }
+        files(last: __FILES__) { nodes { path additions deletions } }
+        reviews(last: __REVIEWS__) {
+          nodes { state submittedAt url body author { login url __typename } }
         }
         reviewRequests(first: __REVIEWS__) {
           nodes { requestedReviewer { ... on User { login } } }
@@ -118,7 +118,10 @@ async def fetch_repo(
 
     Only items from the last ``months`` are pulled: PRs merged within the window and
     issues updated within it. ``limit`` further caps how many PRs and issues are kept,
-    most recent first, to bound the first run on a large repo.
+    to bound the first run on a large repo. Because both queries page by *update* time
+    (descending), ``limit`` keeps the most-recently-**updated** items, which for a busy
+    repo is not exactly the most-recently-**merged** PRs (an old PR with a fresh comment
+    sorts ahead of a newer merge).
 
     ``concurrency`` is retained for back-compat (and a possible REST fallback); the
     GraphQL PR path batches many PRs per request, so it does not fan out per PR.
@@ -158,6 +161,10 @@ def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
                 submitted_at=r.get("submittedAt"),
                 url=r.get("url"),
                 body=r.get("body"),
+                # GraphQL marks app/bot actors with __typename "Bot" and returns a bare
+                # login (no REST-style "[bot]" suffix), so the typename is the reliable
+                # signal for dropping CI/dependabot reviews in _select_reviews.
+                is_bot=reviewer.get("__typename") == "Bot",
             )
         )
 
@@ -193,6 +200,9 @@ async def _fetch_prs_graphql(
     window must have ``updatedAt >= mergedAt >= cutoff``, we can stop paging the moment a
     node's ``updatedAt`` falls before the cutoff. A node updated in-window but merged
     before it (e.g. an old PR that got a recent comment) is skipped, not a stop signal.
+
+    ``limit`` cuts off the walk early, so it keeps the most-recently-updated merged PRs in
+    the window -- not strictly the most-recently-merged, since the ordering is by update.
     """
     prs: list[PullRequestRec] = []
     after: str | None = None
@@ -233,7 +243,10 @@ async def _fetch_issues(
         owner=owner,
         repo=name,
         state="all",
-        since=cutoff,  # native server-side filter: issues updated at/after cutoff
+        # Native server-side filter: issues updated at/after the cutoff. githubkit types
+        # ``since`` as a datetime and serializes it to ISO-8601 itself, so pass the aware
+        # datetime directly (not .isoformat(), which would be a type error).
+        since=cutoff,
         sort="updated",
         direction="desc",
         per_page=100,

@@ -88,7 +88,13 @@ def test_pr_to_episode_no_reviews_falls_back_to_created_at() -> None:
     assert body["pull_request"]["description"] is None
 
 
-def _review(login: str, *, state: str = "COMMENTED", submitted_at: str | None = None) -> ReviewRec:
+def _review(
+    login: str,
+    *,
+    state: str = "COMMENTED",
+    submitted_at: str | None = None,
+    is_bot: bool = False,
+) -> ReviewRec:
     return ReviewRec(
         login=login,
         profile_url=f"https://github.com/{login}",
@@ -96,6 +102,7 @@ def _review(login: str, *, state: str = "COMMENTED", submitted_at: str | None = 
         submitted_at=submitted_at,
         url=None,
         body=None,
+        is_bot=is_bot,
     )
 
 
@@ -118,11 +125,26 @@ def _episode_review_logins(pr: PullRequestRec) -> list[str | None]:
 
 
 def test_bot_reviews_are_dropped() -> None:
+    # REST-style shape: bot-ness carried in the "[bot]" login suffix.
     pr = _pr_with_reviews(
         [
             _review("alice", submitted_at="2025-01-01T00:00:00Z"),
             _review("dependabot[bot]", submitted_at="2025-01-02T00:00:00Z"),
             _review("github-actions[bot]", submitted_at="2025-01-03T00:00:00Z"),
+        ]
+    )
+    assert _episode_review_logins(pr) == ["alice"]
+
+
+def test_bot_reviews_dropped_by_typename_flag() -> None:
+    # Production (GraphQL) shape: bot logins are bare (no "[bot]" suffix); bot-ness comes
+    # from the is_bot flag the fetcher sets from __typename. Without it these would slip
+    # through, which is exactly the bug that hid behind the REST-style test above.
+    pr = _pr_with_reviews(
+        [
+            _review("alice", submitted_at="2025-01-01T00:00:00Z"),
+            _review("dependabot", submitted_at="2025-01-02T00:00:00Z", is_bot=True),
+            _review("github-actions", submitted_at="2025-01-03T00:00:00Z", is_bot=True),
         ]
     )
     assert _episode_review_logins(pr) == ["alice"]

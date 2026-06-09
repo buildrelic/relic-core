@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from relic.ingest.github import _fetch_issues, _fetch_prs_graphql, _pr_node_to_rec
+from relic.ingest.github import _PR_QUERY, _fetch_issues, _fetch_prs_graphql, _pr_node_to_rec
 from relic.ingest.mappers import RepoBundle, pr_to_episode
 
 if TYPE_CHECKING:
@@ -185,6 +185,42 @@ def test_pr_node_handles_null_author_and_non_user_reviewer() -> None:
     assert rec.author_login is None
     assert rec.author_url is None
     assert rec.requested_reviewers == []
+
+
+def test_pr_node_sets_is_bot_from_typename_and_drops_it() -> None:
+    # GraphQL marks bots via __typename "Bot" with a bare login (no "[bot]" suffix).
+    node = _node(
+        2,
+        updated="2025-08-02T00:00:00Z",
+        merged="2025-08-02T00:00:00Z",
+        reviews=[
+            {
+                "state": "COMMENTED",
+                "submittedAt": "2025-08-01T00:00:00Z",
+                "author": {"login": "alice", "url": "u", "__typename": "User"},
+            },
+            {
+                "state": "APPROVED",
+                "submittedAt": "2025-08-01T01:00:00Z",
+                "author": {"login": "dependabot", "url": "u", "__typename": "Bot"},
+            },
+        ],
+    )
+    rec = _pr_node_to_rec(node)
+    assert [(r.login, r.is_bot) for r in rec.reviews] == [("alice", False), ("dependabot", True)]
+
+    # Parity: the bot review is dropped from the episode body, the human one kept.
+    body = json.loads(pr_to_episode(rec, _repo()).body)
+    assert [r["login"] for r in body["reviews"]] == ["alice"]
+
+
+def test_pr_query_keeps_newest_reviews_and_files() -> None:
+    # reviews/files must page from the END (last:), so the newest reviews -- the ones
+    # _select_reviews wants -- survive instead of the oldest. Guards the regression
+    # without a live call.
+    assert "reviews(last:" in _PR_QUERY
+    assert "files(last:" in _PR_QUERY
+    assert "reviews(first:" not in _PR_QUERY
 
 
 # --- issues windowing (REST) -------------------------------------------------

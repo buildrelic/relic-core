@@ -33,6 +33,9 @@ class ReviewRec:
     submitted_at: str | None
     url: str | None
     body: str | None = None
+    # Set by the fetcher from GraphQL's __typename == "Bot". The login alone is not
+    # enough: GraphQL returns bare bot logins (no "[bot]" suffix), unlike REST.
+    is_bot: bool = False
 
 
 @dataclass(slots=True)
@@ -123,8 +126,17 @@ def _clip(text: str | None) -> str | None:
 
 
 def _is_bot(login: str | None) -> bool:
-    """True for GitHub app/bot accounts, whose login ends in ``[bot]``."""
+    """True for a REST-style bot login, whose name ends in ``[bot]``."""
     return bool(login) and login.endswith("[bot]")  # type: ignore[union-attr]
+
+
+def _review_is_bot(review: ReviewRec) -> bool:
+    """True if a review came from a bot, by either signal.
+
+    GraphQL sets ``is_bot`` from ``__typename`` (bare logins, the production path);
+    ``_is_bot`` catches the REST-style ``[bot]`` suffix for any legacy/REST-shaped data.
+    """
+    return review.is_bot or _is_bot(review.login)
 
 
 def _select_reviews(reviews: list[ReviewRec]) -> list[ReviewRec]:
@@ -136,7 +148,7 @@ def _select_reviews(reviews: list[ReviewRec]) -> list[ReviewRec]:
     comments, then most recent — but the survivors are emitted in their original
     order so the episode body stays stable and chronological.
     """
-    human = [(i, r) for i, r in enumerate(reviews) if not _is_bot(r.login)]
+    human = [(i, r) for i, r in enumerate(reviews) if not _review_is_bot(r)]
     if len(human) <= _MAX_REVIEWS_PER_PR:
         return [r for _, r in human]
     ranked = sorted(

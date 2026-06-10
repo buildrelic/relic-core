@@ -208,7 +208,9 @@ def test_to_payload_reports_metrics_and_cases() -> None:
     assert payload["hit_rate"] == 1.0
     assert payload["mrr"] == 0.75  # (1/1 + 1/2) / 2
     assert payload["coverage"] == 0.75  # (1.0 + 0.5) / 2
-    partial = payload["cases"][1]
+    cases = payload["cases"]
+    assert isinstance(cases, list)
+    partial = cases[1]
     assert partial["rank"] == 2
     assert partial["missing_urls"] == [pr_url(REPO, 1)]
     json.dumps(payload)  # must be serializable as-is

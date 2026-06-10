@@ -108,8 +108,9 @@ whose content answers it.
 
 `relic eval` runs recall for each question, then `score_case` walks the recalled
 facts in ranked order and records which expected PR or issue URLs were cited and how
-highly. A match is an exact URL match. From that, `summarize` reports three
-aggregates plus a per-case line:
+highly. A match is an exact URL comparison after case and trailing-slash
+normalization (GitHub URLs are case-insensitive, and a cosmetic near-miss must not
+score zero). From that, `summarize` reports three aggregates plus a per-case line:
 
 - **Hit rate.** Share of cases where at least one expected source was cited. The
   coarsest signal, and what the scorecard reported originally.
@@ -124,6 +125,11 @@ aggregates plus a per-case line:
 There is no LLM judge. Scoring is a deterministic URL comparison, so the ruler
 costs nothing beyond the recall calls it measures. Use it to tell whether an
 ingestion or retrieval change actually moved recall instead of eyeballing answers.
+`relic eval --json out.json` additionally writes the run as JSON (the aggregates
+plus per-case detail), so metrics can be tracked across runs rather than read
+out of terminal scrollback. `load_gold` rejects gold sets that would score
+misleadingly: a malformed repo or non-integer number builds URLs that can never
+match, and a case with no expected sources can never hit.
 
 ## The FalkorDB workaround
 

@@ -534,24 +534,32 @@ def eval_recall(
         "eval/github_recall.json"
     ),
     num_results: Annotated[int, typer.Option(help="facts per question")] = 10,
+    json_out: Annotated[
+        Path | None, typer.Option("--json", help="also write machine-readable results here")
+    ] = None,
 ) -> None:
     """Score recall against a gold set: does it cite the PR that holds each answer?"""
     import asyncio
 
-    asyncio.run(_eval(path, num_results))
+    asyncio.run(_eval(path, num_results, json_out))
 
 
-async def _eval(path: Path, num_results: int) -> None:
+async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
+    import json
+
     from relic.config import get_settings
     from relic.graph.engram import make_engram
     from relic.graph.recall import recall
     from relic.ingest.mappers import repo_group_id
-    from relic.scorecard import load_gold, score_case, summarize
+    from relic.scorecard import load_gold, score_case, summarize, to_payload
 
-    gold = load_gold(path)
+    try:
+        gold = load_gold(path)
+    except (OSError, ValueError) as exc:
+        err_console.print(f"[red]bad gold set:[/] {exc}")
+        raise typer.Exit(code=1) from exc
     settings = get_settings()
-    repo = gold.repo or settings.target_repo
-    group_id = repo_group_id(repo) if repo else None
+    group_id = repo_group_id(gold.repo)
     engram = make_engram(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
@@ -567,6 +575,8 @@ async def _eval(path: Path, num_results: int) -> None:
     finally:
         await engram.close()
     print(summarize(results))
+    if json_out:
+        json_out.write_text(json.dumps(to_payload(results), indent=2) + "\n", encoding="utf-8")
 
 
 @app.command()

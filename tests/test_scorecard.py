@@ -11,7 +11,15 @@ from pathlib import Path
 import pytest
 
 from relic.graph.recall import RecallAnswer, RecalledFact, Source
-from relic.scorecard import EvalCase, issue_url, load_gold, pr_url, score_case, summarize
+from relic.scorecard import (
+    EvalCase,
+    issue_url,
+    load_gold,
+    pr_url,
+    score_case,
+    summarize,
+    to_payload,
+)
 
 REPO = "buildrelic/relic-core"
 
@@ -143,6 +151,67 @@ def test_load_gold_rejects_case_with_no_expected_sources(tmp_path: Path) -> None
     path.write_text(json.dumps({"repo": REPO, "cases": [{"question": "q"}]}), encoding="utf-8")
     with pytest.raises(ValueError, match="no expected sources"):
         load_gold(path)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],  # top level not an object
+        {"cases": [{"question": "q", "expect_prs": [1]}]},  # repo missing
+        {"repo": "not a repo", "cases": [{"question": "q", "expect_prs": [1]}]},
+        {"repo": REPO, "cases": []},  # no cases
+        {"repo": REPO, "cases": ["q"]},  # case not an object
+        {"repo": REPO, "cases": [{"question": " ", "expect_prs": [1]}]},  # blank question
+        {"repo": REPO, "cases": [{"question": "q", "expect_prs": ["3"]}]},  # str number
+        {"repo": REPO, "cases": [{"question": "q", "expect_prs": [3.0]}]},  # float number
+        {"repo": REPO, "cases": [{"question": "q", "expect_prs": [0]}]},  # not positive
+        {"repo": REPO, "cases": [{"question": "q", "expect_prs": [True]}]},  # bool
+    ],
+)
+def test_load_gold_rejects_malformed_sets(tmp_path: Path, data: object) -> None:
+    path = tmp_path / "gold.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_gold(path)
+
+
+def test_match_survives_case_and_trailing_slash() -> None:
+    # github urls are case-insensitive; a cosmetic variant must still score
+    cited = "https://github.com/BuildRelic/Relic-Core/pull/3/"
+    result = score_case(EvalCase(question="q", expect_prs=[3]), REPO, _answer(cited))
+    assert result.hit is True
+    assert result.matched_urls == [pr_url(REPO, 3)]  # canonical form, not the cited variant
+
+
+def test_summarize_shows_cited_sources_on_miss() -> None:
+    urls = [pr_url(REPO, n) for n in (5, 6, 7, 8, 9)]
+    text = summarize([score_case(EvalCase(question="q", expect_prs=[3]), REPO, _answer(*urls))])
+    assert f"got:    {urls[0]}, {urls[1]}, {urls[2]} (+2 more)" in text
+
+
+def test_summarize_strips_control_characters() -> None:
+    case = EvalCase(question="evil \x1b[2J\x07 question", expect_prs=[3])
+    text = summarize([score_case(case, REPO, _answer(pr_url(REPO, 3)))])
+    assert "\x1b" not in text
+    assert "\x07" not in text
+    assert "evil" in text
+
+
+def test_to_payload_reports_metrics_and_cases() -> None:
+    results = [
+        score_case(EvalCase("a", [3]), REPO, _answer(pr_url(REPO, 3))),
+        score_case(EvalCase("b", [1, 4]), REPO, _answer(pr_url(REPO, 9), pr_url(REPO, 4))),
+    ]
+    payload = to_payload(results)
+    assert payload["total"] == 2
+    assert payload["hits"] == 2
+    assert payload["hit_rate"] == 1.0
+    assert payload["mrr"] == 0.75  # (1/1 + 1/2) / 2
+    assert payload["coverage"] == 0.75  # (1.0 + 0.5) / 2
+    partial = payload["cases"][1]
+    assert partial["rank"] == 2
+    assert partial["missing_urls"] == [pr_url(REPO, 1)]
+    json.dumps(payload)  # must be serializable as-is
 
 
 def test_summarize_handles_empty_results() -> None:

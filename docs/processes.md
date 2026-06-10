@@ -130,7 +130,8 @@ holds each answer.
 - **Invocation.** `relic eval [--path eval/github_recall.json] [--num-results N]`.
 - **Reads.** A gold set JSON (questions plus the PR or issue numbers that answer
   them); the graph.
-- **Writes.** Nothing. Prints a hit rate plus a per-case pass or miss line.
+- **Writes.** Nothing. Prints three metrics (hit rate, MRR, coverage) plus a
+  per-case pass or miss line.
 - **Depends on.** `OPENAI_API_KEY` and FalkorDB.
 - **No LLM judge.** Scoring is a deterministic URL match, so the ruler itself
   costs nothing beyond the recall calls it measures

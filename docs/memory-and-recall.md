@@ -101,15 +101,23 @@ it never raises.
 
 ## Eval: the recall scorecard
 
-[`scorecard.py`](../src/relic/scorecard.py) measures recall quality as a single
-number. A gold set ([`eval/github_recall.json`](../eval/github_recall.json)) names
-a repo and a list of cases, each a question plus the PR or issue numbers whose
-content answers it.
+[`scorecard.py`](../src/relic/scorecard.py) measures recall quality as a small set
+of numbers. A gold set ([`eval/github_recall.json`](../eval/github_recall.json))
+names a repo and a list of cases, each a question plus the PR or issue numbers
+whose content answers it.
 
-`relic eval` runs recall for each question, then `score_case` checks whether any
-expected PR or issue URL appears among the recalled facts' sources. A hit is an
-exact URL match. `summarize` prints the hit rate plus a per-case pass or miss line,
-showing the wanted URLs on a miss.
+`relic eval` runs recall for each question, then `score_case` walks the recalled
+facts in ranked order and records which expected PR or issue URLs were cited and how
+highly. A match is an exact URL match. From that, `summarize` reports three
+aggregates plus a per-case line:
+
+- **Hit rate.** Share of cases where at least one expected source was cited. The
+  coarsest signal, and what the scorecard reported originally.
+- **MRR.** Mean reciprocal rank of the first fact that cites an expected source.
+  Rank is counted in facts, the unit recall ranks and reranking reorders, so this
+  is the number to tune recall reranking against.
+- **Coverage.** For cases that expect several sources, the mean share found. One
+  hit out of two expected PRs is half coverage, not a clean pass.
 
 There is no LLM judge. Scoring is a deterministic URL comparison, so the ruler
 costs nothing beyond the recall calls it measures. Use it to tell whether an

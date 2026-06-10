@@ -90,6 +90,107 @@ def test_pr_to_episode_no_reviews_falls_back_to_created_at() -> None:
     assert body["pull_request"]["description"] is None
 
 
+def _review(
+    login: str,
+    *,
+    state: str = "COMMENTED",
+    submitted_at: str | None = None,
+    is_bot: bool = False,
+) -> ReviewRec:
+    return ReviewRec(
+        login=login,
+        profile_url=f"https://github.com/{login}",
+        state=state,
+        submitted_at=submitted_at,
+        url=None,
+        body=None,
+        is_bot=is_bot,
+    )
+
+
+def _pr_with_reviews(reviews: list[ReviewRec]) -> PullRequestRec:
+    return PullRequestRec(
+        number=1,
+        title="t",
+        url="https://example.com/pr/1",
+        state="merged",
+        author_login="a",
+        author_url=None,
+        created_at="2025-01-01T00:00:00Z",
+        merged_at="2025-01-02T00:00:00Z",
+        reviews=reviews,
+    )
+
+
+def _episode_review_logins(pr: PullRequestRec) -> list[str | None]:
+    # Reviews nest the (nullable) reviewer; a ghost/deleted reviewer surfaces as None.
+    reviews = json.loads(pr_to_episode(pr, _repo()).body)["reviews"]
+    return [r["reviewer"]["login"] if r["reviewer"] else None for r in reviews]
+
+
+def test_bot_reviews_are_dropped() -> None:
+    # REST-style shape: bot-ness carried in the "[bot]" login suffix.
+    pr = _pr_with_reviews(
+        [
+            _review("alice", submitted_at="2025-01-01T00:00:00Z"),
+            _review("dependabot[bot]", submitted_at="2025-01-02T00:00:00Z"),
+            _review("github-actions[bot]", submitted_at="2025-01-03T00:00:00Z"),
+        ]
+    )
+    assert _episode_review_logins(pr) == ["alice"]
+
+
+def test_bot_reviews_dropped_by_typename_flag() -> None:
+    # Production (GraphQL) shape: bot logins are bare (no "[bot]" suffix); bot-ness comes
+    # from the is_bot flag the fetcher sets from __typename. Without it these would slip
+    # through, which is exactly the bug that hid behind the REST-style test above.
+    pr = _pr_with_reviews(
+        [
+            _review("alice", submitted_at="2025-01-01T00:00:00Z"),
+            _review("dependabot", submitted_at="2025-01-02T00:00:00Z", is_bot=True),
+            _review("github-actions", submitted_at="2025-01-03T00:00:00Z", is_bot=True),
+        ]
+    )
+    assert _episode_review_logins(pr) == ["alice"]
+
+
+def test_reviews_capped_to_ten_most_recent_preserving_order() -> None:
+    # 12 human reviews with increasing timestamps; the two oldest are dropped, order kept.
+    reviews = [_review(f"r{i}", submitted_at=f"2025-01-{i + 1:02d}T00:00:00Z") for i in range(12)]
+    logins = _episode_review_logins(_pr_with_reviews(reviews))
+    assert logins == [f"r{i}" for i in range(2, 12)]
+
+
+def test_decided_reviews_preferred_over_comments_when_capping() -> None:
+    # r0 is the oldest but APPROVED; capping keeps it over a newer plain comment (r1).
+    reviews = [_review("r0", state="APPROVED", submitted_at="2025-01-01T00:00:00Z")]
+    reviews += [
+        _review(f"r{i}", state="COMMENTED", submitted_at=f"2025-01-{i + 1:02d}T00:00:00Z")
+        for i in range(1, 11)
+    ]
+    logins = _episode_review_logins(_pr_with_reviews(reviews))
+    assert len(logins) == 10
+    assert "r0" in logins  # decided state survives despite being the oldest
+    assert "r1" not in logins  # the oldest plain comment is the one dropped
+
+
+def test_long_body_is_clipped() -> None:
+    pr = PullRequestRec(
+        number=1,
+        title="t",
+        url="u",
+        state="merged",
+        author_login=None,
+        author_url=None,
+        created_at="2025-01-01T00:00:00Z",
+        merged_at="2025-01-02T00:00:00Z",
+        body="x" * 5000,
+    )
+    desc = json.loads(pr_to_episode(pr, _repo()).body)["pull_request"]["description"]
+    assert desc.endswith("...")
+    assert len(desc) == 2000 + len("...")
+
+
 def test_issue_to_episode() -> None:
     issue = IssueRec(
         source="github",

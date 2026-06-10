@@ -133,8 +133,17 @@ Linear issues, since both map to the `IssueRec` record.
 Each `EpisodeSpec` also carries a `name` (for example `PR buildrelic/relic-core#12`),
 a `source_description` (`github pull request`, `github issue`, `linear issue`), a
 `reference_time` (the merge or creation timestamp, parsed tz-aware), and the
-`group_id` (the slugified repo). Bodies are clipped to 4000 characters to bound
-extraction cost ([`_clip`](../src/relic/ingest/mappers.py)).
+`group_id` (the slugified repo). Bodies are clipped to 2000 characters and reviews are
+capped per PR (bots dropped) to bound extraction cost
+([`_clip`](../src/relic/ingest/mappers.py), `_select_reviews`).
+
+> **Raw payload shapes are not uniform.** The episode JSON above is stable, but the
+> verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
+> so their raw payload is the **camelCase GraphQL node** (`createdAt`, `mergedAt`,
+> `author { login }`); issues still come over REST, so theirs is the **snake_case REST**
+> body (`created_at`, `html_url`), as are PRs from any pre-GraphQL ingest. A future pass
+> that re-maps from `data/raw/` must branch on shape (or on `source`) rather than assume
+> one casing.
 
 ## Layer 3: SkillIR
 

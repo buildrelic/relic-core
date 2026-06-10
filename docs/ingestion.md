@@ -14,7 +14,7 @@ Orchestration lives in [`_ingest`](../src/relic/cli.py). The pieces are in
 ```mermaid
 sequenceDiagram
     participant CLI as relic ingest
-    participant GH as GitHub REST
+    participant GH as GitHub (GraphQL PRs + REST issues)
     participant LN as Linear GraphQL
     participant RAW as raw store
     participant MAP as mappers
@@ -22,7 +22,7 @@ sequenceDiagram
     participant OAI as OpenAI
     participant DB as FalkorDB
 
-    CLI->>GH: fetch merged PRs (files, reviews, requested reviewers) + issues
+    CLI->>GH: fetch last N months: merged PRs (files, reviews, reviewers) + issues
     GH-->>CLI: PullRequestRec[], IssueRec[]
     opt LINEAR_API_KEY set
         CLI->>LN: fetch issues (paginated)
@@ -42,28 +42,29 @@ sequenceDiagram
 ## Step 1: fetch from GitHub
 
 [`github.py`](../src/relic/ingest/github.py) is an async connector over
-`githubkit`.
+`githubkit`. The fetch is windowed to the last `--months` (default 12) so the
+first run on a large repo does not page its entire history.
 
 **Token.** `resolve_github_token` uses `GITHUB_TOKEN` if set, otherwise shells
 out to `gh auth token`. With neither it raises a clear error.
 
-**Merged PRs.** `fetch_repo` paginates closed PRs and keeps the ones with a
-`merged_at`. With `--limit N` it stops after N merged PRs, most recent first. Each
-kept PR is hydrated concurrently, bounded by an `asyncio.Semaphore` set to
-`SEMAPHORE_LIMIT`. Hydration (`_fetch_pr_detail`) pulls:
+**Merged PRs.** `_fetch_prs_graphql` pulls merged PRs with one batched GraphQL
+query per page — each page returns PRs ordered by `updatedAt` descending, every PR
+carrying its files, reviews, and requested reviewers in the same round trip, so
+there is no per-PR REST fan-out. Paging stops once a PR's `updatedAt` falls before
+the cutoff (a PR merged in-window must have `updatedAt >= mergedAt >= cutoff`); a
+PR updated in-window but merged earlier is skipped. `--limit N` caps the count,
+most recent first.
 
-- changed files (path, additions, deletions, status),
-- reviews (reviewer login and profile URL, state, timestamp, URL, body),
-- requested reviewers.
+**Issues.** `_fetch_issues` uses the REST list endpoint with its native `since`
+filter (issues updated at or after the cutoff), skipping the ones that are actually
+PRs (the issues endpoint returns both). It captures assignees and labels; `--limit`
+caps the count.
 
-**Issues.** `_fetch_issues` paginates all issues and skips the ones that are
-actually PRs (the issues endpoint returns both). It captures assignees and labels.
-`--limit` caps the count.
-
-Everything is normalized to the record dataclasses in `mappers.py`
-(`PullRequestRec`, `ReviewRec`, `FileChange`, `IssueRec`) and bundled into a
-`RepoBundle`. The original payload is kept on each record's `raw` field for the
-raw store.
+Each GraphQL node is parsed by the pure `_pr_node_to_rec` into the same record
+dataclasses in `mappers.py` (`PullRequestRec`, `ReviewRec`, `FileChange`,
+`IssueRec`) the REST path produced, bundled into a `RepoBundle`. The original
+payload is kept on each record's `raw` field for the raw store.
 
 ## Step 2: fetch from Linear (optional)
 
@@ -93,9 +94,10 @@ network, no LLM. It turns each record into an `EpisodeSpec`.
 - `repo_group_id` slugifies `owner/name` to a Graphiti-legal `group_id`: `/`
   becomes `__`, and any other non-`[A-Za-z0-9_-]` character becomes `_`. For
   example `buildrelic/relic-core` becomes `buildrelic__relic-core`.
-- `_clip` trims descriptions and review comments to 4000 characters and drops
-  empty bodies to null, so the PR body informs extraction without blowing up
-  per-episode token cost.
+- `_clip` trims descriptions and review comments to 2000 characters (dropping
+  empty bodies to null), and `_select_reviews` drops bot reviews and caps the
+  number of human reviews per PR (keeping decided states and the most recent), so
+  the PR informs extraction without blowing up per-episode token cost.
 
 The episode JSON keys mirror the flat `*Node` attributes (see
 [data-model.md](data-model.md)) so the extractor maps them onto typed entities.
@@ -109,6 +111,12 @@ The episode JSON keys mirror the flat `*Node` attributes (see
 - It adds episodes **sequentially**, awaiting each before the next. This matters:
   an entity extracted from PR 1 must be resolvable when PR 2's reviewer references
   the same person. Parallel adds would fork the same person into duplicates.
+- `--bulk` (`load_episodes_bulk`) is the faster backfill path: it routes through
+  Graphiti's `add_episode_bulk`, extracting a whole batch in parallel and deduping
+  once. Episodes are grouped by `group_id` (bulk binds one graph per call), chunked,
+  and checkpointed per batch; a failed batch falls back to per-episode adds so the
+  resilience guarantee holds. Sequential remains the default until eval confirms
+  recall parity.
 - Each `add_episode` passes `entity_types`, `edge_types`, `edge_type_map`, and the
   episode's `group_id`. Graphiti routes the write to the FalkorDB graph named by
   that `group_id`, partitioning the graph per repo (see
@@ -120,8 +128,14 @@ The episode JSON keys mirror the flat `*Node` attributes (see
   the wall-clock duration. The CLI logs a one-line summary from it.
 
 The engram client for ingestion is built by `make_engram` with the default
-`FALKORDB_DATABASE` and `max_coroutines=SEMAPHORE_LIMIT`. It is always closed in a
-`finally` so the connection does not leak.
+`FALKORDB_DATABASE` and `max_coroutines=GRAPHITI_MAX_COROUTINES`. It is always
+closed in a `finally` so the connection does not leak. `make_engram` also applies
+two compatibility monkeypatches to graphiti-core 0.29.1: one guards an empty
+FalkorDB fulltext query, the other makes the prompt JSON serializer
+(`to_prompt_json`) tolerate `datetime` values — without it, `add_episode_bulk`
+raises `TypeError: Object of type datetime is not JSON serializable` and falls back
+to slow per-episode loading (seen with the Gemini provider, which populates edge
+timestamps). Both are documented in [`engram.py`](../src/relic/graph/engram.py).
 
 Before any of this, `ingest` runs a fast TCP probe (`falkordb_reachable`). If the
 graph is down it stops with one line (`FalkorDB not reachable at ...`) and a
@@ -136,8 +150,13 @@ API already gives you.
   the LLM only extracts and embeds.
 - **Bounded entity types.** Passing `entity_types` and `edge_types` keeps the
   extractor from inventing a wide schema.
-- **`--limit`.** Bounds the first run on a large repo.
-- **Clipped bodies.** 4000-character cap per description.
+- **`--months` and `--limit`.** The window bounds the fetch to recent history;
+  `--limit` further caps the count on a large repo.
+- **Batched GraphQL fetch.** One query per page hydrates many PRs at once, instead
+  of three-plus REST calls per PR.
+- **Clipped, pruned episodes.** 2000-character cap per description; bot reviews
+  dropped and human reviews capped per PR.
+- **`--bulk`.** Batched loading via `add_episode_bulk` for a faster backfill.
 - **`gpt-4o-mini`.** The cheap model does extraction and reranking.
 
 ## Resumability and re-ingesting

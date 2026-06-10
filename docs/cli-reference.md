@@ -20,11 +20,15 @@ two stubs that land in later phases.
 Pull merged PRs, reviews, and issues into the graph.
 
 ```
-relic ingest --repo OWNER/NAME [--limit N] [--fresh]
+relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh]
 ```
 
 - `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
 - `--limit` (optional): cap merged PRs and issues pulled, most recent first.
+- `--months` (optional, default 12): how many months of history to backfill — PRs
+  merged and issues updated within the window are pulled.
+- `--bulk` (optional): load via batched `add_episode_bulk` for a faster backfill
+  (experimental; sequential is the default). Also set by `BULK_LOAD`.
 - `--fresh` (optional): ignore the checkpoint and reload every episode. Pair it
   with clearing the repo's graph, or you get duplicates.
 
@@ -193,7 +197,7 @@ relic compile --skill ARCHETYPE
 
 | Command | Required args | Key flags | Needs graph |
 |---|---|---|---|
-| `ingest` | `--repo` | `--limit`, `--fresh` | yes |
+| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh` | yes |
 | `recall` | `query` | `--repo`, `--num-results` | yes |
 | `query` | `text` | `--repo` | yes |
 | `eval` | none | `--path`, `--num-results` | yes |

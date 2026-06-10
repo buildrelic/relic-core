@@ -49,8 +49,16 @@ def ingest(
     limit: Annotated[
         int | None, typer.Option(help="cap PRs and issues pulled, most recent first")
     ] = None,
+    months: Annotated[int, typer.Option(help="how many months of history to backfill")] = 12,
+    bulk: Annotated[
+        bool,
+        typer.Option("--bulk", help="load via batched add_episode_bulk (faster, experimental)"),
+    ] = False,
     fresh: Annotated[
         bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
+    ] = False,
+    no_progress: Annotated[
+        bool, typer.Option("--no-progress", help="disable the live progress bar")
     ] = False,
 ) -> None:
     """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2)."""
@@ -59,7 +67,9 @@ def ingest(
     from relic.obs import get_logger
 
     try:
-        asyncio.run(_ingest(repo, limit, fresh=fresh))
+        asyncio.run(
+            _ingest(repo, limit, months=months, bulk=bulk, fresh=fresh, no_progress=no_progress)
+        )
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001 - report infra failures concisely, not as a traceback
@@ -75,19 +85,29 @@ def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
 
 
-async def _ingest(repo: str, limit: int | None = None, *, fresh: bool = False) -> None:
+async def _ingest(
+    repo: str,
+    limit: int | None = None,
+    *,
+    months: int = 12,
+    bulk: bool = False,
+    fresh: bool = False,
+    no_progress: bool = False,
+) -> None:
     import asyncio
+    import logging
     import time
+    from collections.abc import Callable
 
     from relic.config import get_settings
     from relic.graph.engram import falkordb_reachable, make_engram
-    from relic.graph.load import load_episodes
+    from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
     from relic.ingest.checkpoint import checkpoint_path, clear, load_done, record_done
     from relic.ingest.github import fetch_repo, make_github, resolve_github_token
     from relic.ingest.linear import fetch_issues, linear_enabled
     from relic.ingest.mappers import RepoBundle, issue_to_episode, pr_to_episode, repo_group_id
     from relic.ingest.raw_store import dump_raw
-    from relic.obs import get_logger
+    from relic.obs import get_logger, stderr_console
 
     log = get_logger("ingest")
 
@@ -120,7 +140,7 @@ async def _ingest(repo: str, limit: int | None = None, *, fresh: bool = False) -
     token = resolve_github_token(settings)
     async with make_github(token) as gh:
         bundle = await fetch_repo(
-            gh, owner, name, concurrency=settings.semaphore_limit, limit=limit
+            gh, owner, name, concurrency=settings.fetch_concurrency, limit=limit, months=months
         )
     log.info(
         "fetched %d PRs, %d issues from %s in %.1fs",
@@ -170,16 +190,66 @@ async def _ingest(repo: str, limit: int | None = None, *, fresh: bool = False) -
         password=settings.falkordb_password,
         database=settings.falkordb_database,
         api_key=settings.openai_api_key,
-        max_coroutines=settings.semaphore_limit,
+        max_coroutines=settings.graphiti_max_coroutines,
     )
+    use_bulk = bulk or settings.bulk_load
+
+    async def _run(on_progress: Callable[[LoadStats], None] | None) -> LoadStats:
+        # progress=on_progress is None: the bar replaces the "loaded x/y" heartbeat logs
+        # when active, so they aren't emitted twice.
+        common = {
+            "group_id": group_id,
+            "skip": done,
+            "on_loaded": lambda name: record_done(ledger, name),
+            "on_progress": on_progress,
+            "progress": on_progress is None,
+        }
+        if use_bulk:
+            return await load_episodes_bulk(
+                engram, episodes, batch_size=settings.bulk_batch_size, **common
+            )
+        return await load_episodes(engram, episodes, **common)
+
+    # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
+    # and --no-progress; otherwise fall back to the heartbeat log lines.
+    verbose = logging.getLogger("relic").getEffectiveLevel() <= logging.DEBUG
+    bar_console = stderr_console()
+    show_bar = bar_console.is_terminal and not no_progress and not verbose
+
     try:
-        stats = await load_episodes(
-            engram,
-            episodes,
-            group_id=group_id,
-            skip=done,
-            on_loaded=lambda name: record_done(ledger, name),
-        )
+        if show_bar:
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+                TimeElapsedColumn,
+                TimeRemainingColumn,
+            )
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TextColumn("{task.fields[counts]}"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=bar_console,
+            ) as bar:
+                task = bar.add_task(f"ingesting {repo}", total=len(episodes), counts="")
+
+                def _on_progress(s: LoadStats) -> None:
+                    bar.update(
+                        task,
+                        completed=s.loaded + s.skipped + s.failed,
+                        counts=f"[green]{s.loaded}✓[/] [yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]",
+                    )
+
+                stats = await _run(_on_progress)
+        else:
+            stats = await _run(None)
     finally:
         await engram.close()
 

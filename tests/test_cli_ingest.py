@@ -107,6 +107,43 @@ def test_exit_0_on_successful_load(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     assert result.exit_code == 0
 
 
+def _patch_loaders(monkeypatch: pytest.MonkeyPatch, stats: LoadStats) -> list[str]:
+    """Patch both loaders to record which one _ingest routes to. Returns the call log."""
+    called: list[str] = []
+
+    async def _bulk(*_a, **_k):
+        called.append("bulk")
+        return stats
+
+    async def _seq(*_a, **_k):
+        called.append("seq")
+        return stats
+
+    monkeypatch.setattr("relic.graph.load.load_episodes_bulk", _bulk)
+    monkeypatch.setattr("relic.graph.load.load_episodes", _seq)
+    return called
+
+
+def test_bulk_flag_routes_to_bulk_loader(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
+    _patch_happy_path(monkeypatch, tmp_path, stats=stats)
+    called = _patch_loaders(monkeypatch, stats)
+
+    result = runner.invoke(app, ["ingest", "--repo", "demo/repo", "--bulk"])
+    assert result.exit_code == 0
+    assert called == ["bulk"]
+
+
+def test_default_routes_to_sequential_loader(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
+    _patch_happy_path(monkeypatch, tmp_path, stats=stats)
+    called = _patch_loaders(monkeypatch, stats)
+
+    result = runner.invoke(app, ["ingest", "--repo", "demo/repo"])
+    assert result.exit_code == 0
+    assert called == ["seq"]
+
+
 def test_fresh_clears_the_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
     _patch_happy_path(monkeypatch, tmp_path, stats=stats)

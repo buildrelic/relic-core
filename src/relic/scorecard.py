@@ -10,8 +10,10 @@ numbers, all read off the same run:
 - **MRR** -- mean reciprocal rank of the first fact citing an expected source.
   Rank-sensitive, so it moves when reranking pushes the right fact up or down;
   this is the number recall reranking is tuned against.
-- **coverage** -- for cases that expect several sources, the mean share found.
-  A hit on one of two expected PRs is half coverage, not a clean pass.
+- **coverage** -- mean share of each case's expected sources that were cited,
+  averaged across all cases. One of two expected PRs found is half coverage, not
+  a clean pass. For a single-source case coverage equals the hit, so this only
+  separates from hit rate as multi-source cases land in the gold set.
 
 This turns "is recall any good?" into numbers you can watch as ingestion and
 retrieval change, and the ruler costs nothing per run beyond the recall calls it
@@ -100,6 +102,10 @@ def load_gold(path: str | Path) -> GoldSet:
         )
         for case in data["cases"]
     ]
+    for case in cases:
+        if not case.expect_prs and not case.expect_issues:
+            msg = f"gold case has no expected sources: {case.question!r}"
+            raise ValueError(msg)
     return GoldSet(repo=data["repo"], cases=cases)
 
 
@@ -113,6 +119,8 @@ def score_case(case: EvalCase, repo: str, answer: RecallAnswer) -> CaseResult:
     """
     expected = [pr_url(repo, number) for number in case.expect_prs]
     expected += [issue_url(repo, number) for number in case.expect_issues]
+    # dedup, order preserved: a number listed twice must not deflate coverage
+    expected = list(dict.fromkeys(expected))
     expected_set = set(expected)
 
     found_urls: list[str] = []
@@ -143,14 +151,15 @@ def summarize(results: list[CaseResult]) -> str:
     pct = round(100 * hits / total) if total else 0
     mrr = sum(result.reciprocal_rank for result in results) / total if total else 0.0
     coverage = sum(result.coverage for result in results) / total if total else 0.0
-    lines = [
-        f"recall scorecard: {hits}/{total} cited the right source ({pct}%)",
-        "",
-        f"  hit rate   {hits}/{total} ({pct}%)".ljust(26) + "at least one expected source cited",
-        f"  MRR        {mrr:.2f}".ljust(26) + "rank of the first correct source, averaged",
-        f"  coverage   {coverage:.2f}".ljust(26) + "expected sources found per case, averaged",
-        "",
+    metrics = [
+        ("hit rate", f"{hits}/{total} ({pct}%)", "at least one expected source cited"),
+        ("MRR", f"{mrr:.2f}", "mean 1/rank of the first correct source (1.0 = always first)"),
+        ("coverage", f"{coverage:.2f}", "mean share of expected sources found"),
     ]
+    value_width = max(len(value) for _, value, _ in metrics) + 4
+    lines = [f"recall scorecard: {hits}/{total} cited the right source ({pct}%)", ""]
+    lines += [f"  {name:<11}{value:<{value_width}}{caption}" for name, value, caption in metrics]
+    lines.append("")
     for result in results:
         mark = "PASS" if result.hit else "MISS"
         detail = ""
@@ -160,6 +169,8 @@ def summarize(results: list[CaseResult]) -> str:
                 bits.append(f"{len(result.matched_urls)}/{len(result.expected_urls)} sources")
             detail = f"  ({', '.join(bits)})"
         lines.append(f"[{mark}] {result.question}{detail}")
-        if not result.hit:
-            lines.append(f"       wanted: {', '.join(result.expected_urls) or '(none)'}")
+        missing = [url for url in result.expected_urls if url not in result.matched_urls]
+        if missing:
+            label = "wanted" if not result.hit else "missing"
+            lines.append(f"       {label}: {', '.join(missing)}")
     return "\n".join(lines)

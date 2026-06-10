@@ -5,7 +5,10 @@ an expected PR url is among the cited sources. No graph and no key needed, so
 the ruler is testable offline.
 """
 
+import json
 from pathlib import Path
+
+import pytest
 
 from relic.graph.recall import RecallAnswer, RecalledFact, Source
 from relic.scorecard import EvalCase, issue_url, load_gold, pr_url, score_case, summarize
@@ -117,3 +120,30 @@ def test_summarize_reports_mrr_and_coverage() -> None:
     assert "0.75" in text  # (1/1 + 1/2) / 2
     assert "coverage" in text
     assert "rank 1" in text
+
+
+def test_summarize_lists_missing_sources_on_partial_hit() -> None:
+    case = EvalCase(question="q", expect_prs=[1, 4])
+    text = summarize([score_case(case, REPO, _answer(pr_url(REPO, 1)))])
+    assert "1/2 sources" in text
+    assert f"missing: {pr_url(REPO, 4)}" in text
+    assert pr_url(REPO, 1) not in text.split("missing:")[1]
+
+
+def test_score_case_dedups_expected_urls() -> None:
+    # a pr listed twice in the gold set must not cap coverage at 0.5
+    case = EvalCase(question="q", expect_prs=[4, 4])
+    result = score_case(case, REPO, _answer(pr_url(REPO, 4)))
+    assert result.expected_urls == [pr_url(REPO, 4)]
+    assert result.coverage == 1.0
+
+
+def test_load_gold_rejects_case_with_no_expected_sources(tmp_path: Path) -> None:
+    path = tmp_path / "gold.json"
+    path.write_text(json.dumps({"repo": REPO, "cases": [{"question": "q"}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no expected sources"):
+        load_gold(path)
+
+
+def test_summarize_handles_empty_results() -> None:
+    assert "0/0" in summarize([])

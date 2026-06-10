@@ -116,8 +116,10 @@ aggregates plus a per-case line:
 - **MRR.** Mean reciprocal rank of the first fact that cites an expected source.
   Rank is counted in facts, the unit recall ranks and reranking reorders, so this
   is the number to tune recall reranking against.
-- **Coverage.** For cases that expect several sources, the mean share found. One
-  hit out of two expected PRs is half coverage, not a clean pass.
+- **Coverage.** The mean share of each case's expected sources found, across all
+  cases. One hit out of two expected PRs is half coverage, not a clean pass. For
+  single-source cases coverage equals the hit, so this only adds signal beyond
+  hit rate as multi-source cases land in the gold set.
 
 There is no LLM judge. Scoring is a deterministic URL comparison, so the ruler
 costs nothing beyond the recall calls it measures. Use it to tell whether an

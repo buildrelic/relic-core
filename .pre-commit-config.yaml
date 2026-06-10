@@ -4,3 +4,11 @@ repos:
     hooks:
       - id: ruff
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: ensure-claude-md
+        name: ensure CLAUDE.md in every code directory
+        entry: python3 scripts/ensure_claude_md.py
+        language: system
+        pass_filenames: false
+        always_run: true

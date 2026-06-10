@@ -129,6 +129,34 @@ not a one-liner. Cover three things:
 - **Primary interface.** MCP server.
 - **Other libraries.** Everything else is open. Read the relevant docs before writing code.
 
+## Directory context files (CLAUDE.md)
+
+Every directory that directly holds tracked code carries a CLAUDE.md: what
+the directory is for, its files, how the code is invoked, gotchas. This file
+is the repo-wide context; the per-directory files go deeper. Claude Code
+loads them on demand when working in that subtree.
+
+- When a change alters how a directory works, update its CLAUDE.md in the
+  same commit. Same rule as this file: current state only, no changelogs.
+  History lives in the git log.
+- New directories get a stub automatically: `scripts/ensure_claude_md.py`
+  runs from pre-commit and from a Claude Code hook in
+  `.claude/settings.json`. Fill the stub in before committing.
+
+## Project skills (.claude/skills/)
+
+Skills are repeatable procedures: how to run a backfill, add a connector,
+upgrade graphiti, debug the graph. CLAUDE.md files say what the code is;
+skills say how to do multi-step work.
+
+- When doing a task teaches you something a skill should have told you (a
+  wrong or missing step, a new gotcha, a changed flag, a new gold case
+  worth keeping), update that skill in the same commit as the work. Same
+  rule as CLAUDE.md: current state only, no changelogs.
+- Hand-authored skill directories must not reuse a registry skill_id:
+  `relic emit` writes generated skills into `.claude/skills/<skill_id>/`
+  and would overwrite or prune them.
+
 ## Maintaining this file
 
 Keep this file current, but keep it lean. It is the first thing the next agent

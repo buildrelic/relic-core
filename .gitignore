@@ -31,4 +31,6 @@ yarn-error.log*
 .idea/
 .vscode/
 .cursor/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
 *.log

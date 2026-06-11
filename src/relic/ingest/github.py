@@ -1,4 +1,4 @@
-"""GitHub connector: windowed pulls of merged PRs (with files + reviews) and issues.
+"""GitHub connector: windowed pulls of merged + closed PRs (with files + reviews) and issues.
 
 PRs are fetched with a single batched GraphQL query per page (PR plus its files,
 reviews, and requested reviewers in one round trip) instead of a REST fan-out of
@@ -10,6 +10,7 @@ does not page the repo's entire history. Issues stay on the REST list endpoint
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -37,7 +38,7 @@ _PR_QUERY = """
 query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(
-      states: MERGED
+      states: [MERGED, CLOSED]
       orderBy: {field: UPDATED_AT, direction: DESC}
       first: $first
       after: $after
@@ -48,8 +49,10 @@ query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
         title
         url
         body
+        state
         createdAt
         mergedAt
+        closedAt
         updatedAt
         author { login url }
         files(last: __FILES__) { nodes { path additions deletions } }
@@ -114,14 +117,19 @@ async def fetch_repo(
     limit: int | None = None,
     months: int = _DEFAULT_MONTHS,
 ) -> RepoBundle:
-    """Fetch merged PRs (with files + reviews) and non-PR issues for `owner/name`.
+    """Fetch terminal-state PRs (with files + reviews) and non-PR issues for `owner/name`.
 
-    Only items from the last ``months`` are pulled: PRs merged within the window and
-    issues updated within it. ``limit`` further caps how many PRs and issues are kept,
-    to bound the first run on a large repo. Because both queries page by *update* time
-    (descending), ``limit`` keeps the most-recently-**updated** items, which for a busy
-    repo is not exactly the most-recently-**merged** PRs (an old PR with a fresh comment
-    sorts ahead of a newer merge).
+    Both merged and closed-without-merge PRs are pulled -- a close without a merge still
+    carries signal ("we tried this and dropped it"). Open and draft PRs are skipped on
+    purpose: they are mutable, and the name-keyed checkpoint can't update an episode once
+    it lands, so an ingested draft would freeze at its in-progress state and never reflect
+    the eventual merge. ``_pr_state`` labels each as merged vs closed.
+
+    Only items from the last ``months`` are pulled: PRs whose terminal event (merge or
+    close) falls in the window, and issues updated within it. ``limit`` further caps how
+    many PRs and issues are kept, to bound the first run on a large repo. Both queries page
+    by *update* time (descending), so ``limit`` keeps the most-recently-**updated** items,
+    not strictly the most-recently-resolved (an old PR with a fresh comment sorts ahead).
 
     ``concurrency`` is retained for back-compat (and a possible REST fallback); the
     GraphQL PR path batches many PRs per request, so it does not fan out per PR.
@@ -134,6 +142,17 @@ async def fetch_repo(
     bundle.pull_requests = await _fetch_prs_graphql(gh, owner, name, cutoff=cutoff, limit=limit)
     bundle.issues = await _fetch_issues(gh, owner, name, cutoff=cutoff, limit=limit)
     return bundle
+
+
+def _pr_state(node: dict[str, Any]) -> str:
+    """Collapse a GraphQL PR node's status into one label (the lowercased ``state`` enum).
+
+    GraphQL's ``state`` already folds a merge in -- a merged PR is ``MERGED``, never
+    ``CLOSED`` -- so the enum alone separates merged from closed-without-merge, with no
+    cross-check of ``mergedAt`` the way the REST shape needed. The query fetches only
+    MERGED and CLOSED, so in practice this returns "merged" or "closed".
+    """
+    return (node.get("state") or "").lower()
 
 
 def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
@@ -178,7 +197,7 @@ def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
         number=int(node["number"]),
         title=node.get("title", ""),
         url=node.get("url", ""),
-        state="merged",
+        state=_pr_state(node),
         author_login=author.get("login"),
         author_url=author.get("url"),
         created_at=node.get("createdAt", ""),
@@ -194,15 +213,15 @@ def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
 async def _fetch_prs_graphql(
     gh: GitHub, owner: str, name: str, *, cutoff: datetime, limit: int | None = None
 ) -> list[PullRequestRec]:
-    """Page merged PRs (updated-desc) via GraphQL, stopping once past the window.
+    """Page terminal-state PRs (merged + closed) via GraphQL, stopping once past the window.
 
-    Because nodes come back ordered by ``updatedAt`` descending and a PR merged in the
-    window must have ``updatedAt >= mergedAt >= cutoff``, we can stop paging the moment a
-    node's ``updatedAt`` falls before the cutoff. A node updated in-window but merged
-    before it (e.g. an old PR that got a recent comment) is skipped, not a stop signal.
+    Because nodes come back ordered by ``updatedAt`` descending and a PR's terminal event
+    (merge or close) is never after its last update, we can stop paging the moment a node's
+    ``updatedAt`` falls before the cutoff. A node updated in-window but resolved before it
+    (e.g. an old PR that got a recent comment) is skipped, not a stop signal.
 
-    ``limit`` cuts off the walk early, so it keeps the most-recently-updated merged PRs in
-    the window -- not strictly the most-recently-merged, since the ordering is by update.
+    ``limit`` cuts off the walk early, so it keeps the most-recently-updated terminal PRs in
+    the window -- not strictly the most-recently-resolved, since the ordering is by update.
     """
     prs: list[PullRequestRec] = []
     after: str | None = None
@@ -219,8 +238,11 @@ async def _fetch_prs_graphql(
             if updated is not None and updated < cutoff:
                 stop = True
                 break
-            merged = _parse_dt(node.get("mergedAt"))
-            if merged is not None and merged < cutoff:
+            # Terminal time = when the PR left the open set: its merge, else its close.
+            # Skip a PR whose terminal event predates the window even though a later
+            # comment bumped updatedAt into it -- mirrors the rule for merged PRs.
+            terminal = _parse_dt(node.get("mergedAt")) or _parse_dt(node.get("closedAt"))
+            if terminal is not None and terminal < cutoff:
                 continue
             prs.append(_pr_node_to_rec(node))
             if limit is not None and len(prs) >= limit:
@@ -231,6 +253,25 @@ async def _fetch_prs_graphql(
             break
         after = page_info.get("endCursor")
     return prs
+
+
+_PARENT_URL_RE = re.compile(r"/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)")
+
+
+def _parent_identifier(parent_issue_url: str | None) -> str | None:
+    """Turn a GitHub ``parent_issue_url`` into our ``owner/repo#number`` identifier.
+
+    Sub-issues carry their parent's REST URL inline in the issues list response, so
+    no extra call is needed. Parsing it into the same identifier shape
+    ``_fetch_issues`` builds lets the child and parent line up in the graph. A
+    cross-repo parent keeps its own owner/repo.
+    """
+    if not parent_issue_url:
+        return None
+    match = _PARENT_URL_RE.search(parent_issue_url)
+    if not match:
+        return None
+    return f"{match['owner']}/{match['repo']}#{match['number']}"
 
 
 async def _fetch_issues(
@@ -272,6 +313,7 @@ async def _fetch_issues(
                 labels=label_names,
                 created_at=data.get("created_at"),
                 closed_at=data.get("closed_at"),
+                parent=_parent_identifier(data.get("parent_issue_url")),
                 raw=data,
             )
         )

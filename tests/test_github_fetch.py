@@ -25,19 +25,26 @@ def _node(
     number: int,
     *,
     updated: str,
-    merged: str,
+    merged: str | None = None,
+    closed: str | None = None,
+    state: str = "MERGED",
     author: str | None = "alice",
     reviews: list[dict[str, Any]] | None = None,
     files: list[dict[str, Any]] | None = None,
     requested: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Defaults model a merged PR (the common case); pass closed=/state="CLOSED" with no
+    # merged= for a close-without-merge. closedAt falls back to mergedAt so a merged node
+    # still carries one, matching what GraphQL returns.
     return {
         "number": number,
         "title": f"PR {number}",
         "url": f"https://github.com/o/r/pull/{number}",
         "body": "body",
-        "createdAt": merged,
+        "state": state,
+        "createdAt": merged or closed or updated,
         "mergedAt": merged,
+        "closedAt": closed or merged,
         "updatedAt": updated,
         "author": {"login": author, "url": f"https://github.com/{author}"} if author else None,
         "files": {"nodes": files or []},
@@ -100,6 +107,34 @@ async def test_merged_before_cutoff_is_skipped_not_a_stop() -> None:
     )
     prs = await _fetch_prs_graphql(cast("GitHub", gh), "o", "r", cutoff=CUTOFF)
     assert [p.number for p in prs] == [5]
+
+
+async def test_closed_pr_windows_on_closed_at() -> None:
+    # Closed-without-merge PRs have no mergedAt, so the window falls back to closedAt:
+    # #6 closed in-window is kept (labeled "closed"); #4 closed long ago but bumped into
+    # the window by a recent comment is skipped, same as the merged-before-cutoff case.
+    gh = _FakeGraphQLGH(
+        {
+            None: _page(
+                [
+                    _node(
+                        6,
+                        updated="2025-07-01T00:00:00Z",
+                        closed="2025-07-01T00:00:00Z",
+                        state="CLOSED",
+                    ),
+                    _node(
+                        4,
+                        updated="2025-06-15T00:00:00Z",
+                        closed="2025-01-01T00:00:00Z",
+                        state="CLOSED",
+                    ),
+                ]
+            )
+        }
+    )
+    prs = await _fetch_prs_graphql(cast("GitHub", gh), "o", "r", cutoff=CUTOFF)
+    assert [(p.number, p.state) for p in prs] == [(6, "closed")]
 
 
 async def test_limit_caps_pr_count() -> None:
@@ -173,6 +208,16 @@ async def test_pr_node_parses_and_maps_to_the_same_episode() -> None:
     assert body["requested_reviewers"] == ["abhinavp5"]
 
 
+def test_pr_node_closed_without_merge_is_labeled_closed() -> None:
+    # A close without a merge: GraphQL state CLOSED, no mergedAt. The rec carries "closed"
+    # and a null merged_at, so pr_to_episode later anchors it to created_at, not a merge.
+    node = _node(3, updated="2025-08-02T00:00:00Z", closed="2025-08-02T00:00:00Z", state="CLOSED")
+    rec = _pr_node_to_rec(node)
+    assert rec.state == "closed"
+    assert rec.merged_at is None
+    assert json.loads(pr_to_episode(rec, _repo()).body)["pull_request"]["state"] == "closed"
+
+
 def test_pr_node_handles_null_author_and_non_user_reviewer() -> None:
     node = _node(
         1,
@@ -210,8 +255,9 @@ def test_pr_node_sets_is_bot_from_typename_and_drops_it() -> None:
     assert [(r.login, r.is_bot) for r in rec.reviews] == [("alice", False), ("dependabot", True)]
 
     # Parity: the bot review is dropped from the episode body, the human one kept.
+    # Reviews nest the reviewer under a nullable "reviewer" key (ghost reviewer -> null).
     body = json.loads(pr_to_episode(rec, _repo()).body)
-    assert [r["login"] for r in body["reviews"]] == ["alice"]
+    assert [r["reviewer"]["login"] for r in body["reviews"]] == ["alice"]
 
 
 def test_pr_query_keeps_newest_reviews_and_files() -> None:

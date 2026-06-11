@@ -47,7 +47,7 @@ def _main(
 def ingest(
     repo: Annotated[str, typer.Option(help="owner/name to ingest")],
     limit: Annotated[
-        int | None, typer.Option(help="cap merged PRs and issues pulled, most recent first")
+        int | None, typer.Option(help="cap PRs and issues pulled, most recent first")
     ] = None,
     months: Annotated[int, typer.Option(help="how many months of history to backfill")] = 12,
     bulk: Annotated[
@@ -61,7 +61,7 @@ def ingest(
         bool, typer.Option("--no-progress", help="disable the live progress bar")
     ] = False,
 ) -> None:
-    """Pull merged PRs, reviews, and issues into the graph (Phase 2)."""
+    """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2)."""
     import asyncio
 
     from relic.obs import get_logger
@@ -143,7 +143,7 @@ async def _ingest(
             gh, owner, name, concurrency=settings.fetch_concurrency, limit=limit, months=months
         )
     log.info(
-        "fetched %d merged PRs, %d issues from %s in %.1fs",
+        "fetched %d PRs, %d issues from %s in %.1fs",
         len(bundle.pull_requests),
         len(bundle.issues),
         repo,

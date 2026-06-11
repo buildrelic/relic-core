@@ -8,6 +8,7 @@ from relic.ingest.mappers import (
     PullRequestRec,
     RepoBundle,
     ReviewRec,
+    _parse_coauthors,
     issue_to_episode,
     pr_to_episode,
     repo_group_id,
@@ -61,6 +62,7 @@ def test_pr_to_episode_shape_and_group() -> None:
     body = json.loads(spec.body)
     assert body["pull_request"]["number"] == 4
     assert body["pull_request"]["author"]["login"] == "paris-phan"
+    assert body["reviews"][0]["reviewer"]["login"] == "paris-phan"
     assert body["reviews"][0]["state"] == "COMMENTED"
     assert body["reviews"][0]["comment"] == "please add a regression test"
     assert body["requested_reviewers"] == ["abhinavp5"]
@@ -121,7 +123,9 @@ def _pr_with_reviews(reviews: list[ReviewRec]) -> PullRequestRec:
 
 
 def _episode_review_logins(pr: PullRequestRec) -> list[str | None]:
-    return [r["login"] for r in json.loads(pr_to_episode(pr, _repo()).body)["reviews"]]
+    # Reviews nest the (nullable) reviewer; a ghost/deleted reviewer surfaces as None.
+    reviews = json.loads(pr_to_episode(pr, _repo()).body)["reviews"]
+    return [r["reviewer"]["login"] if r["reviewer"] else None for r in reviews]
 
 
 def test_bot_reviews_are_dropped() -> None:
@@ -207,3 +211,160 @@ def test_issue_to_episode() -> None:
     assert body["issue"]["labels"] == ["bug"]
     assert body["issue"]["assignees"] == ["paris-phan"]
     assert body["issue"]["description"] == "scheduler crashes on empty input"
+    assert body["issue"]["parent"] is None  # no parent for a top-level issue
+
+
+# --- REL-9 edge cases -------------------------------------------------------
+
+
+def _pr(**overrides: object) -> PullRequestRec:
+    """A minimal merged PR; override fields per edge case."""
+    base: dict[str, object] = {
+        "number": 1,
+        "title": "do a thing",
+        "url": "https://github.com/paris-phan/course-scheduler/pull/1",
+        "state": "merged",
+        "author_login": "paris-phan",
+        "author_url": "https://github.com/paris-phan",
+        "created_at": "2025-01-01T00:00:00Z",
+        "merged_at": "2025-01-02T00:00:00Z",
+    }
+    base.update(overrides)
+    return PullRequestRec(**base)  # type: ignore[arg-type]
+
+
+def test_closed_without_merge_keeps_state_and_falls_back_to_created_at() -> None:
+    # A PR closed without merging has no merged_at: it should still map, anchored
+    # to when it was opened, and keep its real state rather than "merged".
+    pr = _pr(number=2, state="closed", merged_at=None, created_at="2025-03-01T00:00:00Z")
+    spec = pr_to_episode(pr, _repo())
+    assert spec.reference_time == datetime(2025, 3, 1, tzinfo=UTC)
+    body = json.loads(spec.body)
+    assert body["pull_request"]["state"] == "closed"
+    assert body["pull_request"]["merged_at"] is None
+
+
+def test_draft_pr_state_is_preserved() -> None:
+    pr = _pr(number=3, state="draft", merged_at=None)
+    body = json.loads(pr_to_episode(pr, _repo()).body)
+    assert body["pull_request"]["state"] == "draft"
+
+
+def test_ghost_author_is_omitted_not_emitted_empty() -> None:
+    # A deleted/bot opener has no login; emit author: null rather than a phantom
+    # Person with no identity for the extractor to choke on.
+    pr = _pr(author_login=None, author_url=None)
+    body = json.loads(pr_to_episode(pr, _repo()).body)
+    assert body["pull_request"]["author"] is None
+
+
+def test_ghost_reviewer_is_omitted_not_emitted_empty() -> None:
+    # Same class as the ghost author: a review by a deleted account keeps its
+    # state/comment signal but emits reviewer: null, not an identity-less Person.
+    pr = _pr(
+        reviews=[
+            ReviewRec(
+                login=None,
+                profile_url=None,
+                state="APPROVED",
+                submitted_at="2025-01-01T12:00:00Z",
+                url="https://github.com/paris-phan/course-scheduler/pull/1#r1",
+                body="lgtm",
+            )
+        ]
+    )
+    review = json.loads(pr_to_episode(pr, _repo()).body)["reviews"][0]
+    assert review["reviewer"] is None
+    assert review["state"] == "APPROVED"
+    assert review["comment"] == "lgtm"
+
+
+def test_coauthored_by_trailers_become_co_authors() -> None:
+    pr = _pr(
+        body=(
+            "Implements the feature.\n\n"
+            "Co-authored-by: Bob Jones <bob@example.com>\n"
+            "Co-authored-by: Carol <carol@example.com>\n"
+        )
+    )
+    body = json.loads(pr_to_episode(pr, _repo()).body)
+    co = body["pull_request"]["co_authors"]
+    assert {"name": "Bob Jones", "email": "bob@example.com"} in co
+    assert {"name": "Carol", "email": "carol@example.com"} in co
+    assert len(co) == 2
+
+
+def test_parse_coauthors_handles_crlf_line_endings() -> None:
+    # GitHub returns PR bodies with CRLF; the trailers must still parse (regression).
+    body = (
+        "Implements it.\r\n\r\n"
+        "Co-authored-by: Bob <bob@x.com>\r\n"
+        "Co-authored-by: Carol <carol@y.com>\r\n"
+    )
+    out = _parse_coauthors(body)
+    assert {"name": "Bob", "email": "bob@x.com"} in out
+    assert {"name": "Carol", "email": "carol@y.com"} in out
+    assert len(out) == 2
+
+
+def test_parse_coauthors_dedupes_and_allows_missing_email() -> None:
+    body = (
+        "Co-authored-by: Bob <bob@x.com>\n"
+        "co-authored-by: Bob <bob@x.com>\n"  # duplicate, different keyword case
+        "Co-authored-by: Dana\n"  # name only, no email
+    )
+    out = _parse_coauthors(body)
+    assert {"name": "Bob", "email": "bob@x.com"} in out
+    assert {"name": "Dana"} in out
+    assert len(out) == 2
+
+
+def test_parse_coauthors_email_only_trailer_yields_email_only_entry() -> None:
+    # Git-generated trailers always carry a name, but a hand-typed email-only one
+    # still identifies a person: keep it as an email-only entry rather than drop it.
+    out = _parse_coauthors("Co-authored-by: <bob@x.com>\nCo-authored-by: Carol <c@y.com>\n")
+    assert out == [{"email": "bob@x.com"}, {"name": "Carol", "email": "c@y.com"}]
+
+
+def test_code_fences_in_body_are_defused() -> None:
+    # A ``` in a quoted commit message / code block must not survive as a run of
+    # three, or it would close the fenced block the extractor wraps the body in.
+    pr = _pr(body="see the snippet:\n```python\nprint('hi')\n```\nthanks")
+    desc = json.loads(pr_to_episode(pr, _repo()).body)["pull_request"]["description"]
+    assert "```" not in desc  # no surviving fence delimiter
+    assert "print('hi')" in desc  # surrounding content is otherwise intact
+    assert "python" in desc
+
+
+def test_code_fences_in_titles_are_defused() -> None:
+    # Titles bypass _clip (never nulled or truncated) but still need defusing: a
+    # ``` in a PR or issue title would close the extractor's fence just like a body.
+    pr = _pr(title="fix ``` handling in parser")
+    pr_title = json.loads(pr_to_episode(pr, _repo()).body)["pull_request"]["title"]
+    assert "```" not in pr_title
+    assert "fix" in pr_title and "handling in parser" in pr_title
+
+    issue = IssueRec(
+        source="github",
+        identifier="paris-phan/course-scheduler#9",
+        title="docs show ``` blocks unrendered",
+        url="https://github.com/paris-phan/course-scheduler/issues/9",
+        state="open",
+        created_at="2025-02-02T00:00:00Z",
+    )
+    issue_title = json.loads(issue_to_episode(issue, _repo()).body)["issue"]["title"]
+    assert "```" not in issue_title
+
+
+def test_subissue_parent_is_carried_into_episode() -> None:
+    issue = IssueRec(
+        source="linear",
+        identifier="REL-9",
+        title="mapper edge cases",
+        url="https://linear.app/buildrelic/issue/REL-9",
+        state="Todo",
+        created_at="2025-02-02T00:00:00Z",
+        parent="REL-1",
+    )
+    body = json.loads(issue_to_episode(issue, _repo()).body)
+    assert body["issue"]["parent"] == "REL-1"

@@ -127,10 +127,13 @@ text, with a deterministic Cypher fallback if hybrid search comes back empty.
 The recall scorecard. Measures whether recall cites the PR or issue that actually
 holds each answer.
 
-- **Invocation.** `relic eval [--path eval/github_recall.json] [--num-results N]`.
+- **Invocation.** `relic eval [--path eval/github_recall.json] [--num-results N]
+  [--json out.json]`.
 - **Reads.** A gold set JSON (questions plus the PR or issue numbers that answer
   them); the graph.
-- **Writes.** Nothing. Prints a hit rate plus a per-case pass or miss line.
+- **Writes.** Nothing by default. Prints three metrics (hit rate, MRR, coverage)
+  plus a per-case pass or miss line; with `--json`, also writes the run as
+  machine-readable JSON for tracking metrics across runs.
 - **Depends on.** `OPENAI_API_KEY` and FalkorDB.
 - **No LLM judge.** Scoring is a deterministic URL match, so the ruler itself
   costs nothing beyond the recall calls it measures

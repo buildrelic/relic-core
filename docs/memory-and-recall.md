@@ -101,19 +101,35 @@ it never raises.
 
 ## Eval: the recall scorecard
 
-[`scorecard.py`](../src/relic/scorecard.py) measures recall quality as a single
-number. A gold set ([`eval/github_recall.json`](../eval/github_recall.json)) names
-a repo and a list of cases, each a question plus the PR or issue numbers whose
-content answers it.
+[`scorecard.py`](../src/relic/scorecard.py) measures recall quality as a small set
+of numbers. A gold set ([`eval/github_recall.json`](../eval/github_recall.json))
+names a repo and a list of cases, each a question plus the PR or issue numbers
+whose content answers it.
 
-`relic eval` runs recall for each question, then `score_case` checks whether any
-expected PR or issue URL appears among the recalled facts' sources. A hit is an
-exact URL match. `summarize` prints the hit rate plus a per-case pass or miss line,
-showing the wanted URLs on a miss.
+`relic eval` runs recall for each question, then `score_case` walks the recalled
+facts in ranked order and records which expected PR or issue URLs were cited and how
+highly. A match is an exact URL comparison after case and trailing-slash
+normalization (GitHub URLs are case-insensitive, and a cosmetic near-miss must not
+score zero). From that, `summarize` reports three aggregates plus a per-case line:
+
+- **Hit rate.** Share of cases where at least one expected source was cited. The
+  coarsest signal, and what the scorecard reported originally.
+- **MRR.** Mean reciprocal rank of the first fact that cites an expected source.
+  Rank is counted in facts, the unit recall ranks and reranking reorders, so this
+  is the number to tune recall reranking against.
+- **Coverage.** The mean share of each case's expected sources found, across all
+  cases. One hit out of two expected PRs is half coverage, not a clean pass. For
+  single-source cases coverage equals the hit, so this only adds signal beyond
+  hit rate as multi-source cases land in the gold set.
 
 There is no LLM judge. Scoring is a deterministic URL comparison, so the ruler
 costs nothing beyond the recall calls it measures. Use it to tell whether an
 ingestion or retrieval change actually moved recall instead of eyeballing answers.
+`relic eval --json out.json` additionally writes the run as JSON (the aggregates
+plus per-case detail), so metrics can be tracked across runs rather than read
+out of terminal scrollback. `load_gold` rejects gold sets that would score
+misleadingly: a malformed repo or non-integer number builds URLs that can never
+match, and a case with no expected sources can never hit.
 
 ## The FalkorDB workaround
 

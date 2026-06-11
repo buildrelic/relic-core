@@ -129,6 +129,24 @@ not a one-liner. Cover three things:
 - **Primary interface.** MCP server.
 - **Other libraries.** Everything else is open. Read the relevant docs before writing code.
 
+## Agent skills
+
+### Issue tracker
+
+Issues live in Linear (team Relic, `REL-` keys), driven via the Linear MCP. Code
+and review land as GitHub PRs in `buildrelic/relic-core` that reference the `REL-`
+key. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage roles map onto Linear workflow states plus two labels (`needs-info`,
+`agent-ready`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.
+
 ## Maintaining this file
 
 Keep this file current, but keep it lean. It is the first thing the next agent

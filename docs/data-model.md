@@ -23,7 +23,7 @@ nest objects, and they cannot use Graphiti's reserved attribute names: `uuid`,
 `created_at`.
 
 So the two are kept apart. The rich models stay the source of truth for the typed
-API. The flat `*Node` models in [`engram.py`](../src/relic/graph/engram.py) are
+API. The flat `*Node` models in [`engram.py`](../packages/relic-graph/src/relic/graph/engram.py) are
 the graph-facing mirror. When the typed API needs richer structure than the graph
 can hold, the rich layer already has it.
 
@@ -35,7 +35,7 @@ objects, and enums are lowercase `Literal` aliases.
 
 ### Primitives
 
-[`primitives.py`](../src/relic/ontology/primitives.py) holds the shared building
+[`primitives.py`](../packages/relic-core/src/relic/ontology/primitives.py) holds the shared building
 blocks: `Id` (a `str` alias), `TimePoint` (a `datetime` alias), `TimeRange`,
 `Money`, `Link`, `ContactInfo`, `AuditInfo`, `TextBlob`, and `Taggable`.
 `AuditInfo` (created_by, created_at, last_edited_by, last_edited_at) is the
@@ -43,7 +43,7 @@ provenance record carried by most entities.
 
 ### Engineering subset
 
-[`entities.py`](../src/relic/ontology/entities.py) holds the types the prototype
+[`entities.py`](../packages/relic-core/src/relic/ontology/entities.py) holds the types the prototype
 actually ingests:
 
 - `Person`: a teammate or external collaborator (extends `Taggable`, carries
@@ -59,7 +59,7 @@ actually ingests:
 
 ### Broader org model
 
-[`org.py`](../src/relic/ontology/org.py) ports the rest of the system-design
+[`org.py`](../packages/relic-core/src/relic/ontology/org.py) ports the rest of the system-design
 ontology, beyond what the prototype ingests today: `Employee` (extends `Person`),
 `Team`, `Customer`, `Product`, `Project`, `Document`, `Meeting`, `Decision`,
 `Policy`, and the OKR types (`OKRGoal`, `KeyResult`, `Metric`). These are defined
@@ -67,11 +67,11 @@ and exported but not yet populated by any connector. They are the schema the
 platform grows into as more sources land.
 
 All ontology types are re-exported from
-[`ontology/__init__.py`](../src/relic/ontology/__init__.py).
+[`ontology/__init__.py`](../packages/relic-core/src/relic/ontology/__init__.py).
 
 ## Layer 2: the flat graph types
 
-[`engram.py`](../src/relic/graph/engram.py) declares the types Graphiti extracts
+[`engram.py`](../packages/relic-graph/src/relic/graph/engram.py) declares the types Graphiti extracts
 into. Entities:
 
 | Key | Model | Fields |
@@ -96,11 +96,11 @@ Edges (attributes only; Graphiti owns the endpoints):
 `(Person, PullRequest)` allows `AUTHORED` and `REVIEWED`; `(Person, Person)`
 allows `REPORTS_TO`. These three dicts (`ENTITY_TYPES`, `EDGE_TYPES`,
 `EDGE_TYPE_MAP`) are passed to every `add_episode` call so extraction stays
-typed and bounded ([`load.py`](../src/relic/graph/load.py)).
+typed and bounded ([`load.py`](../packages/relic-graph/src/relic/graph/load.py)).
 
 ## The episode JSON
 
-The bridge from ingestion to the graph. [`mappers.py`](../src/relic/ingest/mappers.py)
+The bridge from ingestion to the graph. [`mappers.py`](../packages/relic-ingest/src/relic/ingest/mappers.py)
 turns each fetched record into an `EpisodeSpec` whose `body` is a JSON string. The
 keys in that JSON mirror the flat `*Node` attribute names, so Graphiti's extractor
 maps the values onto the typed entities.
@@ -135,7 +135,7 @@ a `source_description` (`github pull request`, `github issue`, `linear issue`), 
 `reference_time` (the merge or creation timestamp, parsed tz-aware), and the
 `group_id` (the slugified repo). Bodies are clipped to 2000 characters and reviews are
 capped per PR (bots dropped) to bound extraction cost
-([`_clip`](../src/relic/ingest/mappers.py), `_select_reviews`).
+([`_clip`](../packages/relic-ingest/src/relic/ingest/mappers.py), `_select_reviews`).
 
 > **Raw payload shapes are not uniform.** The episode JSON above is stable, but the
 > verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
@@ -147,7 +147,7 @@ capped per PR (bots dropped) to bound extraction cost
 
 ## Layer 3: SkillIR
 
-[`skill_ir.py`](../src/relic/ontology/skill_ir.py) is the contract for a compiled
+[`skill_ir.py`](../packages/relic-core/src/relic/ontology/skill_ir.py) is the contract for a compiled
 skill. It is ported verbatim from the system-design doc and must not drift,
 because the same schema becomes the MCP tool contract and the rendered
 `SKILL.md`.

@@ -19,12 +19,12 @@ backed by a SQLite registry and has no graph or network dependency.
 
 The halves are deliberately decoupled. The serve side never imports the graph
 side. The MCP server takes a recall function by injection rather than importing
-it ([`mcp_server.py`](../src/relic/serve/mcp_server.py)), so skills can be served
+it ([`mcp_server.py`](../packages/relic-serve/src/relic/serve/mcp_server.py)), so skills can be served
 even when the graph is unreachable.
 
 ## The one contract: SkillIR
 
-`SkillIR` ([`skill_ir.py`](../src/relic/ontology/skill_ir.py)) is the seam. The
+`SkillIR` ([`skill_ir.py`](../packages/relic-core/src/relic/ontology/skill_ir.py)) is the seam. The
 same type is:
 
 - what the Phase 4 compiler will emit,
@@ -34,9 +34,9 @@ same type is:
 
 Because one type does all four jobs, the typed contract and the rendered document
 cannot drift. The MCP tool's input schema is built directly from `SkillIR.inputs`
-([`input_schema`](../src/relic/serve/mcp_server.py)), and the `SKILL.md` is
+([`input_schema`](../packages/relic-serve/src/relic/serve/mcp_server.py)), and the `SKILL.md` is
 rendered from the same record by a deterministic Jinja template
-([`render.py`](../src/relic/compile/render.py)).
+([`render.py`](../packages/relic-serve/src/relic/serve/render.py)).
 
 ## The two stores
 
@@ -53,7 +53,7 @@ extracted from episodes. It is partitioned per repo by `group_id`. See
 
 A third store sits beside them: the **raw store**, plain JSON files under
 `./data/raw/<source>/<id>.json`, an immutable copy of every fetched payload so a
-skill can always cite the original ([`raw_store.py`](../src/relic/ingest/raw_store.py)).
+skill can always cite the original ([`raw_store.py`](../packages/relic-ingest/src/relic/ingest/raw_store.py)).
 
 ## System diagram
 
@@ -127,51 +127,69 @@ short-lived CLI invocations, over shared stores. See
 The CLI is import-light by design. Only typer and rich load at module import, so
 `relic --help` stays fast and needs no keys. Each command imports its heavy
 dependencies (Graphiti, the connectors) inside the command body
-([`cli.py`](../src/relic/cli.py)).
+([`cli.py`](../packages/relic-cli/src/relic/cli.py)).
 
-## Module layout
+## Workspace layout
+
+Relic is a uv workspace of installable packages, one per owned subsystem plus a
+shared core. Each package declares its own dependencies, so a package can import
+another only if it depends on it, and only that package's public API (its
+`__init__.py`). The dependency graph is the interface contract. Import paths stay
+`relic.*`: `relic` is a PEP 420 namespace package the distributions merge into.
 
 ```
-src/relic/
-├── cli.py            # typer CLI: the entry point for every command
-├── config.py         # pydantic-settings, loaded from .env
-├── doctor.py         # read-only health check
-├── scorecard.py      # recall eval against a gold set
-├── ontology/         # the type layers (see data-model.md)
-│   ├── primitives.py # Id, TimeRange, Money, Link, AuditInfo, ...
-│   ├── entities.py   # Person, Repo, PullRequest, Review, Issue, Procedure
-│   ├── org.py        # Employee, Team, Customer, Product, Project, ...
-│   └── skill_ir.py   # FieldSpec, Citation, SkillIR (the contract)
-├── ingest/           # capture from sources (see ingestion.md)
-│   ├── github.py     # async GitHub pulls
-│   ├── linear.py     # GraphQL Linear pulls
-│   ├── mappers.py    # deterministic records + episode transforms
-│   └── raw_store.py  # dump raw payloads to disk
-├── graph/            # the memory engine (see memory-and-recall.md)
-│   ├── engram.py     # Graphiti factory + flat graph types + FalkorDB patch
-│   ├── load.py       # add episodes sequentially
-│   ├── recall.py     # general fact recall with provenance
-│   └── queries.py    # people-focused query with Cypher fallback
-├── resolve/people.py # cross-source person resolution (Phase 3 stub)
-├── compile/          # procedure to skill (see skills.md)
-│   ├── detect.py     # deterministic procedure detector (Phase 4 stub)
-│   ├── compiler.py   # LLM fills SkillIR from evidence (Phase 4 stub)
-│   └── render.py     # SkillIR to SKILL.md via Jinja (wired)
-├── registry/store.py # SQLite skill store
-└── serve/            # deliver skills (see skills.md)
-    ├── emit_files.py # write verified skills to .claude/skills/
-    ├── catalog.py    # render the human index
-    └── mcp_server.py # FastMCP server: skills as tools + recall_memory
+packages/
+├── relic-core/       # shared, jointly owned: the interface layer
+│   └── src/relic/
+│       ├── contracts/  # EpisodeSpec, RecallFn, re-exported SkillIR: the seams
+│       ├── ontology/   # the typed domain models (see data-model.md)
+│       ├── config.py   # pydantic-settings, loaded from .env
+│       └── obs.py      # logging to stderr
+├── relic-ingest/     # Paris: capture from sources (see ingestion.md)
+│   └── src/relic/ingest/   # github, linear, mappers, raw_store, checkpoint
+├── relic-graph/      # Abhinav: the memory/retrieval store (see memory-and-recall.md)
+│   └── src/relic/
+│       ├── graph/      # engram, load, recall, queries
+│       ├── compile/    # detect + compiler (Phase 4 stubs)
+│       ├── resolve/    # cross-source person resolution (Phase 3 stub)
+│       └── scorecard.py # recall eval against a gold set
+├── relic-serve/      # Zidan: deliver skills (see skills.md)
+│   └── src/relic/
+│       ├── serve/      # mcp_server, emit_files, catalog, render (+ templates/)
+│       └── registry/   # SQLite skill store
+└── relic-cli/        # Zidan: the composition root
+    └── src/relic/
+        ├── cli.py      # typer CLI: wires the three subsystems together
+        ├── doctor.py   # read-only health check
+        └── __main__.py
 ```
+
+The dependency graph (and the rule it encodes):
+
+```
+relic-core                        pydantic, pydantic-settings, rich
+  ^      ^      ^
+ingest  graph  serve              each depends on relic-core only; mutually independent
+  ^      ^      ^
+       relic-cli                  the only package that depends on all three
+```
+
+The three subsystems never import each other. They interact only through types in
+`relic.contracts`, and `relic.cli` (the composition root) builds the concrete
+implementations and injects them. The recall seam is the model: `relic-serve`
+takes a `RecallFn` and never imports `relic-graph`; `relic.cli` builds the recall
+function from the graph and injects it. `import-linter` contracts in the root
+`pyproject.toml` fail the build if a subsystem reaches across a boundary.
 
 `pipeline/run.py` is the future full-run orchestrator (ingest, resolve, detect,
-compile). It raises `NotImplementedError` today and lands across Phases 4 to 8.
+compile). It raises `NotImplementedError` today, lands across Phases 4 to 8, and
+will live in `relic-cli` as a second composition root alongside the daemon.
 
 ## Key design decisions
 
 **Deterministic-first ingestion.** GitHub and Linear are already structured, so
 the connectors and mappers build records with no LLM and no network beyond the
-source API ([`mappers.py`](../src/relic/ingest/mappers.py) is pure). The LLM
+source API ([`mappers.py`](../packages/relic-ingest/src/relic/ingest/mappers.py) is pure). The LLM
 enters only at the Graphiti extraction step, where episodes become typed graph
 entities. This keeps provenance clean and cost bounded.
 
@@ -192,7 +210,7 @@ grounded-synthesis job.
 
 **Provenance is mandatory.** Every recalled fact carries its source episodes, and
 every source resolves to a PR or issue URL where possible
-([`recall.py`](../src/relic/graph/recall.py)). Every skill carries citations. A
+([`recall.py`](../packages/relic-graph/src/relic/graph/recall.py)). Every skill carries citations. A
 fact or claim with no source is not the point of the system.
 
 ## The stack

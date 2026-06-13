@@ -1,7 +1,7 @@
 # Configuration
 
 All runtime configuration is environment variables, loaded from `.env` into a
-pydantic-settings model ([`config.py`](../src/relic/config.py)). Secrets are
+pydantic-settings model ([`config.py`](../packages/relic-core/src/relic/config.py)). Secrets are
 optional, so importing config (and `relic --help`) never needs a populated `.env`.
 `get_settings()` reads and caches them.
 
@@ -91,7 +91,7 @@ Logs are diagnostics and go to stderr; a command's result goes to stdout. The
 default level is `INFO` (phase counts, the run summary). `relic --verbose` (or
 `-v`, before the command) drops it to `DEBUG`. Logging attaches to the `relic`
 logger only, so third-party `INFO` chatter stays suppressed
-([`obs.py`](../src/relic/obs.py)).
+([`obs.py`](../packages/relic-core/src/relic/obs.py)).
 
 `relic ingest` shows a live progress bar over the load phase on an interactive
 terminal. It is suppressed automatically when output is piped/redirected or under
@@ -103,7 +103,7 @@ so log lines render above the bar instead of corrupting it.
 ## What keys unlock
 
 `relic doctor` reports each key and what it unlocks
-([`doctor.py`](../src/relic/doctor.py)):
+([`doctor.py`](../packages/relic-cli/src/relic/doctor.py)):
 
 | Key | Unlocks |
 |---|---|

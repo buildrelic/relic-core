@@ -10,7 +10,7 @@ paths, the scorecard, and the FalkorDB workaround.
 
 ## The engram
 
-[`make_engram`](../src/relic/graph/engram.py) builds the Graphiti client. It wires
+[`make_engram`](../packages/relic-graph/src/relic/graph/engram.py) builds the Graphiti client. It wires
 FalkorDB as the graph driver and OpenAI for the three model jobs:
 
 - **LLM.** `OpenAIClient` with `gpt-4o-mini` (extraction during ingest).
@@ -42,7 +42,7 @@ name by cloning its driver (`driver.clone(database=group_id)` inside Graphiti's
   `slug` graph, and the writes land there.
 - **Recall, query, and eval** build the engram with `database = group_id` and also
   pass `group_ids=[group_id]` to search. Both the connection and the filter target
-  the same per-repo graph ([`_recall`, `_query`, `_eval`](../src/relic/cli.py)).
+  the same per-repo graph ([`_recall`, `_query`, `_eval`](../packages/relic-cli/src/relic/cli.py)).
 - **Without a repo** (`--repo` unset and no `TARGET_REPO`), `group_id` is `None`
   and operations use the default `relic` graph, which holds only ungrouped data.
 
@@ -51,7 +51,7 @@ common setup is to set `TARGET_REPO` once and let recall default to it.
 
 ## Recall: facts with sources
 
-[`recall.py`](../src/relic/graph/recall.py) is the general path. It is the keystone
+[`recall.py`](../packages/relic-graph/src/relic/graph/recall.py) is the general path. It is the keystone
 of the "every answer cites its source" promise.
 
 ```
@@ -87,7 +87,7 @@ each source indented beneath it with its URL.
 
 ## Query: people, with a fallback
 
-[`queries.py`](../src/relic/graph/queries.py) is a narrower path used by
+[`queries.py`](../packages/relic-graph/src/relic/graph/queries.py) is a narrower path used by
 `relic query`. It finds people connected to work matching the text and returns
 `ReviewerHit`s (name, relation, fact, episodes, profile_url).
 
@@ -101,7 +101,7 @@ it never raises.
 
 ## Eval: the recall scorecard
 
-[`scorecard.py`](../src/relic/scorecard.py) measures recall quality as a small set
+[`scorecard.py`](../packages/relic-graph/src/relic/scorecard.py) measures recall quality as a small set
 of numbers. A gold set ([`eval/github_recall.json`](../eval/github_recall.json))
 names a repo and a list of cases, each a question plus the PR or issue numbers
 whose content answers it.
@@ -133,7 +133,7 @@ match, and a case with no expected sources can never hit.
 
 ## The FalkorDB workaround
 
-[`engram.py`](../src/relic/graph/engram.py) monkeypatches two graphiti-core
+[`engram.py`](../packages/relic-graph/src/relic/graph/engram.py) monkeypatches two graphiti-core
 fulltext-query builders at `make_engram` time (`_patch_falkordb_empty_query`,
 applied once). It fixes two issues in graphiti-core 0.29.x on FalkorDB:
 

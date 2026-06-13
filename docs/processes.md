@@ -8,6 +8,11 @@ Most processes are one-shot CLI commands. One process is a long-running server.
 Two are external services the platform talks to. A few are stubs that land in
 later phases.
 
+Every command is a subcommand of the `relic` CLI in the `relic-cli` package, the
+composition root: it imports each subsystem's public API (`relic.ingest`,
+`relic.graph`, `relic.serve`) and wires them together. The subsystems never call
+each other directly. See [architecture.md](architecture.md).
+
 ## At a glance
 
 | Process | Kind | Lifetime | Reads | Writes | Hard deps |
@@ -30,7 +35,7 @@ later phases.
 
 Every CLI process is import-light: only typer and rich load at startup, and each
 command imports its heavy dependencies inside the command body, so `relic --help`
-is fast and key-free ([`cli.py`](../src/relic/cli.py)).
+is fast and key-free ([`cli.py`](../packages/relic-cli/src/relic/cli.py)).
 
 ## Service processes
 
@@ -66,7 +71,7 @@ team's verified skills and its memory to any MCP client over stdio.
 - **Recall is optional.** The server builds an engram client for recall. If that
   fails (no OpenAI key, FalkorDB down), it logs to stderr and serves skills
   anyway. Diagnostics go to stderr because stdout is the MCP transport and any
-  stray bytes corrupt the stream ([`cli.py`](../src/relic/cli.py),
+  stray bytes corrupt the stream ([`cli.py`](../packages/relic-cli/src/relic/cli.py),
   `_serve`).
 - **Client config.** Point any MCP client at it over stdio. For Claude Code, add
   it to `.mcp.json`. See [skills.md](skills.md).
@@ -109,7 +114,7 @@ General memory recall. Returns facts with their sources.
 - **Writes.** Nothing. Prints a cited, human-readable block.
 - **Depends on.** `OPENAI_API_KEY` (search and rerank) and FalkorDB.
 - **Never raises.** If search fails, it returns an empty answer rather than an
-  error ([`recall.py`](../src/relic/graph/recall.py)).
+  error ([`recall.py`](../packages/relic-graph/src/relic/graph/recall.py)).
 
 ### relic query
 
@@ -137,7 +142,7 @@ holds each answer.
 - **Depends on.** `OPENAI_API_KEY` and FalkorDB.
 - **No LLM judge.** Scoring is a deterministic URL match, so the ruler itself
   costs nothing beyond the recall calls it measures
-  ([`scorecard.py`](../src/relic/scorecard.py)).
+  ([`scorecard.py`](../packages/relic-graph/src/relic/scorecard.py)).
 
 ## Skill and registry processes
 
@@ -181,7 +186,7 @@ Write verified skills to a target repo's `.claude/skills/`, and reconcile.
   no longer verified.
 - **Reconciles, does not clobber.** It only touches skill directories whose id
   matches a skill in the registry, so hand-authored skills under `.claude/skills/`
-  are left alone ([`emit_files.py`](../src/relic/serve/emit_files.py)).
+  are left alone ([`emit_files.py`](../packages/relic-serve/src/relic/serve/emit_files.py)).
 
 ### relic catalog
 
@@ -195,7 +200,7 @@ Print the browsable markdown index of verified skills to stdout (the same index
 A read-only health check. Reports where the registry lives and how many skills it
 holds by status, whether FalkorDB is reachable, and which API keys are
 configured. It creates nothing and never raises: a broken setup still produces a
-readable report ([`doctor.py`](../src/relic/doctor.py)).
+readable report ([`doctor.py`](../packages/relic-cli/src/relic/doctor.py)).
 
 - **Invocation.** `relic doctor`.
 - **Reads.** The registry (only if the file exists), settings, and a TCP probe of
@@ -222,9 +227,9 @@ These are stubs today. See [roadmap.md](roadmap.md).
   `Person` node. Prints "not implemented yet" and exits 1.
 - **`relic compile` (Phase 4).** Detect a recurring procedure and compile it into
   a grounded `SkillIR`. Prints "not implemented yet" and exits 1. The detector
-  ([`detect.py`](../src/relic/compile/detect.py)) and compiler
-  ([`compiler.py`](../src/relic/compile/compiler.py)) are docstring-only stubs;
-  the renderer ([`render.py`](../src/relic/compile/render.py)) is already wired.
+  ([`detect.py`](../packages/relic-graph/src/relic/compile/detect.py)) and compiler
+  ([`compiler.py`](../packages/relic-graph/src/relic/compile/compiler.py)) are docstring-only stubs;
+  the renderer ([`render.py`](../packages/relic-serve/src/relic/serve/render.py)) is already wired.
 - **`pipeline/run.py` (Phases 4 to 8).** The full-run orchestrator (ingest,
   resolve, detect, compile), the eventual Cloud Run Job entry point. Raises
   `NotImplementedError`.

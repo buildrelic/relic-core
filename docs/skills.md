@@ -30,7 +30,7 @@ flowchart LR
 
 ## The registry
 
-[`registry/store.py`](../src/relic/registry/store.py) is a SQLite store at
+[`registry/store.py`](../packages/relic-serve/src/relic/registry/store.py) is a SQLite store at
 `./data/registry.db` (`REGISTRY_DB_PATH`). The schema is one table:
 
 ```sql
@@ -69,7 +69,7 @@ dependency. Postgres later, same schema.
 
 ## Render: SkillIR to SKILL.md
 
-[`compile/render.py`](../src/relic/compile/render.py) renders a `SkillIR` to
+[`compile/render.py`](../packages/relic-serve/src/relic/serve/render.py) renders a `SkillIR` to
 `SKILL.md` markdown through a Jinja template,
 [`templates/skill.md.j2`](../templates/skill.md.j2). The template uses custom
 delimiters (`<< >>` for variables, `<% %>` for blocks) so template syntax does not
@@ -83,7 +83,7 @@ and citations.
 
 ## Emit: skills into a repo
 
-[`serve/emit_files.py`](../src/relic/serve/emit_files.py) writes verified skills
+[`serve/emit_files.py`](../packages/relic-serve/src/relic/serve/emit_files.py) writes verified skills
 into a target repo's `.claude/skills/` tree. `relic emit --repo /path` does three
 things:
 
@@ -106,7 +106,7 @@ codebase for every teammate.
 
 ## Catalog: the human index
 
-[`serve/catalog.py`](../src/relic/serve/catalog.py) renders a browsable markdown
+[`serve/catalog.py`](../packages/relic-serve/src/relic/serve/catalog.py) renders a browsable markdown
 index of skills, linking to each `SKILL.md`. Where emit writes one file per skill,
 the catalog is the index over them. `relic catalog` prints it to stdout; `emit`
 writes the same content to the target repo's `.claude/skills/README.md`. It is
@@ -114,7 +114,7 @@ deterministic and pure, like render.
 
 ## Serve: the MCP server
 
-[`serve/mcp_server.py`](../src/relic/serve/mcp_server.py) builds a FastMCP server
+[`serve/mcp_server.py`](../packages/relic-serve/src/relic/serve/mcp_server.py) builds a FastMCP server
 that is the single MCP surface for skills and memory both. `relic serve` runs it
 over stdio.
 
@@ -131,7 +131,7 @@ over stdio.
   facts with their sources.
 
 Recall is injected, not imported. The CLI builds the engram, wraps it in a recall
-function ([`_make_recall_fn`](../src/relic/cli.py)), and passes it in. If building
+function ([`_make_recall_fn`](../packages/relic-cli/src/relic/cli.py)), and passes it in. If building
 the engram fails (no OpenAI key, FalkorDB down), `serve` logs to stderr and runs
 without `recall_memory`, still serving skills. This keeps `mcp_server.py` free of
 any graph or network dependency, and keeps the server useful when memory is
@@ -166,9 +166,9 @@ draft is a fixture. Later it is the Phase 4 compiler's output.
 ## What is pending
 
 The Phase 4 compiler is the missing piece that turns the graph into skills. The
-detector ([`compile/detect.py`](../src/relic/compile/detect.py)) will find a
+detector ([`compile/detect.py`](../packages/relic-graph/src/relic/compile/detect.py)) will find a
 recurring procedure with a deterministic graph query plus a support and confidence
-threshold. The compiler ([`compile/compiler.py`](../src/relic/compile/compiler.py))
+threshold. The compiler ([`compile/compiler.py`](../packages/relic-graph/src/relic/compile/compiler.py))
 will feed that grounded evidence to Anthropic with `SkillIR` as a structured-output
 schema, so the model can only return a valid skill, every field cites its source,
 and `status` is always `draft`. Both are docstring-only stubs today. See

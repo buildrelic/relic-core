@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from relic.ontology.skill_ir import SkillIR
+from relic.contracts import SkillIR
 
 SkillStatus = Literal["draft", "verified", "deprecated"]
 

@@ -18,6 +18,45 @@ do not bind anything here.
 - **Bias to a rough thing we can use over a polished thing we cannot.** Ship the
   smallest version we can put into our own daily workflow, then learn from it.
 
+## Who owns what
+
+The codebase is a uv workspace of owned packages under `packages/`. Each engineer
+owns one subsystem and works inside it.
+
+- **Paris.** `relic-ingest`: the ingestion pipeline. GitHub and Linear connectors,
+  raw store, mappers.
+- **Abhinav.** `relic-graph`: the memory and retrieval store. The Graphiti graph,
+  recall, and the procedure detector and compiler.
+- **Zidan.** `relic-serve` and `relic-cli`: the MCP server, the skill registry,
+  render, the composition-root CLI, and the web app under `apps/`.
+- **Shared.** `relic-core`: the interface contracts (`relic.contracts`), the
+  ontology, settings, and logging. All three own it together.
+
+Boundaries hold by construction. A package lists its dependencies in its own
+`pyproject.toml`, so it can import another package only if it depends on it, and
+only that package's public API (its `__init__.py`). `relic.cli` is the one place
+that wires the three subsystems together.
+
+## How we build: interface-driven
+
+Subsystems talk through contracts, never through each other's internals.
+
+1. **Define the contract first.** A cross-subsystem interaction starts as a type
+   in `relic.contracts`: a Protocol, a dataclass, or a Callable. Agree on it with
+   the affected owner before building behind it.
+2. **The consumer depends on the contract, the producer fills it.** Neither
+   imports the other.
+3. **The composition root injects the concrete piece.** `relic.cli` (later the
+   daemon and web app) builds the real implementation and hands it in.
+
+Recall is the worked example. `relic-serve` takes a `RecallFn` and never imports
+`relic-graph`; `relic.cli` builds the recall function from the graph and injects
+it. `EpisodeSpec` lives in `relic.contracts` for the same reason: ingest produces
+it, graph consumes it, neither imports the other. Add new seams the same way.
+
+`just check` runs ruff, pyright, pytest, and `lint-imports`. The last one fails
+the build if a subsystem reaches across a boundary.
+
 ## What it roughly is (a starting shape, not a contract)
 
 The loop we are exploring:
@@ -71,17 +110,35 @@ Write like a sharp teammate dumping context, not a brand writing copy.
 - Avoid the AI bullet `**Bold term** — explanation`. Use `**Bold term.** Short
   sentence.` instead.
 
-## Git, commits, PRs
+## Git, commits, issues
 
-We track work in Linear. Branches, commits, and PRs all tie back to the Linear
-issue they belong to.
+One shared repo, light process. The package boundaries do the heavy lifting, so
+we do not gate every change behind a long review.
+
+### Where you commit
+
+Commit inside the package you own once `just check` passes. A change to a package
+you do not own, or any change to `relic-core` (the shared contracts), gets a quick
+review from the affected owner first: it crosses a boundary the others depend on.
+`CODEOWNERS` records who owns each path.
+
+### Review
+
+PRs are de-emphasized. Lean on `/code-review` for a lightweight check instead of a
+heavy PR walkthrough. Save real review for contract changes in `relic-core` and
+edits that cross a package boundary.
+
+### Issues
+
+We track work in Linear, but only concrete work. Clear out stale and vague issues;
+open a new one only when the task is real and identified, not as a placeholder.
 
 ### Branches
 
-Work on an issue from the branch Linear generates for it. Copy the branch name
-off the issue (Linear's "Copy git branch name") and use it as is, for example
-`paris/rel-10-ingest-run-observability`. The name carries the owner, the issue
-ID, and a slug, so the branch maps back to the issue on sight.
+Optional for solo work inside your own package. When you do branch, copy the name
+Linear generates for the issue and use it as is, for example
+`paris/rel-10-ingest-run-observability`: it carries the owner, the issue ID, and a
+slug, so the branch maps back to the issue on sight.
 
 ### Commits
 
@@ -102,19 +159,12 @@ Descriptions:
 - Write the reasoning the diff cannot show. The title says what at a glance; the
   body says why and how.
 
-### Pull requests
-
-The title follows the same rules as a commit title. The body is a walkthrough,
-not a one-liner. Cover three things:
-- **What changed.** Walk through every change, grouped so a reviewer can follow
-  it.
-- **Consequences.** What each change affects: behavior, other components,
-  migrations, anything downstream.
-- **How to test it.** The exact steps to verify it, commands and expected
-  results included.
-
 ## Stack
 
+- **Layout.** A uv workspace: `relic-core`, `relic-ingest`, `relic-graph`,
+  `relic-serve`, `relic-cli` under `packages/`, each an installable package with
+  its own dependencies. Import paths stay `relic.*` (a namespace package).
+  `just setup` syncs the whole workspace; `just check` runs the gate.
 - **Memory engine.** Graphiti (getzep/graphiti). Read its docs before touching
   ingestion or retrieval: it moves fast, heed version notes.
 - **Graph DB.** FalkorDB. For now, while in dev, self-hosted via Docker
@@ -123,7 +173,7 @@ not a one-liner. Cover three things:
   (per-repo graphs) and working full-text search. Connection is configured by
   the `FALKORDB_*` env vars.
 - **Graphiti models.** OpenAI `gpt-4o-mini` for extraction and reranking, and
-  `text-embedding-3-small` for search (`src/relic/graph/engram.py`).
+  `text-embedding-3-small` for search (`packages/relic-graph/src/relic/graph/engram.py`).
 - **Relational DB.** Supabase (Postgres) is available for app/auth/relational
   data, not the memory graph itself.
 - **Primary interface.** MCP server.

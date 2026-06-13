@@ -29,7 +29,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from relic.ingest.mappers import EpisodeSpec
+from relic.contracts import EpisodeSpec
 from relic.obs import get_logger
 
 if TYPE_CHECKING:

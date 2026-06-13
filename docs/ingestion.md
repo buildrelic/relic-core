@@ -6,8 +6,8 @@ into a typed episode, and lands those episodes in the graph. The path from sourc
 payload to episode is fully deterministic: no LLM, no guessing. The LLM enters
 only at the Graphiti extraction step.
 
-Orchestration lives in [`_ingest`](../src/relic/cli.py). The pieces are in
-[`ingest/`](../src/relic/ingest/) and [`graph/load.py`](../src/relic/graph/load.py).
+Orchestration lives in [`_ingest`](../packages/relic-cli/src/relic/cli.py). The pieces are in
+[`ingest/`](../packages/relic-ingest/src/relic/ingest/) and [`graph/load.py`](../packages/relic-graph/src/relic/graph/load.py).
 
 ## The flow
 
@@ -41,7 +41,7 @@ sequenceDiagram
 
 ## Step 1: fetch from GitHub
 
-[`github.py`](../src/relic/ingest/github.py) is an async connector over
+[`github.py`](../packages/relic-ingest/src/relic/ingest/github.py) is an async connector over
 `githubkit`. The fetch is windowed to the last `--months` (default 12) so the
 first run on a large repo does not page its entire history.
 
@@ -68,7 +68,7 @@ payload is kept on each record's `raw` field for the raw store.
 
 ## Step 2: fetch from Linear (optional)
 
-[`linear.py`](../src/relic/ingest/linear.py) is a GraphQL connector over `gql`,
+[`linear.py`](../packages/relic-ingest/src/relic/ingest/linear.py) is a GraphQL connector over `gql`,
 guarded behind `LINEAR_API_KEY`. `fetch_issues` paginates all issues (identifier,
 title, url, state, assignee, labels, created and completed timestamps) and maps
 each to the same `IssueRec` used for GitHub issues, with `source="linear"`. When
@@ -76,7 +76,7 @@ the key is unset, `ingest` logs that Linear was skipped and moves on.
 
 ## Step 3: keep a raw copy
 
-[`raw_store.py`](../src/relic/ingest/raw_store.py) writes every fetched payload to
+[`raw_store.py`](../packages/relic-ingest/src/relic/ingest/raw_store.py) writes every fetched payload to
 `./data/raw/<source>/<id>.json` before anything else touches it. PRs are stored as
 `pr-<number>.json`, issues by a filesystem-safe form of their identifier. This is
 the immutable artifact a compiled skill can cite. It becomes object storage (R2)
@@ -84,7 +84,7 @@ later.
 
 ## Step 4: map to episodes
 
-[`mappers.py`](../src/relic/ingest/mappers.py) is pure and unit-tested: no
+[`mappers.py`](../packages/relic-ingest/src/relic/ingest/mappers.py) is pure and unit-tested: no
 network, no LLM. It turns each record into an `EpisodeSpec`.
 
 - `pr_to_episode` builds the PR episode body (repo, pull_request, reviews,
@@ -104,7 +104,7 @@ The episode JSON keys mirror the flat `*Node` attributes (see
 
 ## Step 5: land in the graph
 
-[`load.py`](../src/relic/graph/load.py) adds episodes to Graphiti.
+[`load.py`](../packages/relic-graph/src/relic/graph/load.py) adds episodes to Graphiti.
 
 - It first calls `ensure_indexes` (`build_indices_and_constraints`), so indexes
   exist before the first episode.
@@ -135,7 +135,7 @@ FalkorDB fulltext query, the other makes the prompt JSON serializer
 (`to_prompt_json`) tolerate `datetime` values — without it, `add_episode_bulk`
 raises `TypeError: Object of type datetime is not JSON serializable` and falls back
 to slow per-episode loading (seen with the Gemini provider, which populates edge
-timestamps). Both are documented in [`engram.py`](../src/relic/graph/engram.py).
+timestamps). Both are documented in [`engram.py`](../packages/relic-graph/src/relic/graph/engram.py).
 
 Before any of this, `ingest` runs a fast TCP probe (`falkordb_reachable`). If the
 graph is down it stops with one line (`FalkorDB not reachable at ...`) and a
@@ -164,7 +164,7 @@ API already gives you.
 Graphiti mints a fresh uuid per `add_episode`, so the same PR added twice would
 land as two episodes. A checkpoint stops that.
 
-[`checkpoint.py`](../src/relic/ingest/checkpoint.py) keeps a per-repo ledger of the
+[`checkpoint.py`](../packages/relic-ingest/src/relic/ingest/checkpoint.py) keeps a per-repo ledger of the
 episodes that have landed, at `./data/ingest/<group_id>.log`, one episode name per
 line. The name (`PR owner/name#42`, `Issue REL-10`) is deterministic and unique
 per item. `load_episodes` skips any episode already in the ledger and appends each
@@ -199,7 +199,7 @@ result of `ingest` is the populated graph, not its console output.
   per-episode tracebacks, the raw-payload count, and any background-task errors.
 - **Quiet by default.** Logging attaches to the `relic` logger only, so
   graphiti/httpx/openai `INFO` chatter stays suppressed unless you ask for it
-  ([`obs.py`](../src/relic/obs.py)).
+  ([`obs.py`](../packages/relic-core/src/relic/obs.py)).
 
 ## What is verified
 

@@ -1,6 +1,6 @@
 # CLI reference
 
-Every command is a subcommand of `relic` ([`cli.py`](../src/relic/cli.py)). Run
+Every command is a subcommand of `relic` ([`cli.py`](../packages/relic-cli/src/relic/cli.py)). Run
 `uv run relic --help` for the live list, or `uv run relic <command> --help` for one
 command. The CLI prints `--help` when given no arguments.
 

@@ -62,10 +62,18 @@ def test_format_answer_with_sources() -> None:
 
 
 async def test_recall_maps_edges_and_drops_blank_facts(monkeypatch) -> None:
+    # Fetch the submodule object via sys.modules: `relic.graph` re-exports the
+    # `recall` function, which shadows the same-named submodule on attribute access
+    # (including `import ... as`, which uses getattr), so a string target cannot
+    # traverse it. import_module returns the real module to patch its internal.
+    import importlib
+
+    recall_module = importlib.import_module("relic.graph.recall")
+
     async def fake_resolve(_graphiti, episodes):
         return [Source(label=f"episode:{e}") for e in episodes]
 
-    monkeypatch.setattr("relic.graph.recall._resolve_sources", fake_resolve)
+    monkeypatch.setattr(recall_module, "_resolve_sources", fake_resolve)
     graphiti = _FakeGraphiti(
         [
             _FakeEdge("paris reviews auth PRs", "REVIEWED", ["ep1"]),

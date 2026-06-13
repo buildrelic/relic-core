@@ -7,8 +7,8 @@ Relic is a memory layer for AI-native teams, built on
 history, structures it as a temporal knowledge graph, and serves two things to
 coding agents over MCP: grounded answers about past work, each citing its source,
 and compiled skills, the repeatable procedures an agent can follow. This repo,
-`relic-core`, is the prototype: about 2,800 lines of Python in one package, driven
-by a Typer CLI.
+`relic-core`, is the prototype: about 2,800 lines of Python in a uv workspace of
+five owned packages, driven by a Typer CLI.
 
 ## Core loop
 
@@ -50,17 +50,19 @@ One type in four roles, so the served tool and the rendered document cannot drif
 | Memory graph | FalkorDB (Redis protocol, Docker) | Entities, edges, episodes, partitioned per repo by `group_id` | Multi-tenant partitioning and full-text search |
 | Skill registry | SQLite (`./data/registry.db`) | `SkillIR` JSON documents plus denormalized columns | Skills are a typed catalog, not graph data |
 
-**Subsystems** (`src/relic/`):
+**Subsystems.** A uv workspace of five packages under `packages/`. The three
+owned subsystems interact only through `relic.contracts`; `relic-core` holds the
+shared contracts and `relic-cli` wires them. Import paths stay `relic.*`.
 
-| Module | Role | Status |
-|---|---|---|
-| `ingest/` | GitHub (githubkit) and Linear (gql) connectors, raw-payload store, record-to-episode mappers | Wired |
-| `graph/` | Graphiti + FalkorDB + OpenAI factory, episode loader, recall, reviewer query | Wired |
-| `ontology/` | Rich typed models and `SkillIR`; flat graph-facing entity/edge models live in `graph/engram.py` | Wired |
-| `registry/` | SQLite skill store and lifecycle (draft, verified, deprecated) | Wired |
-| `serve/` | FastMCP stdio server, emit to `.claude/skills/`, catalog index, Jinja SKILL.md renderer | Wired |
-| `resolve/` | Cross-source person unification | Stub (Phase 3) |
-| `compile/` | Procedure detector and LLM compiler that turns graph evidence into a `SkillIR` | Stub (Phase 4); the SKILL.md renderer is live |
+| Module | Package (owner) | Role | Status |
+|---|---|---|---|
+| `ingest/` | relic-ingest (Paris) | GitHub (githubkit) and Linear (gql) connectors, raw-payload store, record-to-episode mappers | Wired |
+| `graph/` | relic-graph (Abhinav) | Graphiti + FalkorDB + OpenAI factory, episode loader, recall, reviewer query | Wired |
+| `compile/` | relic-graph (Abhinav) | Procedure detector and LLM compiler that turns graph evidence into a `SkillIR` | Stub (Phase 4) |
+| `serve/` | relic-serve (Zidan) | FastMCP stdio server, emit to `.claude/skills/`, catalog index, Jinja SKILL.md renderer | Wired |
+| `registry/` | relic-serve (Zidan) | SQLite skill store and lifecycle (draft, verified, deprecated) | Wired |
+| `contracts/`, `ontology/` | relic-core (shared) | The interface seams (`EpisodeSpec`, `RecallFn`, `SkillIR`) and the rich typed domain models | Wired |
+| `resolve/` | relic-graph (Abhinav) | Cross-source person unification | Stub (Phase 3) |
 
 **MCP server.** `relic serve` exposes one stdio endpoint: each verified skill as a
 tool and a `skill://<id>` resource, a `search_skills` tool, and a `recall_memory`

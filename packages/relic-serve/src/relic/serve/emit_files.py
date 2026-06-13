@@ -11,10 +11,10 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from relic.compile.render import render
-from relic.ontology.skill_ir import SkillIR
-from relic.registry.store import list_skills
+from relic.contracts import SkillIR
+from relic.registry import list_skills
 from relic.serve.catalog import render_catalog
+from relic.serve.render import render
 
 
 def skill_dir(target_repo: str | Path, skill_id: str) -> Path:

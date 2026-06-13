@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from relic.config import Settings
-from relic.graph.engram import falkordb_reachable as _falkordb_reachable
+from relic.graph import falkordb_reachable as _falkordb_reachable
 
 # (display name, Settings attribute, what the key unlocks)
 _KEYS: list[tuple[str, str, str]] = [

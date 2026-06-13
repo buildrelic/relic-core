@@ -38,10 +38,10 @@ pytestmark = [
 
 
 async def test_load_and_query() -> None:
+    from relic.contracts import EpisodeSpec
     from relic.graph.engram import make_engram
     from relic.graph.load import load_episodes
     from relic.graph.queries import reviewers_of
-    from relic.ingest.mappers import EpisodeSpec
 
     body = json.dumps(
         {

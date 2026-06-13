@@ -1,7 +1,9 @@
 # Development
 
-Relic is a `uv` project on Python 3.12. The toolchain is ruff (lint and format),
-pyright (types), and pytest (tests). CI runs all three.
+Relic is a uv workspace on Python 3.12: five packages under `packages/` (see
+[architecture.md](architecture.md)), installed editable into one shared venv. The
+toolchain is ruff (lint and format), pyright (types), pytest (tests), and
+import-linter (subsystem boundaries). CI runs all four.
 
 ## Requirements
 
@@ -42,10 +44,13 @@ just ingest astral-sh/uv 20   # ingest a repo, capped at 20
 just recall "who reviews auth changes?"
 ```
 
-`just check` runs ruff, pyright, and pytest, the same three CI runs. `just lint`,
-`just types`, and `just test` run them one at a time. `just reset-graph` and `just
-clean` are destructive: the first wipes the FalkorDB volume, the second removes
-local state under `data/`.
+`just check` runs ruff, pyright, pytest, and lint-imports, the same four CI runs.
+`just lint`, `just types`, `just test`, and `just imports` run them one at a time.
+`just reset-graph` and `just clean` are destructive: the first wipes the FalkorDB
+volume, the second removes local state under `data/`.
+
+`just check` runs pyright and pytest as `uv run python -m ...` so they work
+regardless of the installed entry-point shebangs.
 
 ## Conventions
 
@@ -107,6 +112,7 @@ Shared fixtures are in [`conftest.py`](../tests/conftest.py); `make_skill` build
 ## CI
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on push to `main`
-and on every PR. It spins up a FalkorDB service container, syncs with `uv`, then
-runs ruff, pyright, and pytest in sequence. A red check on any of the three fails
-the build. `just check` runs the same three locally before you push.
+and on every PR. It spins up a FalkorDB service container, syncs the whole
+workspace with `uv`, then runs ruff, pyright, lint-imports, and pytest in
+sequence. A red check on any of the four fails the build. `just check` runs the
+same four locally before you push.

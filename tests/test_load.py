@@ -12,8 +12,8 @@ import pytest
 from graphiti_core.llm_client.errors import RateLimitError
 from tenacity import wait_none
 
+from relic.contracts import EpisodeSpec
 from relic.graph.load import load_episodes, load_episodes_bulk
-from relic.ingest.mappers import EpisodeSpec
 
 if TYPE_CHECKING:
     from graphiti_core import Graphiti

@@ -1,4 +1,7 @@
-# Processes
+---
+title: "Processes"
+description: "Every process Relic runs: triggers, reads, writes, dependencies, and lifetime."
+---
 
 Relic is a set of processes over shared stores, not one running service. This doc
 catalogs every process: what triggers it, what it reads and writes, what it
@@ -7,6 +10,11 @@ depends on, and how long it lives.
 Most processes are one-shot CLI commands. One process is a long-running server.
 Two are external services the platform talks to. A few are stubs that land in
 later phases.
+
+Every command is a subcommand of the `relic` CLI in the `relic-cli` package, the
+composition root: it imports each subsystem's public API (`relic.ingest`,
+`relic.graph`, `relic.serve`) and wires them together. The subsystems never call
+each other directly. See [architecture.md](/architecture).
 
 ## At a glance
 
@@ -30,14 +38,14 @@ later phases.
 
 Every CLI process is import-light: only typer and rich load at startup, and each
 command imports its heavy dependencies inside the command body, so `relic --help`
-is fast and key-free ([`cli.py`](../src/relic/cli.py)).
+is fast and key-free ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)).
 
 ## Service processes
 
 ### FalkorDB
 
 The graph database. Relic runs it locally as a Docker container
-([`docker-compose.yml`](../docker-compose.yml)).
+([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml)).
 
 - **Start.** `just up` runs `docker compose up -d --wait falkordb`, blocking
   until the healthcheck passes. `just down` stops it, `just logs` tails it.
@@ -49,7 +57,7 @@ The graph database. Relic runs it locally as a Docker container
   is enabled. Start it before any of them.
 
 In production this becomes a managed or hosted FalkorDB instance. See
-[roadmap.md](roadmap.md).
+[roadmap.md](/roadmap).
 
 ### relic serve
 
@@ -66,10 +74,10 @@ team's verified skills and its memory to any MCP client over stdio.
 - **Recall is optional.** The server builds an engram client for recall. If that
   fails (no OpenAI key, FalkorDB down), it logs to stderr and serves skills
   anyway. Diagnostics go to stderr because stdout is the MCP transport and any
-  stray bytes corrupt the stream ([`cli.py`](../src/relic/cli.py),
+  stray bytes corrupt the stream ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py),
   `_serve`).
 - **Client config.** Point any MCP client at it over stdio. For Claude Code, add
-  it to `.mcp.json`. See [skills.md](skills.md).
+  it to `.mcp.json`. See [skills.md](/skills).
 
 ## Capture and memory processes
 
@@ -98,7 +106,7 @@ The capture pipeline. Pulls engineering history into the graph.
 - **`--limit`.** Caps PRs and issues pulled, most recent first, to bound API and
   per-episode LLM cost on a large repo.
 
-Full detail in [ingestion.md](ingestion.md).
+Full detail in [ingestion.md](/ingestion).
 
 ### relic recall
 
@@ -109,7 +117,7 @@ General memory recall. Returns facts with their sources.
 - **Writes.** Nothing. Prints a cited, human-readable block.
 - **Depends on.** `OPENAI_API_KEY` (search and rerank) and FalkorDB.
 - **Never raises.** If search fails, it returns an empty answer rather than an
-  error ([`recall.py`](../src/relic/graph/recall.py)).
+  error ([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)).
 
 ### relic query
 
@@ -137,7 +145,7 @@ holds each answer.
 - **Depends on.** `OPENAI_API_KEY` and FalkorDB.
 - **No LLM judge.** Scoring is a deterministic URL match, so the ruler itself
   costs nothing beyond the recall calls it measures
-  ([`scorecard.py`](../src/relic/scorecard.py)).
+  ([`scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/scorecard.py)).
 
 ## Skill and registry processes
 
@@ -181,7 +189,7 @@ Write verified skills to a target repo's `.claude/skills/`, and reconcile.
   no longer verified.
 - **Reconciles, does not clobber.** It only touches skill directories whose id
   matches a skill in the registry, so hand-authored skills under `.claude/skills/`
-  are left alone ([`emit_files.py`](../src/relic/serve/emit_files.py)).
+  are left alone ([`emit_files.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/emit_files.py)).
 
 ### relic catalog
 
@@ -195,7 +203,7 @@ Print the browsable markdown index of verified skills to stdout (the same index
 A read-only health check. Reports where the registry lives and how many skills it
 holds by status, whether FalkorDB is reachable, and which API keys are
 configured. It creates nothing and never raises: a broken setup still produces a
-readable report ([`doctor.py`](../src/relic/doctor.py)).
+readable report ([`doctor.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/doctor.py)).
 
 - **Invocation.** `relic doctor`.
 - **Reads.** The registry (only if the file exists), settings, and a TCP probe of
@@ -209,22 +217,23 @@ These run outside Relic, invoked per command as HTTP calls.
 - **OpenAI.** Graphiti's LLM (`gpt-4o-mini` for extraction and reranking) and
   embeddings (`text-embedding-3-small`). Used by `ingest`, `recall`, `query`,
   `eval`, and `serve` (recall).
-- **GitHub REST.** Source for `ingest`, via `githubkit`.
+- **GitHub.** Source for `ingest`, via `githubkit`: merged and closed PRs come from the GraphQL API in one batched query per page, non-PR issues from the REST list endpoint.
 - **Linear GraphQL.** Optional source for `ingest`, via `gql`, guarded behind
   `LINEAR_API_KEY`.
 - **Anthropic.** The Phase 4 skill compiler. Not called yet.
 
 ## Pending processes
 
-These are stubs today. See [roadmap.md](roadmap.md).
+These are stubs today. See [roadmap.md](/roadmap).
 
 - **`relic resolve` (Phase 3).** Unify a person across GitHub and Linear into one
   `Person` node. Prints "not implemented yet" and exits 1.
 - **`relic compile` (Phase 4).** Detect a recurring procedure and compile it into
-  a grounded `SkillIR`. Prints "not implemented yet" and exits 1. The detector
-  ([`detect.py`](../src/relic/compile/detect.py)) and compiler
-  ([`compiler.py`](../src/relic/compile/compiler.py)) are docstring-only stubs;
-  the renderer ([`render.py`](../src/relic/compile/render.py)) is already wired.
+  a grounded `SkillIR`. Invoked as `relic compile --skill <archetype>`. Prints
+  "not implemented yet" and exits 1. The detector
+  ([`detect.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/detect.py)) and compiler
+  ([`compiler.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/compiler.py)) are docstring-only stubs;
+  the renderer ([`render.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/render.py)) is already wired.
 - **`pipeline/run.py` (Phases 4 to 8).** The full-run orchestrator (ingest,
   resolve, detect, compile), the eventual Cloud Run Job entry point. Raises
   `NotImplementedError`.

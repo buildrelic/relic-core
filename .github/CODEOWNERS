@@ -1,0 +1,27 @@
+# Ownership is the rule, not a suggestion. You commit inside the package you own.
+# A change to a package you do not own, and any change to the shared core, gets a
+# review from the affected owner before it lands.
+#
+#   Paris    @paris-phan   ingestion pipeline
+#   Abhinav  @abhinavp5    memory/retrieval store + procedure compiler
+#   Zidan    @zidankazi    serve, registry, render, CLI, web app
+
+# Paris: ingestion pipeline.
+/packages/relic-ingest/   @paris-phan
+
+# Abhinav: the memory/retrieval store, plus procedure detection and compilation.
+/packages/relic-graph/    @abhinavp5
+
+# Zidan: serve, the skill registry, render, the composition-root CLI, the web app.
+/packages/relic-serve/    @zidankazi
+/packages/relic-cli/      @zidankazi
+/apps/                    @zidankazi
+
+# Shared core: the interface contracts. A change here ripples across every
+# subsystem, so it needs all three owners.
+/packages/relic-core/     @paris-phan @abhinavp5 @zidankazi
+
+# Workspace config and CI are shared infrastructure.
+/pyproject.toml           @paris-phan @abhinavp5 @zidankazi
+/justfile                 @paris-phan @abhinavp5 @zidankazi
+/.github/                 @paris-phan @abhinavp5 @zidankazi

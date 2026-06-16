@@ -44,8 +44,8 @@ logs:
 doctor:
     uv run relic doctor
 
-# Lint, types, and tests. Exactly what CI runs.
-check: lint types test
+# Lint, types, tests, and import contracts. Exactly what CI runs.
+check: lint types test imports
 
 # Format the code with ruff.
 fmt:
@@ -55,13 +55,17 @@ fmt:
 lint:
     uv run ruff check
 
-# Type-check with pyright.
+# Type-check with pyright. (python -m form is robust to entry-point shebangs.)
 types:
-    uv run pyright
+    uv run python -m pyright
 
 # Run the test suite.
 test:
-    uv run pytest
+    uv run python -m pytest
+
+# Enforce the subsystem import boundaries (import-linter contracts in pyproject).
+imports:
+    uv run lint-imports
 
 # Run the MCP server over stdio. Mainly manual testing; the real consumer is an MCP client via .mcp.json.
 serve:

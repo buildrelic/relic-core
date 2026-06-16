@@ -20,11 +20,13 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - name: Sync dependencies
+      - name: Sync workspace dependencies
         run: uv sync --dev
       - name: Ruff
         run: uv run ruff check
       - name: Pyright
-        run: uv run pyright
+        run: uv run python -m pyright
+      - name: Import contracts
+        run: uv run lint-imports
       - name: Pytest
-        run: uv run pytest
+        run: uv run python -m pytest

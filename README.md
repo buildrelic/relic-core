@@ -12,7 +12,7 @@ work, and [`docs/`](docs/README.md) for the deep dives.
 
 ## How it works
 
-See [`system-briefd`](system-brief.md)
+See [`system-brief`](docs/system-brief.md).
 
 ## Requirements
 
@@ -54,7 +54,7 @@ just down                      # stop FalkorDB, keep the volume
 just ingest astral-sh/uv 20    # pull a repo's PRs and issues, capped at 20
 just recall "who reviews auth changes?"
 just serve                     # run the MCP server over stdio
-just check                     # lint, types, and tests, what CI runs
+just check                     # lint, types, tests, import contracts: what CI runs
 just fmt                       # format with ruff
 ```
 
@@ -127,12 +127,12 @@ detail.
 The dev loop is two recipes:
 
 ```bash
-just check   # ruff, pyright, pytest, the exact three CI runs
+just check   # ruff, pyright, pytest, lint-imports: the exact four CI runs
 just fmt     # format with ruff
 ```
 
 `just check` is what CI gates on, so run it before you push. `just lint`, `just
-types`, and `just test` run the three one at a time. The suite is fast and mostly
+types`, `just test`, and `just imports` run the four one at a time. The suite is fast and mostly
 offline: live graph work (real Graphiti, real FalkorDB, real OpenAI) is exercised
 by hand and by one skip-gated integration test, not in the default run.
 

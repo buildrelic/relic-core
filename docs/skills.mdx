@@ -1,4 +1,8 @@
-# Skills, registry, and serve
+---
+title: "Skills, registry, and serve"
+icon: "screwdriver-wrench"
+description: "The SkillIR lifecycle, the SQLite registry, render, emit, catalog, and the MCP server."
+---
 
 The serve side holds typed skills, moves them through a lifecycle, and delivers
 them to coding agents. It is decoupled from the graph: nothing here imports
@@ -137,8 +141,10 @@ without `recall_memory`, still serving skills. This keeps `mcp_server.py` free o
 any graph or network dependency, and keeps the server useful when memory is
 unavailable.
 
+<Warning>
 Diagnostics go to stderr on purpose: stdout is the MCP transport, and any stray
 bytes on it corrupt the stream.
+</Warning>
 
 ### Wiring into Claude Code
 

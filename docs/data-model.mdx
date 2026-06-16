@@ -1,4 +1,8 @@
-# Data model
+---
+title: "Data model"
+icon: "database"
+description: "The three type layers: the rich ontology, the flat graph nodes, and SkillIR, plus the episode JSON."
+---
 
 Relic has three type layers, each with a distinct job. Conflating them is the
 mistake the split prevents.
@@ -137,13 +141,15 @@ a `source_description` (`github pull request`, `github issue`, `linear issue`), 
 capped per PR (bots dropped) to bound extraction cost
 ([`_clip`](../src/relic/ingest/mappers.py), `_select_reviews`).
 
-> **Raw payload shapes are not uniform.** The episode JSON above is stable, but the
-> verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
-> so their raw payload is the **camelCase GraphQL node** (`createdAt`, `mergedAt`,
-> `author { login }`); issues still come over REST, so theirs is the **snake_case REST**
-> body (`created_at`, `html_url`), as are PRs from any pre-GraphQL ingest. A future pass
-> that re-maps from `data/raw/` must branch on shape (or on `source`) rather than assume
-> one casing.
+<Warning>
+**Raw payload shapes are not uniform.** The episode JSON above is stable, but the
+verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
+so their raw payload is the **camelCase GraphQL node** (`createdAt`, `mergedAt`,
+`author { login }`); issues still come over REST, so theirs is the **snake_case REST**
+body (`created_at`, `html_url`), as are PRs from any pre-GraphQL ingest. A future pass
+that re-maps from `data/raw/` must branch on shape (or on `source`) rather than assume
+one casing.
+</Warning>
 
 ## Layer 3: SkillIR
 

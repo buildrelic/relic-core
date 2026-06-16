@@ -1,4 +1,8 @@
-# Ingestion (capture)
+---
+title: "Ingestion"
+icon: "download"
+description: "The capture pipeline: GitHub and Linear to deterministic records to episodes to the graph."
+---
 
 `relic ingest --repo owner/name` is the capture pipeline. It pulls engineering
 history from GitHub (and optionally Linear), keeps a raw copy, turns each item
@@ -137,9 +141,11 @@ raises `TypeError: Object of type datetime is not JSON serializable` and falls b
 to slow per-episode loading (seen with the Gemini provider, which populates edge
 timestamps). Both are documented in [`engram.py`](../src/relic/graph/engram.py).
 
+<Note>
 Before any of this, `ingest` runs a fast TCP probe (`falkordb_reachable`). If the
 graph is down it stops with one line (`FalkorDB not reachable at ...`) and a
 non-zero exit, before spending a single GitHub or OpenAI call.
+</Note>
 
 ## Cost control
 
@@ -178,11 +184,13 @@ Two things fall out of this:
 - **Re-run is cheap and idempotent.** Re-running `ingest` on the same repo loads
   only what is new since last time.
 
+<Warning>
 To reload a repo from scratch, pass `--fresh`: it clears the checkpoint so every
 episode is added again. Clearing the checkpoint and clearing the repo's graph go
 together. Drop the per-`group_id` graph in FalkorDB first (see the `just
 reset-graph` note), or you will get duplicates. The raw store overwrites by id, so
 it stays a single current copy per item regardless.
+</Warning>
 
 ## Observability
 

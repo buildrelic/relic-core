@@ -1,0 +1,48 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Relic",
+  "colors": {
+    "primary": "#15803D",
+    "light": "#4ADE80",
+    "dark": "#16A34A"
+  },
+  "description": "Memory layer for AI-native teams: ingest engineering history, recall grounded answers with sources, and compile skills for coding agents.",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "quickstart"]
+      },
+      {
+        "group": "Concepts",
+        "pages": ["system-brief", "architecture", "data-model", "processes"]
+      },
+      {
+        "group": "Subsystems",
+        "pages": ["ingestion", "memory-and-recall", "skills"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["cli-reference", "configuration"]
+      },
+      {
+        "group": "Contributing",
+        "pages": ["development", "roadmap"]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/buildrelic/relic-core"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/buildrelic/relic-core"
+    }
+  }
+}

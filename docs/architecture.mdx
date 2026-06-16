@@ -1,4 +1,8 @@
-# Architecture
+---
+title: "Architecture"
+icon: "diagram-project"
+description: "The two halves, the SkillIR contract, the two stores, the system diagram, and the runtime model."
+---
 
 Relic is two halves over one contract. The capture half builds memory from
 engineering history. The serve half delivers grounded skills to coding agents.
@@ -124,10 +128,12 @@ short-lived CLI invocations, over shared stores. See
   up before any graph command.
 - **OpenAI and Anthropic** are external HTTP APIs called per run.
 
+<Note>
 The CLI is import-light by design. Only typer and rich load at module import, so
 `relic --help` stays fast and needs no keys. Each command imports its heavy
 dependencies (Graphiti, the connectors) inside the command body
-([`cli.py`](../src/relic/cli.py)).
+([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)).
+</Note>
 
 ## Module layout
 

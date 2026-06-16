@@ -8,11 +8,11 @@ source.
 This repo is the prototype pipeline: ingest engineering history, structure it in
 a graph, detect recurring procedures, and compile them into grounded skills a
 coding agent can follow. See [`AGENTS.md`](AGENTS.md) for what Relic is and how we
-work, and [`docs/`](docs/README.md) for the deep dives.
+work, and [`docs/`](docs/) for the deep dives.
 
 ## How it works
 
-See [`system-briefd`](system-brief.md)
+See [`system-brief`](docs/system-brief.mdx).
 
 ## Requirements
 
@@ -62,7 +62,7 @@ just fmt                       # format with ruff
 
 Every command is a subcommand of `relic`. The recipes above wrap the common ones;
 commands without a recipe run through the CLI directly. See
-[`docs/cli-reference.md`](docs/cli-reference.md) for every flag and exit code.
+[`docs/cli-reference.mdx`](docs/cli-reference.mdx) for every flag and exit code.
 
 - **Capture and memory** (need the FalkorDB graph running): `ingest`, `recall`,
   `query`, `eval`.
@@ -119,7 +119,7 @@ For Claude Code, add it to `.mcp.json`:
 ```
 
 `relic` must be on the client's PATH; the project's `.venv` exposes it after
-`just setup`. See [`docs/skills.md`](docs/skills.md) for the served surface in
+`just setup`. See [`docs/skills.mdx`](docs/skills.mdx) for the served surface in
 detail.
 
 ## Further development
@@ -138,13 +138,13 @@ by hand and by one skip-gated integration test, not in the default run.
 
 Where to look:
 
-- New to the codebase? Read [`docs/architecture.md`](docs/architecture.md), then
-  [`docs/processes.md`](docs/processes.md).
-- Changing capture or retrieval? Read [`docs/ingestion.md`](docs/ingestion.md) and
-  [`docs/memory-and-recall.md`](docs/memory-and-recall.md). Graphiti moves fast:
+- New to the codebase? Read [`docs/architecture.mdx`](docs/architecture.mdx), then
+  [`docs/processes.mdx`](docs/processes.mdx).
+- Changing capture or retrieval? Read [`docs/ingestion.mdx`](docs/ingestion.mdx) and
+  [`docs/memory-and-recall.mdx`](docs/memory-and-recall.mdx). Graphiti moves fast:
   read its docs and heed version notes before touching either.
-- Working on skills, emit, or the MCP server? Read [`docs/skills.md`](docs/skills.md).
-- [`docs/roadmap.md`](docs/roadmap.md) tracks what is built versus pending.
+- Working on skills, emit, or the MCP server? Read [`docs/skills.mdx`](docs/skills.mdx).
+- [`docs/roadmap.mdx`](docs/roadmap.mdx) tracks what is built versus pending.
 
 What is built: capture, memory, recall, the registry, emit, catalog, the
 scorecard, the MCP server, and doctor are wired up. The next two pieces are entity
@@ -162,4 +162,4 @@ Two rules worth knowing before you start:
 
 Tooling config (ruff, pyright, pytest) is in [`pyproject.toml`](pyproject.toml).
 For the full setup, the test inventory, and CI, see
-[`docs/development.md`](docs/development.md).
+[`docs/development.mdx`](docs/development.mdx).

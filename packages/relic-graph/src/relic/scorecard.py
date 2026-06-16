@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from relic.graph.recall import RecallAnswer
+    from relic.graph import RecallAnswer
 
 
 @dataclass(slots=True)

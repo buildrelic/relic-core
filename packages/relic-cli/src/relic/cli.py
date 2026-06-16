@@ -100,13 +100,29 @@ async def _ingest(
     from collections.abc import Callable
 
     from relic.config import get_settings
-    from relic.graph.engram import falkordb_reachable, make_engram
-    from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
-    from relic.ingest.checkpoint import checkpoint_path, clear, load_done, record_done
-    from relic.ingest.github import fetch_repo, make_github, resolve_github_token
-    from relic.ingest.linear import fetch_issues, linear_enabled
-    from relic.ingest.mappers import RepoBundle, issue_to_episode, pr_to_episode, repo_group_id
-    from relic.ingest.raw_store import dump_raw
+    from relic.graph import (
+        LoadStats,
+        falkordb_reachable,
+        load_episodes,
+        load_episodes_bulk,
+        make_engram,
+    )
+    from relic.ingest import (
+        RepoBundle,
+        checkpoint_path,
+        clear,
+        dump_raw,
+        fetch_issues,
+        fetch_repo,
+        issue_to_episode,
+        linear_enabled,
+        load_done,
+        make_github,
+        pr_to_episode,
+        record_done,
+        repo_group_id,
+        resolve_github_token,
+    )
     from relic.obs import get_logger, stderr_console
 
     log = get_logger("ingest")
@@ -281,7 +297,7 @@ def compile_skill(skill: Annotated[str, typer.Option(help="archetype to compile"
 def verify(skill_id: Annotated[str, typer.Argument(help="skill id to promote")]) -> None:
     """Promote a draft skill to verified and stamp last_verified_at (Phase 5)."""
     from relic.config import get_settings
-    from relic.registry.store import connect, mark_verified
+    from relic.registry import connect, mark_verified
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -302,8 +318,8 @@ def verify(skill_id: Annotated[str, typer.Argument(help="skill id to promote")])
 def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/")]) -> None:
     """Write verified skills and a catalog index to a repo's .claude/skills/ folder."""
     from relic.config import get_settings
-    from relic.registry.store import connect
-    from relic.serve.emit_files import emit_catalog, emit_verified, prune_unverified
+    from relic.registry import connect
+    from relic.serve import emit_catalog, emit_verified, prune_unverified
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -331,8 +347,8 @@ def emit(repo: Annotated[str, typer.Option(help="target repo for .claude/skills/
 def catalog() -> None:
     """Print a browsable markdown index of verified skills."""
     from relic.config import get_settings
-    from relic.registry.store import connect, list_skills
-    from relic.serve.catalog import render_catalog
+    from relic.registry import connect, list_skills
+    from relic.serve import render_catalog
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -352,7 +368,7 @@ def serve() -> None:
 
 def _make_recall_fn(engram: "Graphiti") -> "Callable[[str, int], Awaitable[str]]":
     async def recall_fn(query: str, num_results: int = 10) -> str:
-        from relic.graph.recall import format_answer, recall
+        from relic.graph import format_answer, recall
 
         return format_answer(await recall(engram, query, num_results=num_results))
 
@@ -362,8 +378,8 @@ def _make_recall_fn(engram: "Graphiti") -> "Callable[[str, int], Awaitable[str]]
 async def _serve() -> None:
     from relic.config import get_settings
     from relic.obs import get_logger
-    from relic.registry.store import connect
-    from relic.serve.mcp_server import build_server
+    from relic.registry import connect
+    from relic.serve import build_server
 
     log = get_logger("serve")
     settings = get_settings()
@@ -371,7 +387,7 @@ async def _serve() -> None:
     engram = None
     recall_fn = None
     try:
-        from relic.graph.engram import make_engram
+        from relic.graph import make_engram
 
         engram = make_engram(
             host=settings.falkordb_host,
@@ -405,8 +421,8 @@ def register(
     from pydantic import ValidationError
 
     from relic.config import get_settings
-    from relic.ontology.skill_ir import SkillIR
-    from relic.registry.store import connect, upsert_skill
+    from relic.contracts import SkillIR
+    from relic.registry import connect, upsert_skill
 
     try:
         skill = SkillIR.model_validate_json(path.read_text(encoding="utf-8"))
@@ -432,7 +448,7 @@ def list_skills_command(
     from rich.table import Table
 
     from relic.config import get_settings
-    from relic.registry.store import connect, list_skills
+    from relic.registry import connect, list_skills
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -459,9 +475,9 @@ def show(
     as_json: Annotated[bool, typer.Option("--json", help="output raw SkillIR JSON")] = False,
 ) -> None:
     """Show a skill's rendered SKILL.md, or its raw SkillIR JSON with --json."""
-    from relic.compile.render import render
     from relic.config import get_settings
-    from relic.registry.store import connect, get_skill
+    from relic.registry import connect, get_skill
+    from relic.serve import render
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -478,7 +494,7 @@ def show(
 def deprecate(skill_id: Annotated[str, typer.Argument(help="skill id to deprecate")]) -> None:
     """Mark a skill as deprecated so it is no longer emitted or served."""
     from relic.config import get_settings
-    from relic.registry.store import connect, set_status
+    from relic.registry import connect, set_status
 
     conn = connect(get_settings().registry_db_path)
     try:
@@ -507,9 +523,8 @@ def recall_command(
 
 async def _recall(query: str, repo: str | None, num_results: int) -> None:
     from relic.config import get_settings
-    from relic.graph.engram import make_engram
-    from relic.graph.recall import format_answer, recall
-    from relic.ingest.mappers import repo_group_id
+    from relic.graph import format_answer, make_engram, recall
+    from relic.ingest import repo_group_id
 
     settings = get_settings()
     repo = repo or settings.target_repo
@@ -548,9 +563,8 @@ async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
     import json
 
     from relic.config import get_settings
-    from relic.graph.engram import make_engram
-    from relic.graph.recall import recall
-    from relic.ingest.mappers import repo_group_id
+    from relic.graph import make_engram, recall
+    from relic.ingest import repo_group_id
     from relic.scorecard import load_gold, score_case, summarize, to_payload
 
     try:
@@ -603,9 +617,8 @@ def query(
 
 async def _query(text: str, repo: str | None) -> None:
     from relic.config import get_settings
-    from relic.graph.engram import make_engram
-    from relic.graph.queries import reviewers_of
-    from relic.ingest.mappers import repo_group_id
+    from relic.graph import make_engram, reviewers_of
+    from relic.ingest import repo_group_id
 
     settings = get_settings()
     # FalkorDB partitions each repo into its own graph named by group_id, so the

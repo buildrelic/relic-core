@@ -1,0 +1,22 @@
+[project]
+name = "relic-core"
+version = "0.0.1"
+description = "Relic shared core: interface contracts, ontology, settings, logging. Jointly owned."
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "buildrelic" }]
+dependencies = [
+    "pydantic>=2.11.5",
+    "pydantic-settings>=2.5",
+    "python-dotenv>=1.0.1",
+    "rich>=13.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# relic is a PEP 420 namespace package: this distribution ships its slice of it
+# (relic/contracts, relic/ontology, relic/config.py, relic/obs.py) with no
+# relic/__init__.py, so the other packages merge into the same namespace.
+[tool.hatch.build.targets.wheel]
+packages = ["src/relic"]

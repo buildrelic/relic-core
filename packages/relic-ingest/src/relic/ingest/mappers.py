@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from relic.contracts import EpisodeSpec
+
 # --- Fetched records (populated by the connectors, consumed here) -----------
 
 
@@ -78,18 +80,6 @@ class RepoBundle:
     default_branch: str
     pull_requests: list[PullRequestRec] = field(default_factory=list)
     issues: list[IssueRec] = field(default_factory=list)
-
-
-# --- Episode spec (consumed by graph.load) ----------------------------------
-
-
-@dataclass(slots=True)
-class EpisodeSpec:
-    name: str
-    body: str
-    source_description: str
-    reference_time: datetime
-    group_id: str
 
 
 # --- Pure transforms ---------------------------------------------------------

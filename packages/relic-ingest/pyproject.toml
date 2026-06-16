@@ -1,0 +1,22 @@
+[project]
+name = "relic-ingest"
+version = "0.0.1"
+description = "Relic ingestion pipeline: GitHub and Linear connectors, raw store, mappers. Owner: Paris."
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "buildrelic" }]
+dependencies = [
+    "relic-core",
+    "githubkit>=0.11",
+    "gql[httpx]>=3.5",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/relic"]
+
+[tool.uv.sources]
+relic-core = { workspace = true }

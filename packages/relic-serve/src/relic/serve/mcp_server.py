@@ -11,16 +11,15 @@ imported, to keep this module free of any graph or network dependency.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.resources import TextResource
 from fastmcp.tools.function_tool import FunctionTool
 
-from relic.compile.render import render
-from relic.ontology.skill_ir import SkillIR
-from relic.registry.store import list_skills
+from relic.contracts import RecallFn, SkillIR
+from relic.registry import list_skills
+from relic.serve.render import render
 
 
 def input_schema(skill: SkillIR) -> dict[str, Any]:
@@ -53,8 +52,6 @@ def _skill_tool(skill: SkillIR) -> FunctionTool:
         fn=handler,
     )
 
-
-RecallFn = Callable[[str, int], Awaitable[str]]
 
 _RECALL_SCHEMA: dict[str, Any] = {
     "type": "object",

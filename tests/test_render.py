@@ -1,5 +1,5 @@
-from relic.compile.render import render
 from relic.ontology.skill_ir import Citation, FieldSpec, SkillIR
+from relic.serve import render
 
 
 def test_render_includes_grounded_fields() -> None:

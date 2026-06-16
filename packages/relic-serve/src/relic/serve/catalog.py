@@ -6,7 +6,7 @@ index over them, linking to each. Deterministic and pure, like ``render``.
 
 from __future__ import annotations
 
-from relic.ontology.skill_ir import SkillIR
+from relic.contracts import SkillIR
 
 
 def render_catalog(skills: list[SkillIR]) -> str:

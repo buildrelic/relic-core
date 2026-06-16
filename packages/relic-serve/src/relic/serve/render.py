@@ -2,16 +2,17 @@
 
 Deterministic: no LLM, so identical input renders byte-identical output. The
 template uses custom delimiters (<< >> for variables, <% %> for blocks) to avoid
-colliding with markdown and code in skill content.
+colliding with markdown and code in skill content. The template ships inside this
+package so render works wherever the package is installed.
 """
 
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from relic.ontology.skill_ir import SkillIR
+from relic.contracts import SkillIR
 
-_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 
 def _env() -> Environment:

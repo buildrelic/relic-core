@@ -1,28 +1,18 @@
-[project]
-name = "relic"
-version = "0.0.1"
-description = "Memory layer for AI-native teams, built on Graphiti."
-readme = "README.md"
-requires-python = ">=3.12,<3.13"
-authors = [{ name = "buildrelic" }]
-dependencies = [
-    "graphiti-core[falkordb,google-genai]>=0.29.1,<0.30",
-    "fastmcp>=3,<4",
-    "pydantic>=2.11.5",
-    "pydantic-settings>=2.5",
-    "httpx>=0.27",
-    "jinja2>=3.1",
-    "githubkit>=0.11",
-    "gql[httpx]>=3.5",
-    "anthropic>=0.40",
-    "typer>=0.12",
-    "rich>=13.7",
-    "python-dotenv>=1.0.1",
-    "tenacity>=9.0.0",
-]
+# Relic is a uv workspace. Three engineers own three subsystems; a shared core
+# holds the interface contracts. Each package declares its own dependencies, so a
+# package can import another only if it depends on it, and only that package's
+# public API. The dependency graph is the interface contract. See AGENTS.md.
+#
+#   relic-core            shared: contracts, ontology, config, obs   (jointly owned)
+#     ^      ^      ^
+#   ingest  graph  serve   each depends on relic-core only; mutually independent
+#     ^      ^      ^
+#          relic-cli       composition root: depends on all three + core
+#
+# Owners: ingest = Paris, graph = Abhinav, serve + cli = Zidan, core = all.
 
-[project.scripts]
-relic = "relic.cli:app"
+[tool.uv.workspace]
+members = ["packages/*"]
 
 [dependency-groups]
 dev = [
@@ -32,28 +22,40 @@ dev = [
     "pytest-asyncio>=0.24",
     "syrupy>=4.7",
     "pre-commit>=3.8",
+    "import-linter>=2.0",
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/relic"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = [
+    "packages/relic-core/src",
+    "packages/relic-ingest/src",
+    "packages/relic-graph/src",
+    "packages/relic-serve/src",
+    "packages/relic-cli/src",
+    "tests",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["relic"]
+
 [tool.ruff.lint.per-file-ignores]
-"src/relic/ontology/skill_ir.py" = ["UP"]  # ported verbatim, keep Optional[...]
+# Ported verbatim from the system-design doc; keep Optional[...] (UP off).
+"packages/relic-core/src/relic/ontology/skill_ir.py" = ["UP"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["packages", "tests"]
+extraPaths = [
+    "packages/relic-core/src",
+    "packages/relic-ingest/src",
+    "packages/relic-graph/src",
+    "packages/relic-serve/src",
+    "packages/relic-cli/src",
+]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
@@ -65,3 +67,28 @@ reportMissingModuleSource = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+
+# import-linter is belt-and-suspenders: the package dependency graph already
+# prevents cross-subsystem imports by construction, but these contracts catch an
+# accidental edge before someone declares the dependency that would allow it.
+[tool.importlinter]
+root_package = "relic"
+
+[[tool.importlinter.contracts]]
+name = "ingest, graph, serve are independent siblings"
+type = "independence"
+modules = [
+    "relic.ingest",
+    "relic.graph",
+    "relic.serve",
+]
+
+[[tool.importlinter.contracts]]
+name = "subsystems never import the composition root"
+type = "forbidden"
+source_modules = [
+    "relic.ingest",
+    "relic.graph",
+    "relic.serve",
+]
+forbidden_modules = ["relic.cli"]

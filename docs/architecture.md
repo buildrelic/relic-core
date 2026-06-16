@@ -1,4 +1,7 @@
-# Architecture
+---
+title: "Architecture"
+description: "The two halves, the SkillIR contract, the two stores, the system diagram, and the runtime model."
+---
 
 Relic is two halves over one contract. The capture half builds memory from
 engineering history. The serve half delivers grounded skills to coding agents.
@@ -19,12 +22,12 @@ backed by a SQLite registry and has no graph or network dependency.
 
 The halves are deliberately decoupled. The serve side never imports the graph
 side. The MCP server takes a recall function by injection rather than importing
-it ([`mcp_server.py`](../packages/relic-serve/src/relic/serve/mcp_server.py)), so skills can be served
+it ([`mcp_server.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/mcp_server.py)), so skills can be served
 even when the graph is unreachable.
 
 ## The one contract: SkillIR
 
-`SkillIR` ([`skill_ir.py`](../packages/relic-core/src/relic/ontology/skill_ir.py)) is the seam. The
+`SkillIR` ([`skill_ir.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/ontology/skill_ir.py)) is the seam. The
 same type is:
 
 - what the Phase 4 compiler will emit,
@@ -34,9 +37,9 @@ same type is:
 
 Because one type does all four jobs, the typed contract and the rendered document
 cannot drift. The MCP tool's input schema is built directly from `SkillIR.inputs`
-([`input_schema`](../packages/relic-serve/src/relic/serve/mcp_server.py)), and the `SKILL.md` is
+([`input_schema`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/mcp_server.py)), and the `SKILL.md` is
 rendered from the same record by a deterministic Jinja template
-([`render.py`](../packages/relic-serve/src/relic/serve/render.py)).
+([`render.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/render.py)).
 
 ## The two stores
 
@@ -45,15 +48,15 @@ Memory and skills live in separate stores on purpose.
 **The graph (memory).** A FalkorDB graph, accessed through Graphiti. It holds
 people, repos, pull requests, reviews, issues, and the edges between them,
 extracted from episodes. It is partitioned per repo by `group_id`. See
-[memory-and-recall.md](memory-and-recall.md).
+[memory-and-recall.md](/memory-and-recall).
 
 **The registry (skills).** A SQLite database at `./data/registry.db`. It holds
 `SkillIR` documents plus denormalized columns for cheap listing. See
-[skills.md](skills.md).
+[skills.md](/skills).
 
 A third store sits beside them: the **raw store**, plain JSON files under
 `./data/raw/<source>/<id>.json`, an immutable copy of every fetched payload so a
-skill can always cite the original ([`raw_store.py`](../packages/relic-ingest/src/relic/ingest/raw_store.py)).
+skill can always cite the original ([`raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/raw_store.py)).
 
 ## System diagram
 
@@ -112,7 +115,7 @@ flowchart TB
 
 Relic is not a single running service. It is a set of processes, most of them
 short-lived CLI invocations, over shared stores. See
-[processes.md](processes.md) for each one in detail.
+[processes.md](/processes) for each one in detail.
 
 - **CLI commands** are one-shot. `ingest`, `recall`, `query`, `eval`, `emit`,
   and the rest run, do their work, and exit. The async ones
@@ -120,14 +123,14 @@ short-lived CLI invocations, over shared stores. See
 - **`relic serve`** is the one long-running process. It speaks MCP over stdio and
   stays up for the life of the client connection.
 - **FalkorDB** is a persistent service, run locally via Docker
-  ([`docker-compose.yml`](../docker-compose.yml)) on `localhost:6379`. It must be
+  ([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml)) on `localhost:6379`. It must be
   up before any graph command.
 - **OpenAI and Anthropic** are external HTTP APIs called per run.
 
 The CLI is import-light by design. Only typer and rich load at module import, so
 `relic --help` stays fast and needs no keys. Each command imports its heavy
 dependencies (Graphiti, the connectors) inside the command body
-([`cli.py`](../packages/relic-cli/src/relic/cli.py)).
+([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)).
 
 ## Workspace layout
 
@@ -189,7 +192,7 @@ will live in `relic-cli` as a second composition root alongside the daemon.
 
 **Deterministic-first ingestion.** GitHub and Linear are already structured, so
 the connectors and mappers build records with no LLM and no network beyond the
-source API ([`mappers.py`](../packages/relic-ingest/src/relic/ingest/mappers.py) is pure). The LLM
+source API ([`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py) is pure). The LLM
 enters only at the Graphiti extraction step, where episodes become typed graph
 entities. This keeps provenance clean and cost bounded.
 
@@ -201,7 +204,7 @@ That is what makes the candidates trustworthy.
 **Three type layers, not one.** The rich ontology in `ontology/` is the source of
 truth for the typed domain. Graphiti needs flat scalar models, so `engram.py`
 holds a separate flat `*Node` layer. `SkillIR` is its own ported-verbatim
-contract. See [data-model.md](data-model.md) for why.
+contract. See [data-model.md](/data-model) for why.
 
 **Cheap model for the graph, frontier model for compilation.** Graphiti uses
 OpenAI `gpt-4o-mini` for extraction and reranking and `text-embedding-3-small`
@@ -210,7 +213,7 @@ grounded-synthesis job.
 
 **Provenance is mandatory.** Every recalled fact carries its source episodes, and
 every source resolves to a PR or issue URL where possible
-([`recall.py`](../packages/relic-graph/src/relic/graph/recall.py)). Every skill carries citations. A
+([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)). Every skill carries citations. A
 fact or claim with no source is not the point of the system.
 
 ## The stack
@@ -229,5 +232,5 @@ fact or claim with no source is not the point of the system.
 
 The graph DB was migrated from embedded Kuzu to FalkorDB. FalkorDB was chosen for
 multi-tenant `group_id` partitioning (per-repo graphs) and working full-text
-search. See [memory-and-recall.md](memory-and-recall.md) and
-[roadmap.md](roadmap.md).
+search. See [memory-and-recall.md](/memory-and-recall) and
+[roadmap.md](/roadmap).

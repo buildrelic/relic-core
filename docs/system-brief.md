@@ -1,4 +1,7 @@
-# Relic system brief
+---
+title: "System brief"
+description: "What Relic is, the core loop, the architecture, and the stack, in one page."
+---
 
 ## What it is
 
@@ -7,7 +10,7 @@ Relic is a memory layer for AI-native teams, built on
 history, structures it as a temporal knowledge graph, and serves two things to
 coding agents over MCP: grounded answers about past work, each citing its source,
 and compiled skills, the repeatable procedures an agent can follow. This repo,
-`relic-core`, is the prototype: about 2,800 lines of Python in a uv workspace of
+`relic-core`, is the prototype: about 4,200 lines of Python in a uv workspace of
 five owned packages, driven by a Typer CLI.
 
 ## Core loop
@@ -102,7 +105,7 @@ carries the MCP transport.
 
 Built: capture, memory, recall, the SQLite registry and skill lifecycle,
 emit/catalog reconciliation, the MCP server, the recall scorecard, and doctor. The
-test suite is 18 files. 17 run offline against throwaway SQLite and in-memory
+test suite is 25 files. 24 run offline against throwaway SQLite and in-memory
 fakes. One live integration test is skip-gated on `OPENAI_API_KEY` and a reachable
 FalkorDB.
 

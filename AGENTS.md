@@ -28,7 +28,8 @@ owns one subsystem and works inside it.
 - **Abhinav.** `relic-graph`: the memory and retrieval store. The Graphiti graph,
   recall, and the procedure detector and compiler.
 - **Zidan.** `relic-serve` and `relic-cli`: the MCP server, the skill registry,
-  render, the composition-root CLI, and the web app under `apps/`.
+  render, and the composition-root CLI. The web app under `apps/` is his too, once
+  it lands (the directory does not exist yet).
 - **Shared.** `relic-core`: the interface contracts (`relic.contracts`), the
   ontology, settings, and logging. All three own it together.
 

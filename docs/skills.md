@@ -1,9 +1,12 @@
-# Skills, registry, and serve
+---
+title: "Skills, registry, and serve"
+description: "The SkillIR lifecycle, the SQLite registry, render, emit, catalog, and the MCP server."
+---
 
 The serve side holds typed skills, moves them through a lifecycle, and delivers
 them to coding agents. It is decoupled from the graph: nothing here imports
 ingestion or recall. The unit of currency is `SkillIR` (see
-[data-model.md](data-model.md)).
+[data-model.md](/data-model)).
 
 ## Lifecycle
 
@@ -30,7 +33,7 @@ flowchart LR
 
 ## The registry
 
-[`registry/store.py`](../packages/relic-serve/src/relic/registry/store.py) is a SQLite store at
+[`registry/store.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/registry/store.py) is a SQLite store at
 `./data/registry.db` (`REGISTRY_DB_PATH`). The schema is one table:
 
 ```sql
@@ -69,21 +72,21 @@ dependency. Postgres later, same schema.
 
 ## Render: SkillIR to SKILL.md
 
-[`compile/render.py`](../packages/relic-serve/src/relic/serve/render.py) renders a `SkillIR` to
+[`serve/render.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/render.py) renders a `SkillIR` to
 `SKILL.md` markdown through a Jinja template,
-[`templates/skill.md.j2`](../templates/skill.md.j2). The template uses custom
+[`templates/skill.md.j2`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/templates/skill.md.j2). The template uses custom
 delimiters (`<< >>` for variables, `<% %>` for blocks) so template syntax does not
 collide with the markdown and code inside skill content.
 
 Rendering is deterministic: no LLM, so identical input renders byte-identical
 output. That is what makes golden-file snapshot tests possible
-([`test_render.py`](../tests/test_render.py)). The rendered doc carries the title,
+([`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py)). The rendered doc carries the title,
 description, scope, status, owner, inputs, outputs, preconditions, safety checks,
 and citations.
 
 ## Emit: skills into a repo
 
-[`serve/emit_files.py`](../packages/relic-serve/src/relic/serve/emit_files.py) writes verified skills
+[`serve/emit_files.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/emit_files.py) writes verified skills
 into a target repo's `.claude/skills/` tree. `relic emit --repo /path` does three
 things:
 
@@ -106,7 +109,7 @@ codebase for every teammate.
 
 ## Catalog: the human index
 
-[`serve/catalog.py`](../packages/relic-serve/src/relic/serve/catalog.py) renders a browsable markdown
+[`serve/catalog.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/catalog.py) renders a browsable markdown
 index of skills, linking to each `SKILL.md`. Where emit writes one file per skill,
 the catalog is the index over them. `relic catalog` prints it to stdout; `emit`
 writes the same content to the target repo's `.claude/skills/README.md`. It is
@@ -114,7 +117,7 @@ deterministic and pure, like render.
 
 ## Serve: the MCP server
 
-[`serve/mcp_server.py`](../packages/relic-serve/src/relic/serve/mcp_server.py) builds a FastMCP server
+[`serve/mcp_server.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/mcp_server.py) builds a FastMCP server
 that is the single MCP surface for skills and memory both. `relic serve` runs it
 over stdio.
 
@@ -131,7 +134,7 @@ over stdio.
   facts with their sources.
 
 Recall is injected, not imported. The CLI builds the engram, wraps it in a recall
-function ([`_make_recall_fn`](../packages/relic-cli/src/relic/cli.py)), and passes it in. If building
+function ([`_make_recall_fn`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)), and passes it in. If building
 the engram fails (no OpenAI key, FalkorDB down), `serve` logs to stderr and runs
 without `recall_memory`, still serving skills. This keeps `mcp_server.py` free of
 any graph or network dependency, and keeps the server useful when memory is
@@ -158,7 +161,7 @@ Any MCP client that speaks stdio works the same way.
 
 The downstream half flows draft to verify to emit to serve, decoupled from
 ingestion and the graph. The slice test
-([`test_pipeline_slice.py`](../tests/test_pipeline_slice.py)) walks it: a
+([`test_pipeline_slice.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_pipeline_slice.py)) walks it: a
 `SkillIR` lands as a draft, is not emitted or served while a draft, is promoted by
 `verify`, then emits to `.claude/skills/` and appears as an MCP tool. Today the
 draft is a fixture. Later it is the Phase 4 compiler's output.
@@ -166,10 +169,10 @@ draft is a fixture. Later it is the Phase 4 compiler's output.
 ## What is pending
 
 The Phase 4 compiler is the missing piece that turns the graph into skills. The
-detector ([`compile/detect.py`](../packages/relic-graph/src/relic/compile/detect.py)) will find a
+detector ([`compile/detect.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/detect.py)) will find a
 recurring procedure with a deterministic graph query plus a support and confidence
-threshold. The compiler ([`compile/compiler.py`](../packages/relic-graph/src/relic/compile/compiler.py))
+threshold. The compiler ([`compile/compiler.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/compiler.py))
 will feed that grounded evidence to Anthropic with `SkillIR` as a structured-output
 schema, so the model can only return a valid skill, every field cites its source,
 and `status` is always `draft`. Both are docstring-only stubs today. See
-[roadmap.md](roadmap.md).
+[roadmap.md](/roadmap).

@@ -34,7 +34,7 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 | 1 | Ontology and SkillIR as code | done |
 | 2 | Deterministic ingestion (GitHub + Linear) | done |
 | 3 | Entity resolution | stub (`resolve`) |
-| 4 | Procedure detection + skill compilation | stub (`compile`, `detect`, `compiler`); `render` done |
+| 4 | Procedure detection + skill compilation | stub (`compile`, `detect`, `compiler`); `render` (in `relic-serve`) done |
 | 5 | Registry + human verification | done |
 | 6 | Serve into the coding agent | done (files + MCP) |
 | 7 | Activation-moment demo | pending |
@@ -45,9 +45,9 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 - **Phase 0 to 2.** The capture pipeline runs: `ingest` pulls GitHub PRs (with
   descriptions, files, reviews, review comments) and issues (with bodies), keeps
   raw copies, maps them deterministically, and lands them in the graph per repo.
-  See [ingestion.md](ingestion.md).
+  See [ingestion.md](/ingestion).
 - **Phase 5.** The registry and lifecycle are wired: `register`, `list`, `show`,
-  `verify`, `deprecate`. See [skills.md](skills.md).
+  `verify`, `deprecate`. See [skills.md](/skills).
 - **Phase 6.** Both serve paths work: `emit` plus `catalog` write skills into a
   repo's `.claude/skills/`, and `serve` exposes them over MCP.
 
@@ -71,7 +71,7 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
   Anthropic with `SkillIR` as a structured-output schema, so the model can only
   return a valid skill, every field cites a source, anything ungrounded is
   dropped, and `status` is always `draft`. `detect` and `compiler` are stubs;
-  `render` is done.
+  `render` (in the serve package) is done.
 - **Phase 7, the demo.** Install a compiled skill in a repo, prompt Claude Code,
   and record it tagging the right reviewer because of the skill. Then compile a
   second skill to show the loop generalizes.
@@ -87,7 +87,7 @@ self-hosted via Docker, because Kuzu blocked two things the loop needs: per-repo
 `group_id` partitioning crashed `add_episode`, and full-text search did not work.
 FalkorDB gives both. Recall and query code did not change across the migration,
 since both ride the portable `graphiti.search` API. See
-[memory-and-recall.md](memory-and-recall.md). The production move is now from
+[memory-and-recall.md](/memory-and-recall). The production move is now from
 self-hosted FalkorDB to a managed or hosted FalkorDB instance, not a backend swap.
 
 ## Explicitly not building yet

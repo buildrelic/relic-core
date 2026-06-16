@@ -111,6 +111,26 @@ Write like a sharp teammate dumping context, not a brand writing copy.
 - Avoid the AI bullet `**Bold term** — explanation`. Use `**Bold term.** Short
   sentence.` instead.
 
+## Documentation
+
+`docs/` is the canonical documentation for the codebase and the platform, a
+Mintlify site. The pages there are the source of truth, not code comments or
+memory. Read the page for a subsystem before you change it.
+
+Keep it in sync in the same change. A PR or commit that changes behavior, a
+contract in `relic.contracts`, a CLI command or flag, config, the data model, or
+a process updates the affected page under `docs/` in that same PR or commit. Docs
+and code ship together, not in a follow-up.
+
+- A new or changed command or flag: `docs/cli-reference.mdx`.
+- A new env var or store: `docs/configuration.mdx`.
+- A schema, graph node, or episode change: `docs/data-model.mdx`.
+- A stub that became wired, or a phase that landed: `docs/roadmap.mdx`.
+- A new page: add `title` and `description` frontmatter and list it in the right
+  group in `docs/docs.json`.
+
+The Voice rules above apply to every page.
+
 ## Git, commits, issues
 
 One shared repo, light process. The package boundaries do the heavy lifting, so

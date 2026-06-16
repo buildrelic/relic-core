@@ -4,7 +4,7 @@ icon: "terminal"
 description: "Every relic command, its flags, defaults, and exit codes."
 ---
 
-Every command is a subcommand of `relic` ([`cli.py`](../src/relic/cli.py)). Run
+Every command is a subcommand of `relic` ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)). Run
 `uv run relic --help` for the live list, or `uv run relic <command> --help` for one
 command. The CLI prints `--help` when given no arguments.
 
@@ -24,7 +24,7 @@ two stubs that land in later phases.
 Pull merged PRs, reviews, and issues into the graph.
 
 ```
-relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh]
+relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no-progress]
 ```
 
 - `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
@@ -35,10 +35,11 @@ relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh]
   (experimental; sequential is the default). Also set by `BULK_LOAD`.
 - `--fresh` (optional): ignore the checkpoint and reload every episode. Pair it
   with clearing the repo's graph, or you get duplicates.
+- `--no-progress` (optional): disable the live progress bar. It already turns off under `--verbose` and when stderr is not a terminal.
 
 Needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB. Pulls Linear too
 when `LINEAR_API_KEY` is set. Resumable: a re-run skips episodes already landed
-(the per-repo checkpoint under `./data/ingest/`). See [ingestion.md](ingestion.md).
+(the per-repo checkpoint under `./data/ingest/`). See [ingestion.md](/ingestion).
 
 Exit codes: `0` on success (including a no-op re-run where everything was already
 loaded), `2` for a malformed `--repo`, `1` when the graph is unreachable or the run
@@ -82,14 +83,15 @@ de-duplicated by name.
 ### relic eval
 
 Score recall against a gold set: does it cite the PR or issue that holds each
-answer?
+answer? A malformed or unreadable gold set exits 1.
 
 ```
-relic eval [--path PATH] [--num-results N]
+relic eval [--path PATH] [--num-results N] [--json PATH]
 ```
 
 - `--path` (optional, default `eval/github_recall.json`): the gold set JSON.
 - `--num-results` (optional, default 10): facts per question.
+- `--json` (optional): also write the run as machine-readable JSON to this path, alongside the stdout summary.
 
 ```bash
 uv run relic eval
@@ -164,7 +166,7 @@ relic catalog
 ### relic serve
 
 Serve verified skills and memory recall as MCP tools over stdio. The one
-long-running command. See [skills.md](skills.md).
+long-running command. See [skills.md](/skills).
 
 ```
 relic serve
@@ -175,7 +177,7 @@ relic serve
 ### relic doctor
 
 Report registry, graph, and key status for this setup. Reads only, changes
-nothing, never raises. See [configuration.md](configuration.md).
+nothing, never raises. See [configuration.md](/configuration).
 
 ```
 relic doctor
@@ -201,10 +203,10 @@ relic compile --skill ARCHETYPE
 
 | Command | Required args | Key flags | Needs graph |
 |---|---|---|---|
-| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh` | yes |
+| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh`, `--no-progress` | yes |
 | `recall` | `query` | `--repo`, `--num-results` | yes |
 | `query` | `text` | `--repo` | yes |
-| `eval` | none | `--path`, `--num-results` | yes |
+| `eval` | none | `--path`, `--num-results`, `--json` | yes |
 | `register` | `path` | none | no |
 | `list` | none | `--status` | no |
 | `show` | `skill_id` | `--json` | no |

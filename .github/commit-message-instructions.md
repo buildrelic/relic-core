@@ -3,6 +3,10 @@
 Generate commit messages that follow this project's conventions. A message has a
 **title** (subject line) and an optional **description** (body).
 
+Before the message: `docs/` is the canonical documentation, so a commit that
+changes documented behavior updates the affected page under `docs/` in the same
+commit. The rules below are about the message itself.
+
 ## Title
 
 - Short and skimmable. Aim for 50 characters or fewer; hard cap at 72.

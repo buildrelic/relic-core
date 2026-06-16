@@ -16,3 +16,10 @@ Part of REL-<!-- issue ID, e.g. REL-10 -->
 ## How to test it
 
 <!-- The exact steps to verify it, commands and expected results included. -->
+
+## Docs
+
+<!-- docs/ is the canonical documentation. Update the affected page(s) under docs/
+in this PR so docs and code ship together. -->
+
+- [ ] Updated the affected page(s) under `docs/`, or none apply.

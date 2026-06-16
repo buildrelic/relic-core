@@ -5,7 +5,7 @@ description: "Environment variables, the four stores, secret handling, and the d
 ---
 
 All runtime configuration is environment variables, loaded from `.env` into a
-pydantic-settings model ([`config.py`](../src/relic/config.py)). Secrets are
+pydantic-settings model ([`config.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/config.py)). Secrets are
 optional, so importing config (and `relic --help`) never needs a populated `.env`.
 `get_settings()` reads and caches them.
 
@@ -82,14 +82,14 @@ Four stores, all under `./data/` by default (gitignored).
 - **The graph (memory).** FalkorDB, addressed by `FALKORDB_*`. Not a local file:
   it is a networked service. Per-repo graphs are named by `group_id`; the
   `FALKORDB_DATABASE` graph holds ungrouped data. See
-  [memory-and-recall.md](memory-and-recall.md).
+  [memory-and-recall.md](/memory-and-recall).
 - **The registry (skills).** SQLite at `REGISTRY_DB_PATH`. Created on first write.
-  See [skills.md](skills.md).
+  See [skills.md](/skills).
 - **The raw store.** Plain JSON under `./data/raw/<source>/<id>.json`, written by
-  `ingest`. See [ingestion.md](ingestion.md).
+  `ingest`. See [ingestion.md](/ingestion).
 - **The ingest checkpoint.** A per-repo ledger at `./data/ingest/<group_id>.log`,
   one landed episode name per line. Lets a re-run skip what already loaded and
-  resume a failed run. `ingest --fresh` clears it. See [ingestion.md](ingestion.md).
+  resume a failed run. `ingest --fresh` clears it. See [ingestion.md](/ingestion).
 
 ## Logging
 
@@ -97,7 +97,7 @@ Logs are diagnostics and go to stderr; a command's result goes to stdout. The
 default level is `INFO` (phase counts, the run summary). `relic --verbose` (or
 `-v`, before the command) drops it to `DEBUG`. Logging attaches to the `relic`
 logger only, so third-party `INFO` chatter stays suppressed
-([`obs.py`](../src/relic/obs.py)).
+([`obs.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/obs.py)).
 
 `relic ingest` shows a live progress bar over the load phase on an interactive
 terminal. It is suppressed automatically when output is piped/redirected or under
@@ -109,13 +109,13 @@ so log lines render above the bar instead of corrupting it.
 ## What keys unlock
 
 `relic doctor` reports each key and what it unlocks
-([`doctor.py`](../src/relic/doctor.py)):
+([`doctor.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/doctor.py)):
 
 | Key | Unlocks |
 |---|---|
-| openai | graph ingest, recall (and embeddings/rerank under the `gemini` provider) |
-| anthropic | skill compiler (Phase 4) |
-| gemini | graph extraction when `GRAPHITI_LLM_PROVIDER=gemini` (hybrid; still needs openai) |
+| openai | graph ingest, recall |
+| anthropic | skill compiler |
+| gemini | graph extraction (gemini provider, hybrid) |
 | github | github ingest |
 | linear | linear ingest |
 

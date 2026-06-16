@@ -8,7 +8,7 @@ source.
 This repo is the prototype pipeline: ingest engineering history, structure it in
 a graph, detect recurring procedures, and compile them into grounded skills a
 coding agent can follow. See [`AGENTS.md`](AGENTS.md) for what Relic is and how we
-work, and [`docs/`](docs/) for the deep dives.
+work, and [`docs/`](docs/), the canonical documentation for the codebase and platform.
 
 ## How it works
 
@@ -152,8 +152,10 @@ resolution (`resolve`, Phase 3) and the procedure detector plus skill compiler
 (`compile`, Phase 4), which will produce `SkillIR` records from the graph instead
 of by hand.
 
-Two rules worth knowing before you start:
+Three rules worth knowing before you start:
 
+- `docs/` is the canonical documentation. Read the relevant page before you change
+  a subsystem, and update it in the same PR or commit. Docs and code ship together.
 - The graph and the registry never mix. Memory lives in FalkorDB, skills live in
   SQLite, and `SkillIR` is the only type that crosses the skill side.
 - The house voice for all prose (docs, UI, errors, commits) is in

@@ -4,8 +4,10 @@ icon: "code"
 description: "Local setup, the test suite, CI, and code conventions."
 ---
 
-Relic is a `uv` project on Python 3.12. The toolchain is ruff (lint and format),
-pyright (types), and pytest (tests). CI runs all three.
+Relic is a uv workspace on Python 3.12: five packages under `packages/` (see
+[architecture.md](/architecture)), installed editable into one shared venv. The
+toolchain is ruff (lint and format), pyright (types), pytest (tests), and
+import-linter (subsystem boundaries). CI runs all four, with ruff in check-only mode: `ruff format` is local, via `just fmt`.
 
 ## Requirements
 
@@ -52,14 +54,17 @@ just ingest astral-sh/uv 20   # ingest a repo, capped at 20
 just recall "who reviews auth changes?"
 ```
 
-`just check` runs ruff, pyright, and pytest, the same three CI runs. `just lint`,
-`just types`, and `just test` run them one at a time. `just reset-graph` and `just
-clean` are destructive: the first wipes the FalkorDB volume, the second removes
-local state under `data/`.
+`just check` runs ruff, pyright, pytest, and lint-imports, the same four CI runs.
+`just lint`, `just types`, `just test`, and `just imports` run them one at a time.
+`just reset-graph` and `just clean` are destructive: the first wipes the FalkorDB
+volume, the second removes local state under `data/`.
+
+`just check` runs pyright and pytest as `uv run python -m ...` so they work
+regardless of the installed entry-point shebangs.
 
 ## Conventions
 
-Tooling config is in [`pyproject.toml`](../pyproject.toml).
+Tooling config is in [`pyproject.toml`](https://github.com/buildrelic/relic-core/blob/main/pyproject.toml).
 
 - **ruff.** Line length 100, target py312, lint rules `E`, `F`, `I`, `UP`, `B`,
   `SIM`. One per-file ignore: `skill_ir.py` keeps `Optional[...]` (`UP` off)
@@ -69,13 +74,13 @@ Tooling config is in [`pyproject.toml`](../pyproject.toml).
   output, tests under `tests/`.
 
 The house voice for all prose (docs, UI, errors, commit messages) is in
-[`AGENTS.md`](../AGENTS.md). The short version: short declarative sentences, no em
+[`AGENTS.md`](https://github.com/buildrelic/relic-core/blob/main/AGENTS.md). The short version: short declarative sentences, no em
 dashes, specifics over adjectives, real names only, lowercase product terms
 (memory, capture, recall).
 
 ## Branches, commits, and PRs
 
-We track work in Linear. From [`AGENTS.md`](../AGENTS.md):
+We track work in Linear. From [`AGENTS.md`](https://github.com/buildrelic/relic-core/blob/main/AGENTS.md):
 
 - **Branches.** Work on an issue from the branch Linear generates for it, used as
   is, for example `paris/rel-10-ingest-run-observability`.
@@ -94,29 +99,50 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 
 | Test | Covers |
 |---|---|
-| [`test_ontology.py`](../tests/test_ontology.py) | ontology models round-trip, SkillIR schema |
-| [`test_mappers.py`](../tests/test_mappers.py) | deterministic payload to episode transforms |
-| [`test_raw_store.py`](../tests/test_raw_store.py) | raw artifact paths and writes |
-| [`test_ingest_integration.py`](../tests/test_ingest_integration.py) | the fetch and map path with stubbed sources |
-| [`test_render.py`](../tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
-| [`test_store.py`](../tests/test_store.py) | registry upsert, status, lifecycle |
-| [`test_catalog.py`](../tests/test_catalog.py) | the markdown catalog index |
-| [`test_emit.py`](../tests/test_emit.py) | emit, prune, catalog reconciliation |
-| [`test_serve.py`](../tests/test_serve.py) | MCP server: tools, resources, search |
-| [`test_mcp_e2e.py`](../tests/test_mcp_e2e.py) | the MCP server end to end |
-| [`test_recall.py`](../tests/test_recall.py) | recall facts, provenance, formatting |
-| [`test_falkordb_query.py`](../tests/test_falkordb_query.py) | the query path and Cypher fallback |
-| [`test_scorecard.py`](../tests/test_scorecard.py) | eval scoring and summary |
-| [`test_doctor.py`](../tests/test_doctor.py) | the health report |
-| [`test_cli.py`](../tests/test_cli.py), [`test_cli_skills.py`](../tests/test_cli_skills.py) | CLI wiring |
-| [`test_pipeline_slice.py`](../tests/test_pipeline_slice.py) | draft to verify to emit to serve, end to end |
+| [`test_ontology.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ontology.py) | ontology models round-trip, SkillIR schema |
+| [`test_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mappers.py) | deterministic payload to episode transforms |
+| [`test_raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_raw_store.py) | raw artifact paths and writes |
+| [`test_github_connector.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_connector.py) | the pure GitHub connector helpers (state, node parsing), no network |
+| [`test_github_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_fetch.py) | windowed GraphQL PR paging, node parsing, and issue windowing, no network |
+| [`test_ingest_integration.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_integration.py) | the fetch and map path with stubbed sources |
+| [`test_cli_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_ingest.py) | the `ingest` command: gates, exit codes, and checkpoint wiring (sources stubbed) |
+| [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-repo checkpoint ledger: append, load, skip, and `--fresh` clear |
+| [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, resume skipping |
+| [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
+| [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
+| [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |
+| [`test_catalog.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_catalog.py) | the markdown catalog index |
+| [`test_emit.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_emit.py) | emit, prune, catalog reconciliation |
+| [`test_serve.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve.py) | MCP server: tools, resources, search |
+| [`test_mcp_e2e.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mcp_e2e.py) | the MCP server end to end |
+| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting |
+| [`test_falkordb_query.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_falkordb_query.py) | the query path and Cypher fallback |
+| [`test_scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scorecard.py) | eval scoring and summary |
+| [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report |
+| [`test_config.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_config.py) | settings: secret sanitization and the deprecated SEMAPHORE_LIMIT fallback |
+| [`test_obs.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs.py) | logging setup: stderr routing, scoped to the `relic` logger, idempotent |
+| [`test_cli.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli.py), [`test_cli_skills.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_skills.py) | CLI wiring |
+| [`test_pipeline_slice.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_pipeline_slice.py) | draft to verify to emit to serve, end to end |
 
-Shared fixtures are in [`conftest.py`](../tests/conftest.py); `make_skill` builds
+Shared fixtures are in [`conftest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/conftest.py); `make_skill` builds
 `SkillIR` instances with overridable defaults.
 
 ## CI
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on push to `main`
-and on every PR. It spins up a FalkorDB service container, syncs with `uv`, then
-runs ruff, pyright, and pytest in sequence. A red check on any of the three fails
-the build. `just check` runs the same three locally before you push.
+[`.github/workflows/ci.yml`](https://github.com/buildrelic/relic-core/blob/main/.github/workflows/ci.yml) runs on push to `main`
+and on every PR. It spins up a FalkorDB service container, syncs the whole
+workspace with `uv`, then runs ruff (`ruff check`, lint only), pyright, lint-imports, and pytest in sequence. CI does not verify formatting; run `just fmt` locally. A red check on any of the four fails the build. `just check` runs the
+same four locally before you push.
+
+## Documentation
+
+`docs/` is the canonical documentation for the codebase and the platform, built
+with Mintlify. Treat it as the source of truth and keep it in sync with your
+change: a PR or commit that changes behavior, a contract, a command, config, the
+data model, or a process updates the affected page under `docs/` in the same
+change. Docs and code ship together. The full rule and the change-to-page map are
+in [`AGENTS.md`](https://github.com/buildrelic/relic-core/blob/main/AGENTS.md).
+
+Pages are `.mdx` with `title` and `description` frontmatter, and the navigation
+lives in `docs.json`. Preview locally with `mint dev` from `docs/`, and check the
+build with `mint validate` (the Mintlify CLI needs an LTS Node).

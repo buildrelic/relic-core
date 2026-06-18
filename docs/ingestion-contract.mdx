@@ -23,6 +23,35 @@ The seam is a typed, versioned model, so the two sides cannot drift:
 
 The full body shape is documented in [data-model.md](/data-model).
 
+## Source taxonomy (development sources)
+
+There is one body model per development **artifact type**, not per connector:
+sources collapse onto the artifact type, source-specific fields stay optional. Two
+are populated today (`pull_request`, `issue`); the rest are defined in
+[`episode_body.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
+as the full target, with capture landing wave by wave. Each carries a top-level
+`url` citation anchor (`pull_request`/`issue` keep theirs nested), so
+`recall._extract_url` resolves a source for every fact with no per-source change.
+
+| Artifact type | `source_type` | Body model | Sources that map onto it | `source_description` | Grounded in | Status |
+|---|---|---|---|---|---|---|
+| Pull request | `pull_request` | `PrEpisodeBody` | GitHub PR, GitLab MR, Bitbucket PR | `github pull request` | review-routing fields | **populated** |
+| Issue / ticket | `issue` | `IssueEpisodeBody` | GitHub issue, Linear, Jira | `github issue` / `linear issue` | — | **populated** |
+| Commit | `commit` | `CommitEpisodeBody` | git / GitHub / GitLab commit | `github commit` | Conventional Commits | defined |
+| Release | `release` | `ReleaseEpisodeBody` | GitHub/GitLab release, tag | `github release` | SemVer + Keep a Changelog + DORA | defined |
+| CI / CD run | `ci_run` | `CiRunEpisodeBody` | GitHub Actions, GitLab pipeline, deploy | `github ci run` | DORA four keys | defined |
+| Incident | `incident` | `IncidentEpisodeBody` | postmortem, PagerDuty, incident.io | `incident` | Google SRE postmortem + DORA MTTR | defined |
+| Doc | `doc` | `DocEpisodeBody` | README/CONTRIBUTING/ADR/runbook, Notion, Confluence | `doc` | MADR + Diataxis | defined |
+| Discussion | `discussion` | `DiscussionEpisodeBody` | GitHub Discussions, RFC, Q&A | `github discussion` | GitHub Discussions (category/answer) | defined |
+| Conversation | `conversation` | `ConversationEpisodeBody` | Slack thread, meeting (Granola), Discord | `slack conversation` / `meeting` | decision + action-item capture | defined |
+
+The `source_type` discriminator names the **artifact type**, not the connector
+(github vs linear is carried by `EpisodeSpec.source_description` and the
+identifier/URL). For mutable sources (docs, conversations), the episode is a
+versioned snapshot: the immutable version key (a git commit, a Notion version id)
+is the episode-name component, never the mutable content, so a re-capture is a new
+episode rather than a fork or a frozen-in-place stale one.
+
 ## What ingestion now emits (review-routing first)
 
 Beyond the previous body, the PR episode now carries the review-routing signals:

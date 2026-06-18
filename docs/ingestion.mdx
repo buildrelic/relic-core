@@ -52,7 +52,7 @@ first run on a large repo does not page its entire history.
 **Token.** `resolve_github_token` uses `GITHUB_TOKEN` if set, otherwise shells
 out to `gh auth token`. With neither it raises a clear error.
 
-**Merged and closed PRs.** `_fetch_prs_graphql` pulls PRs in a terminal state (merged or closed without merge) with one batched GraphQL query per page: each page returns PRs ordered by `updatedAt` descending, every PR carrying its files, reviews, and requested reviewers in the same round trip, so there is no per-PR REST fan-out. Paging stops once a PR's `updatedAt` falls before the cutoff. The skip test keys off the terminal event, `mergedAt` or else `closedAt`: a PR whose terminal time predates the window is skipped even if a later comment bumped `updatedAt` into it. `--limit N` caps the count, most recent first.
+**Merged and closed PRs.** `_fetch_prs_graphql` pulls PRs in a terminal state (merged or closed without merge) with one batched GraphQL query per page: each page returns PRs ordered by `updatedAt` descending, every PR carrying its files (with `additions`/`deletions`), reviews, requested reviewers (with the `__typename` that separates a user request from a team request), labels, commit authors and messages, PR-level diff stats, base/head branch, and the issues it closes (`closingIssuesReferences`) in the same round trip, so there is no per-PR REST fan-out. These are the review-routing signals: who a PR was sent to, who actually reviewed, what area it touched, and which issue it resolved. Paging stops once a PR's `updatedAt` falls before the cutoff. The skip test keys off the terminal event, `mergedAt` or else `closedAt`: a PR whose terminal time predates the window is skipped even if a later comment bumped `updatedAt` into it. `--limit N` caps the count, most recent first.
 
 **Issues.** `_fetch_issues` uses the REST list endpoint with its native `since`
 filter (issues updated at or after the cutoff), skipping the ones that are actually
@@ -68,8 +68,10 @@ payload is kept on each record's `raw` field for the raw store.
 
 [`linear.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/linear.py) is a GraphQL connector over `gql`,
 guarded behind `LINEAR_API_KEY`. `fetch_issues` paginates all issues (identifier,
-title, url, state, assignee, labels, created and completed timestamps) and maps
-each to the same `IssueRec` used for GitHub issues, with `source="linear"`. When
+title, description, url, state, assignee, labels, parent, created and completed
+timestamps) and maps each to the same `IssueRec` used for GitHub issues, with
+`source="linear"`. The description was previously not even queried, so every Linear
+episode used to land with a null body; it now carries the issue's substance. When
 the key is unset, `ingest` logs that Linear was skipped and moves on.
 
 ## Step 3: keep a raw copy
@@ -83,20 +85,27 @@ later.
 ## Step 4: map to episodes
 
 [`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py) is pure and unit-tested: no
-network, no LLM. It turns each record into an `EpisodeSpec`.
+network, no LLM. It turns each record into an `EpisodeSpec` whose body is a typed,
+versioned model from
+[`relic.contracts.episode_body`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
+(see [data-model.md](/data-model) for the full shape and invariants).
 
-- `pr_to_episode` maps a PR in any state, builds the PR episode body (repo, pull_request, reviews, requested_reviewers, files), names it `PR <repo>#<number>`, and anchors `reference_time` to the merge time, falling back to the creation time, then to the epoch if both are missing.
-- `issue_to_episode` builds the issue body and names it `Issue <identifier>`.
+- `pr_to_episode` maps a PR in any state, builds a `PrEpisodeBody` (repo, pull_request, reviews, requested_reviewers with `kind`, files with per-file stats, commits, linked_issues, derived timestamps, diff stats, labels), names it `PR <repo>#<number>`, and anchors `reference_time` to the merge time, falling back to the creation time, then to the epoch if both are missing.
+- `issue_to_episode` builds an `IssueEpisodeBody` and names it `Issue <identifier>`.
+- `_pr_timestamps` derives `first_review_at`, `approved_at`, and `time_to_merge_hours` from the reviews and PR times, with no extra fetch. These are stable because a PR is ingested only at a terminal state.
 - `repo_group_id` slugifies `owner/name` to a Graphiti-legal `group_id`: `/`
   becomes `__`, and any other non-`[A-Za-z0-9_-]` character becomes `_`. For
   example `buildrelic/relic-core` becomes `buildrelic__relic-core`.
-- `_clip` trims descriptions and review comments to 2000 characters (dropping
-  empty bodies to null), and `_select_reviews` drops bot reviews and caps the
-  number of human reviews per PR (keeping decided states and the most recent), so
-  the PR informs extraction without blowing up per-episode token cost.
+- `_clip` trims free text per field (description 2000 chars, review comment 1500,
+  commit message 1000, dropping empty bodies to null), `_select_reviews` drops bot
+  reviews and caps human reviews (keeping decided states and the most recent), and
+  `_fit_budget` trims the assembled body to a per-episode token budget. Oversized
+  JSON episodes degrade extraction, so the body is bounded rather than left to grow.
 
-The episode JSON keys mirror the flat `*Node` attributes (see
-[data-model.md](/data-model)) so the extractor maps them onto typed entities.
+The episode body keys mirror the flat `*Node` attributes so the extractor maps them
+onto typed entities. Several fields are richer than the entity/edge schema consumes
+today; they are the agreed target the graph side adds types for (see the note in
+[data-model.md](/data-model)).
 
 ## Step 5: land in the graph
 

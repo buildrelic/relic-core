@@ -20,7 +20,7 @@
       },
       {
         "group": "Subsystems",
-        "pages": ["ingestion", "memory-and-recall", "skills"]
+        "pages": ["ingestion", "ingestion-contract", "memory-and-recall", "skills"]
       },
       {
         "group": "Reference",

@@ -8,13 +8,28 @@ Graphiti. The episode JSON keys mirror the flat ``*Node`` attribute names in
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from relic.contracts import EpisodeSpec
+from relic.contracts.episode_body import (
+    CoAuthor,
+    CommitEntry,
+    DiffStats,
+    FileEntry,
+    IssueEpisodeBody,
+    IssueSection,
+    LinkedIssue,
+    PersonRef,
+    PrEpisodeBody,
+    PrTimestamps,
+    PullRequestSection,
+    RepoRef,
+    RequestedReviewer,
+    ReviewEntry,
+)
 
 # --- Fetched records (populated by the connectors, consumed here) -----------
 
@@ -41,6 +56,34 @@ class ReviewRec:
 
 
 @dataclass(slots=True)
+class RequestedReviewerRec:
+    """A requested review. ``kind`` separates a person request from a team request.
+
+    The review-routing signal: who a PR was *sent to*, distinct from who reviewed.
+    Team requests are first-class so team-scoped routing is detectable.
+    """
+
+    name: str | None
+    kind: Literal["user", "team"] = "user"
+    profile_url: str | None = None
+
+
+@dataclass(slots=True)
+class CommitRec:
+    sha: str | None
+    message: str | None
+    author_login: str | None
+
+
+@dataclass(slots=True)
+class LinkedIssueRec:
+    """An issue this PR closes/resolves/relates to, for the lifecycle subgraph."""
+
+    identifier: str
+    relation: Literal["closes", "resolves", "relates"] = "relates"
+
+
+@dataclass(slots=True)
 class PullRequestRec:
     number: int
     title: str
@@ -52,8 +95,16 @@ class PullRequestRec:
     merged_at: str | None
     body: str | None = None
     reviews: list[ReviewRec] = field(default_factory=list)
-    requested_reviewers: list[str] = field(default_factory=list)
+    requested_reviewers: list[RequestedReviewerRec] = field(default_factory=list)
     files: list[FileChange] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
+    base_ref: str | None = None
+    head_ref: str | None = None
+    additions: int | None = None  # PR-level total, straight from the API node
+    deletions: int | None = None
+    changed_files: int | None = None
+    commits: list[CommitRec] = field(default_factory=list)
+    linked_issues: list[LinkedIssueRec] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -99,7 +150,17 @@ def _parse_aware(value: str) -> datetime:
 
 
 _MAX_DESC_CHARS = 2000
-_MAX_REVIEWS_PER_PR = 10
+_MAX_REVIEW_COMMENT_CHARS = 1500
+_MAX_COMMIT_MSG_CHARS = 1000
+# Reviews are the routing signal, so keep more than the old cap of 10. The hard
+# ceiling is the per-episode body budget below, not this count: Graphiti extraction
+# degrades on very large bodies (entity conflation, edge hallucination), so the body
+# is trimmed to a token-proxy budget after assembly rather than left unbounded.
+_MAX_REVIEWS_PER_PR = 25
+_MAX_COMMITS_PER_PR = 20
+# ~4k tokens at ~4 chars/token: the size past which JSON-episode extraction quality
+# falls off. _fit_budget trims the assembled body to stay under it.
+_MAX_BODY_CHARS = 16000
 # States that carry a decision; preferred over plain COMMENTED when capping reviews.
 _DECIDED_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 
@@ -122,18 +183,19 @@ def _defuse_fences(text: str) -> str:
     return _FENCE_RE.sub(lambda m: _ZWSP.join(m.group(0)), text)
 
 
-def _clip(text: str | None) -> str | None:
-    """Trim a description to keep episodes (and extraction cost) bounded.
+def _clip(text: str | None, limit: int = _MAX_DESC_CHARS) -> str | None:
+    """Trim free text to keep episodes (and extraction cost) bounded.
 
-    The PR body is the substance the extractor needs, but an unbounded body would
-    blow up the per-episode token cost. Cap it, defuse code fences, and drop empty
-    bodies to null.
+    The substance the extractor needs (a PR body, a review comment, a commit
+    message), capped so an unbounded blob does not blow up per-episode token cost.
+    Defuse code fences and drop empty text to null. ``limit`` lets each field carry
+    its own cap (a description is worth more characters than a review comment).
     """
     if not text or not text.strip():
         return None
     trimmed = text.strip()
-    if len(trimmed) > _MAX_DESC_CHARS:
-        trimmed = trimmed[:_MAX_DESC_CHARS] + "..."
+    if len(trimmed) > limit:
+        trimmed = trimmed[:limit] + "..."
     return _defuse_fences(trimmed)
 
 
@@ -210,54 +272,147 @@ def _select_reviews(reviews: list[ReviewRec]) -> list[ReviewRec]:
     return [r for i, r in human if i in keep]
 
 
-def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
-    """Map a PR (any state) to a JSON episode whose keys mirror the entity attributes."""
-    # A ghost/bot opener has no login: omit the author rather than emit an empty
-    # Person the extractor would have to invent a name for.
-    author = (
-        {"login": pr.author_login, "profile_url": pr.author_url}
-        if pr.author_login or pr.author_url
-        else None
+def _select_commits(commits: list[CommitRec]) -> list[CommitRec]:
+    """Keep the most recent commits, capped, preserving the API's order.
+
+    Commits feed two signals: who is an active author (an input to the
+    active-maintainer safety check) and the team's commit-message convention. The
+    full list is unbounded on a long-lived PR, so cap it; the connector fetches the
+    last N, so keeping the head of the list keeps the most recent.
+    """
+    return commits[:_MAX_COMMITS_PER_PR]
+
+
+def _pr_timestamps(pr: PullRequestRec) -> PrTimestamps:
+    """Derive per-event times from the reviews and PR times. No extra fetch.
+
+    Stable because a PR is ingested only at a terminal state (merged or closed), so
+    these never change after ingest. ISO 8601 strings from GitHub are UTC ("Z"), so
+    a lexical min is a chronological min.
+    """
+    submitted = [r.submitted_at for r in pr.reviews if r.submitted_at]
+    approved = [
+        r.submitted_at for r in pr.reviews if r.submitted_at and r.state.upper() == "APPROVED"
+    ]
+    ttm: float | None = None
+    if pr.merged_at and pr.created_at:
+        try:
+            delta = _parse_aware(pr.merged_at) - _parse_aware(pr.created_at)
+            ttm = round(delta.total_seconds() / 3600.0, 2)
+        except ValueError:
+            ttm = None
+    return PrTimestamps(
+        created_at=pr.created_at or None,
+        first_review_at=min(submitted) if submitted else None,
+        approved_at=min(approved) if approved else None,
+        merged_at=pr.merged_at,
+        time_to_merge_hours=ttm,
     )
-    body = {
-        "repo": {"full_name": repo.full_name, "url": repo.url},
-        "pull_request": {
-            "number": pr.number,
-            "title": _defuse_fences(pr.title),
-            "description": _clip(pr.body),
-            "url": pr.url,
-            "state": pr.state,
-            "created_at": pr.created_at,
-            "merged_at": pr.merged_at,
-            "author": author,
-            "co_authors": _parse_coauthors(pr.body),
-        },
-        "reviews": [
-            {
-                # Same treatment as the PR author: a ghost/deleted reviewer gets
-                # reviewer: null, not an identity-less Person. The review itself
-                # (state, comment) still carries signal, so it is kept.
-                "reviewer": (
-                    {"login": r.login, "profile_url": r.profile_url}
-                    if r.login or r.profile_url
-                    else None
-                ),
-                "state": r.state,
-                "submitted_at": r.submitted_at,
-                "url": r.url,
-                "comment": _clip(r.body),
-            }
-            for r in _select_reviews(pr.reviews)
+
+
+def _pr_context(pr: PullRequestRec, n_reviews: int, n_files: int) -> str:
+    """A one-line, deterministic summary the extractor reads first. No LLM."""
+    bits = [f"{pr.state or 'unknown'} PR"]
+    if n_reviews:
+        bits.append(f"{n_reviews} review{'s' if n_reviews != 1 else ''}")
+    if n_files:
+        bits.append(f"{n_files} file{'s' if n_files != 1 else ''}")
+    if pr.linked_issues:
+        n = len(pr.linked_issues)
+        bits.append(f"{n} linked issue{'s' if n != 1 else ''}")
+    return ", ".join(bits)
+
+
+def _fit_budget(body: PrEpisodeBody) -> PrEpisodeBody:
+    """Trim an assembled PR body to the token-proxy ceiling, deterministically.
+
+    Large JSON episodes degrade extraction (entity conflation, edge hallucination),
+    so the body is bounded after assembly. Trim in priority order: drop commits
+    first (they aid commit-convention skills but not routing), then shed the oldest
+    reviews. Reviews stay in chronological order, so slicing keeps the head.
+    """
+    if len(body.model_dump_json()) <= _MAX_BODY_CHARS:
+        return body
+    body.commits = []
+    while len(body.model_dump_json()) > _MAX_BODY_CHARS and len(body.reviews) > 5:
+        body.reviews = body.reviews[: max(5, len(body.reviews) // 2)]
+    return body
+
+
+def _person_ref(login: str | None, profile_url: str | None) -> PersonRef | None:
+    """A PersonRef, or None for a ghost/deleted account (never identity-less)."""
+    return PersonRef(login=login, profile_url=profile_url) if (login or profile_url) else None
+
+
+def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
+    """Map a PR (any state) to a typed, versioned episode body for extraction.
+
+    The body keys mirror the flat ``*Node`` attribute names the extractor expects, so
+    values land on typed entities. Co-authors are parsed from the unclipped body (the
+    trailers sit at the end), and every free-text field is fence-defused and clipped.
+    The assembled body is then trimmed to the per-episode token budget.
+    """
+    reviews = _select_reviews(pr.reviews)
+    files = [FileEntry(path=f.path, additions=f.additions, deletions=f.deletions) for f in pr.files]
+    body = PrEpisodeBody(
+        context=_pr_context(pr, len(reviews), len(files)),
+        repo=RepoRef(full_name=repo.full_name, url=repo.url, default_branch=repo.default_branch),
+        pull_request=PullRequestSection(
+            number=pr.number,
+            title=_defuse_fences(pr.title),
+            description=_clip(pr.body),
+            url=pr.url,
+            state=pr.state,
+            created_at=pr.created_at or None,
+            merged_at=pr.merged_at,
+            base_ref=pr.base_ref,
+            head_ref=pr.head_ref,
+            labels=pr.labels,
+            # A ghost/bot opener has no login: author: null, not an empty Person.
+            author=_person_ref(pr.author_login, pr.author_url),
+            co_authors=[CoAuthor(**ca) for ca in _parse_coauthors(pr.body)],
+            timestamps=_pr_timestamps(pr),
+            diff_stats=DiffStats(
+                total_additions=pr.additions,
+                total_deletions=pr.deletions,
+                changed_files=pr.changed_files,
+            ),
+        ),
+        # A ghost/deleted reviewer surfaces reviewer: null; the review's state and
+        # comment still carry routing signal, so the review is kept.
+        reviews=[
+            ReviewEntry(
+                reviewer=_person_ref(r.login, r.profile_url),
+                state=r.state,
+                submitted_at=r.submitted_at,
+                url=r.url,
+                comment=_clip(r.body, _MAX_REVIEW_COMMENT_CHARS),
+            )
+            for r in reviews
         ],
-        "requested_reviewers": pr.requested_reviewers,
-        "files": [{"path": f.path} for f in pr.files],
-    }
+        requested_reviewers=[
+            RequestedReviewer(name=rr.name, kind=rr.kind, profile_url=rr.profile_url)
+            for rr in pr.requested_reviewers
+        ],
+        files=files,
+        commits=[
+            CommitEntry(
+                sha=c.sha,
+                message=_clip(c.message, _MAX_COMMIT_MSG_CHARS),
+                author_login=c.author_login,
+            )
+            for c in _select_commits(pr.commits)
+        ],
+        linked_issues=[
+            LinkedIssue(identifier=li.identifier, relation=li.relation) for li in pr.linked_issues
+        ],
+    )
     # A non-merged PR (draft, open, closed-without-merge) has no merged_at; anchor it
     # to when it was opened, and fall back to the epoch if even that is missing.
     ref = pr.merged_at or pr.created_at
     return EpisodeSpec(
         name=f"PR {repo.full_name}#{pr.number}",
-        body=json.dumps(body, default=str),
+        body=_fit_budget(body).model_dump_json(),
         source_description="github pull request",
         reference_time=_parse_aware(ref) if ref else _EPOCH,
         group_id=repo_group_id(repo.full_name),
@@ -265,23 +420,30 @@ def pr_to_episode(pr: PullRequestRec, repo: RepoBundle) -> EpisodeSpec:
 
 
 def issue_to_episode(issue: IssueRec, repo: RepoBundle) -> EpisodeSpec:
-    """Map an issue (GitHub or Linear) to a JSON episode."""
-    body = {
-        "issue": {
-            "identifier": issue.identifier,
-            "title": _defuse_fences(issue.title),
-            "description": _clip(issue.body),
-            "state": issue.state,
-            "url": issue.url,
-            "assignees": issue.assignees,
-            "labels": issue.labels,
-            "parent": issue.parent,
-        }
-    }
+    """Map an issue (GitHub or Linear) to a typed, versioned episode body."""
+    n_labels = len(issue.labels)
+    context = f"{issue.state or 'unknown'} issue"
+    if n_labels:
+        context += f", {n_labels} label{'s' if n_labels != 1 else ''}"
+    body = IssueEpisodeBody(
+        context=context,
+        issue=IssueSection(
+            identifier=issue.identifier,
+            title=_defuse_fences(issue.title),
+            description=_clip(issue.body),
+            state=issue.state,
+            url=issue.url,
+            assignees=issue.assignees,
+            labels=issue.labels,
+            parent=issue.parent,
+            created_at=issue.created_at,
+            closed_at=issue.closed_at,
+        ),
+    )
     ref = issue.created_at or issue.closed_at
     return EpisodeSpec(
         name=f"Issue {issue.identifier}",
-        body=json.dumps(body, default=str),
+        body=body.model_dump_json(),
         source_description=f"{issue.source} issue",
         reference_time=_parse_aware(ref) if ref else _EPOCH,
         group_id=repo_group_id(repo.full_name),

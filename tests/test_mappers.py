@@ -3,10 +3,12 @@ import re
 from datetime import UTC, datetime
 
 from relic.ingest.mappers import (
+    _MAX_REVIEWS_PER_PR,
     FileChange,
     IssueRec,
     PullRequestRec,
     RepoBundle,
+    RequestedReviewerRec,
     ReviewRec,
     _parse_coauthors,
     issue_to_episode,
@@ -49,7 +51,7 @@ def test_pr_to_episode_shape_and_group() -> None:
                 body="please add a regression test",
             )
         ],
-        requested_reviewers=["abhinavp5"],
+        requested_reviewers=[RequestedReviewerRec(name="abhinavp5", kind="user")],
         body="Provision GCP and Terraform.",
         files=[FileChange(path="infra/gcp.tf", additions=100, deletions=2, status="added")],
     )
@@ -57,18 +59,23 @@ def test_pr_to_episode_shape_and_group() -> None:
     assert spec.name == "PR paris-phan/course-scheduler#4"
     assert spec.source_description == "github pull request"
     assert spec.group_id == "paris-phan__course-scheduler"
+    assert spec.schema_version == 2  # versioned body, surfaced on the envelope
     # reference_time prefers merged_at and is tz-aware (Z normalized to UTC).
     assert spec.reference_time == datetime(2025, 8, 5, 12, 0, tzinfo=UTC)
     body = json.loads(spec.body)
+    assert body["schema_version"] == 2  # and inside the body, for the detector
     assert body["pull_request"]["number"] == 4
     assert body["pull_request"]["author"]["login"] == "paris-phan"
     assert body["reviews"][0]["reviewer"]["login"] == "paris-phan"
     assert body["reviews"][0]["state"] == "COMMENTED"
     assert body["reviews"][0]["comment"] == "please add a regression test"
-    assert body["requested_reviewers"] == ["abhinavp5"]
+    assert body["requested_reviewers"][0]["name"] == "abhinavp5"
+    assert body["requested_reviewers"][0]["kind"] == "user"
     assert body["pull_request"]["description"] == "Provision GCP and Terraform."
     assert body["files"][0]["path"] == "infra/gcp.tf"
-    assert "additions" not in body["files"][0]  # per-file stats dropped to keep episodes lean
+    # Per-file stats are now carried (recovered dead payload), feeding TOUCHES_PATH.
+    assert body["files"][0]["additions"] == 100
+    assert body["files"][0]["deletions"] == 2
 
 
 def test_pr_to_episode_no_reviews_falls_back_to_created_at() -> None:
@@ -154,22 +161,24 @@ def test_bot_reviews_dropped_by_typename_flag() -> None:
     assert _episode_review_logins(pr) == ["alice"]
 
 
-def test_reviews_capped_to_ten_most_recent_preserving_order() -> None:
-    # 12 human reviews with increasing timestamps; the two oldest are dropped, order kept.
-    reviews = [_review(f"r{i}", submitted_at=f"2025-01-{i + 1:02d}T00:00:00Z") for i in range(12)]
+def test_reviews_capped_to_max_most_recent_preserving_order() -> None:
+    # Two more than the cap, increasing timestamps: the two oldest are dropped, order kept.
+    n = _MAX_REVIEWS_PER_PR + 2
+    reviews = [_review(f"r{i}", submitted_at=f"2025-01-01T00:{i:02d}:00Z") for i in range(n)]
     logins = _episode_review_logins(_pr_with_reviews(reviews))
-    assert logins == [f"r{i}" for i in range(2, 12)]
+    assert logins == [f"r{i}" for i in range(2, n)]
 
 
 def test_decided_reviews_preferred_over_comments_when_capping() -> None:
     # r0 is the oldest but APPROVED; capping keeps it over a newer plain comment (r1).
+    # One more review than the cap, so exactly one is dropped.
     reviews = [_review("r0", state="APPROVED", submitted_at="2025-01-01T00:00:00Z")]
     reviews += [
-        _review(f"r{i}", state="COMMENTED", submitted_at=f"2025-01-{i + 1:02d}T00:00:00Z")
-        for i in range(1, 11)
+        _review(f"r{i}", state="COMMENTED", submitted_at=f"2025-01-01T00:{i:02d}:00Z")
+        for i in range(1, _MAX_REVIEWS_PER_PR + 1)
     ]
     logins = _episode_review_logins(_pr_with_reviews(reviews))
-    assert len(logins) == 10
+    assert len(logins) == _MAX_REVIEWS_PER_PR
     assert "r0" in logins  # decided state survives despite being the oldest
     assert "r1" not in logins  # the oldest plain comment is the one dropped
 

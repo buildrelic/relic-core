@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from relic.contracts.episode_body import SCHEMA_VERSION
+
 
 @dataclass(slots=True)
 class EpisodeSpec:
@@ -19,3 +21,8 @@ class EpisodeSpec:
     source_description: str
     reference_time: datetime
     group_id: str
+    # The body's schema version, surfaced on the envelope so the loader/detector can
+    # branch without parsing the body. It also lives inside the body. It must never
+    # be folded into ``name``: the name is the checkpoint dedup key, and a version in
+    # it would re-ingest and fork the graph.
+    schema_version: int = SCHEMA_VERSION

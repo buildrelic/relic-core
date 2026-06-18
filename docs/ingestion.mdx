@@ -201,6 +201,10 @@ result of `ingest` is the populated graph, not its console output.
 - **Counts and timing.** `ingest` logs the fetch counts and how long the fetch
   took, whether Linear ran, and a final summary: episodes loaded, skipped, and
   failed, with the wall-clock duration.
+- **Phase timing.** Every run ends with a compact timing block on stderr: fetch,
+  map + raw store, load (extraction), and setup, each with its share of the
+  total, plus the per-episode load rate. It makes the LLM-bound shape of a run
+  obvious at a glance: the load phase is almost the whole clock.
 - **Failures.** Each failed episode logs one `WARNING` line with its name and the
   error. A run that loads nothing but hits failures exits non-zero. A whole-run
   failure (no token, graph down, bad key) logs one `ERROR` line, not a traceback.

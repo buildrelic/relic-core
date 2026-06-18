@@ -83,7 +83,6 @@ query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
             requestedReviewer {
               __typename
               ... on User { login url }
-              ... on Team { name slug }
             }
           }
         }

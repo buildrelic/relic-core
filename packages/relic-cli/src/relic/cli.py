@@ -114,6 +114,7 @@ async def _ingest(
         dump_raw,
         fetch_issues,
         fetch_repo,
+        format_ingest_timing,
         issue_to_episode,
         linear_enabled,
         load_done,
@@ -143,6 +144,7 @@ async def _ingest(
         raise typer.Exit(code=2)
     settings = get_settings()
     owner, name = repo.split("/", 1)
+    ingest_start = time.monotonic()
 
     if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
         log.error(
@@ -158,13 +160,15 @@ async def _ingest(
         bundle = await fetch_repo(
             gh, owner, name, concurrency=settings.fetch_concurrency, limit=limit, months=months
         )
+    fetch_seconds = time.monotonic() - fetch_start
     log.info(
         "fetched %d PRs, %d issues from %s in %.1fs",
         len(bundle.pull_requests),
         len(bundle.issues),
         repo,
-        time.monotonic() - fetch_start,
+        fetch_seconds,
     )
+    prepare_start = time.monotonic()
 
     raw_count = 0
     for pr in bundle.pull_requests:
@@ -199,6 +203,7 @@ async def _ingest(
     if fresh:
         clear(ledger)
     done = load_done(ledger)
+    prepare_seconds = time.monotonic() - prepare_start
 
     engram = make_engram(
         host=settings.falkordb_host,
@@ -277,6 +282,33 @@ async def _ingest(
         log.warning(summary)
     else:
         log.info(summary)
+
+    extracted = stats.loaded + stats.failed
+    total_seconds = time.monotonic() - ingest_start
+    # The honest remainder: FalkorDB probe, token resolve, engram build, and the
+    # index build (which the loader's duration_s deliberately excludes).
+    setup_seconds = max(0.0, total_seconds - fetch_seconds - prepare_seconds - stats.duration_s)
+    bar_console.print(
+        format_ingest_timing(
+            repo,
+            [
+                ("fetch", fetch_seconds),
+                ("map + raw store", prepare_seconds),
+                ("load (extraction)", stats.duration_s),
+                ("setup + index", setup_seconds),
+            ],
+            total_seconds,
+            loaded=stats.loaded,
+            skipped=stats.skipped,
+            failed=stats.failed,
+            per_episode_seconds=stats.duration_s / extracted if extracted else 0.0,
+            bulk=use_bulk,
+        ),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
     if stats.loaded == 0 and stats.failed:
         raise typer.Exit(code=1)
 

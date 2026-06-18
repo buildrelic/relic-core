@@ -20,6 +20,7 @@ from relic.ingest.mappers import (
     repo_group_id,
 )
 from relic.ingest.raw_store import dump_raw, raw_path
+from relic.ingest.timing import format_ingest_timing
 
 __all__ = [
     "FileChange",
@@ -32,6 +33,7 @@ __all__ = [
     "dump_raw",
     "fetch_issues",
     "fetch_repo",
+    "format_ingest_timing",
     "issue_to_episode",
     "linear_enabled",
     "load_done",

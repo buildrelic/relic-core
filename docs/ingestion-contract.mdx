@@ -1,0 +1,133 @@
+---
+title: "Ingestion contract handoff"
+description: "The typed episode-body seam, the graph-side types it expects, the invariants, and the open questions for Phase 4."
+---
+
+This page is the handoff from ingestion (Paris, `relic-ingest`) to the graph
+(Abhinav, `relic-graph`). It pins what ingestion now produces and what the graph
+side adds to consume it. The goal is the best possible extracted skills: ingestion
+captures and structures the signal, the detector mines it, the compiler grounds it.
+
+## The contract is code, not prose
+
+The seam is a typed, versioned model, so the two sides cannot drift:
+
+- **Schema:** [`relic.contracts.episode_body`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
+  (`PrEpisodeBody`, `IssueEpisodeBody`, `SCHEMA_VERSION`). Ingest builds it; the
+  graph side deserializes the `EpisodeSpec.body` string against the same model.
+- **Producer:** [`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py)
+  (`pr_to_episode`, `issue_to_episode`).
+- **Executable contract:** [`tests/test_contract_episode.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_contract_episode.py)
+  pins the invariants below and carries `canonical_pr_record()` / `canonical_issue_record()`,
+  the reference instances to tune entity/edge extraction against.
+
+The full body shape is documented in [data-model.md](/data-model).
+
+## Source taxonomy (development sources)
+
+There is one body model per development **artifact type**, not per connector:
+sources collapse onto the artifact type, source-specific fields stay optional. Two
+are populated today (`pull_request`, `issue`); the rest are defined in
+[`episode_body.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
+as the full target, with capture landing wave by wave. Each carries a top-level
+`url` citation anchor (`pull_request`/`issue` keep theirs nested), so
+`recall._extract_url` resolves a source for every fact with no per-source change.
+
+| Artifact type | `source_type` | Body model | Sources that map onto it | `source_description` | Grounded in | Status |
+|---|---|---|---|---|---|---|
+| Pull request | `pull_request` | `PrEpisodeBody` | GitHub PR, GitLab MR, Bitbucket PR | `github pull request` | review-routing fields | **populated** |
+| Issue / ticket | `issue` | `IssueEpisodeBody` | GitHub issue, Linear, Jira | `github issue` / `linear issue` | — | **populated** |
+| Commit | `commit` | `CommitEpisodeBody` | git / GitHub / GitLab commit | `github commit` | Conventional Commits | defined |
+| Release | `release` | `ReleaseEpisodeBody` | GitHub/GitLab release, tag | `github release` | SemVer + Keep a Changelog + DORA | defined |
+| CI / CD run | `ci_run` | `CiRunEpisodeBody` | GitHub Actions, GitLab pipeline, deploy | `github ci run` | DORA four keys | defined |
+| Incident | `incident` | `IncidentEpisodeBody` | postmortem, PagerDuty, incident.io | `incident` | Google SRE postmortem + DORA MTTR | defined |
+| Doc | `doc` | `DocEpisodeBody` | README/CONTRIBUTING/ADR/runbook, Notion, Confluence | `doc` | MADR + Diataxis | defined |
+| Discussion | `discussion` | `DiscussionEpisodeBody` | GitHub Discussions, RFC, Q&A | `github discussion` | GitHub Discussions (category/answer) | defined |
+| Conversation | `conversation` | `ConversationEpisodeBody` | Slack thread, meeting (Granola), Discord | `slack conversation` / `meeting` | decision + action-item capture | defined |
+
+The `source_type` discriminator names the **artifact type**, not the connector
+(github vs linear is carried by `EpisodeSpec.source_description` and the
+identifier/URL). For mutable sources (docs, conversations), the episode is a
+versioned snapshot: the immutable version key (a git commit, a Notion version id)
+is the episode-name component, never the mutable content, so a re-capture is a new
+episode rather than a fork or a frozen-in-place stale one.
+
+## What ingestion now emits (review-routing first)
+
+Beyond the previous body, the PR episode now carries the review-routing signals:
+
+| Field | Use |
+|---|---|
+| `requested_reviewers[].kind` (`user`/`team`) | who a PR was *sent to*, person vs team routing |
+| `files[].additions` / `.deletions` | per-file churn for area/path routing |
+| `pull_request.labels` | area/type taxonomy (`area:auth`, `type:fix`) |
+| `pull_request.diff_stats` | PR-level size, a risk-weight input |
+| `pull_request.base_ref` / `head_ref` | branch convention / hotfix detection |
+| `commits[]` (sha, message, author_login) | active-maintainer + commit-convention signal |
+| `linked_issues[]` (`closes`/`resolves`) | the issue↔PR lifecycle edge |
+| `pull_request.timestamps` | derived first-review / approval / time-to-merge |
+| `context` | one-line deterministic extractor hint |
+
+Issues now carry the Linear `description` (previously not even queried). `checks`
+and the Linear workflow fields (`priority`, `estimate`, `cycle`, `state_history`,
+`relations`) are reserved in the contract and default empty: a later wave fills them.
+
+## Graph-side TODO (entity/edge types in `engram.py`)
+
+An edge is only extracted if both the edge type **and** its `(source, target)`
+signature exist in `EDGE_TYPE_MAP`. To consume the fields above:
+
+| Add | Kind | Feeds |
+|---|---|---|
+| `PullRequestNode` += `body`, `created_at`, `base_ref`/`head_ref`, `merge_method`, `total_additions`/`total_deletions` | node fields | PR substance + size |
+| `ReviewNode` += `comment`/`body` | node field | review rationale |
+| `IssueNode` += `body`, `created_at`, `closed_at` | node fields | issue substance |
+| `TOUCHES_PATH` += `additions`/`deletions` | edge attrs (model already declares them; signature missing) | path routing weight |
+| `REQUESTED_REVIEW` (Person→PullRequest, Team→PullRequest) | new edge | requested-vs-actual routing |
+| `TAGS` (PullRequest→Label, Issue→Label) | new edge / attribute | label/area taxonomy |
+| `CLOSES` / `RESOLVES` (PullRequest→Issue) | new edge | lifecycle subgraph |
+| `ASSIGNED_TO` (Issue→Person), `PARENT_OF` (Issue→Issue) | new edges | triage / decomposition |
+
+**Model labels/areas/teams as deterministic edges or attributes, not LLM-extracted
+entities.** Free-text entities (`area:auth` vs `auth` vs `authentication`) fork under
+embedding+LLM dedup, and the detector is deterministic. File-area grouping is best
+computed detector-side from `TOUCHES_PATH.path` (or from CODEOWNERS), not minted as
+synthetic nodes at ingest. Temporal `FOLLOWED_BY` ordering is detector-derived from
+`reference_time`/`valid_at`, not baked at ingest.
+
+## Invariants (do not break)
+
+- **Citation anchors.** `recall._extract_url` reads `pull_request.url` / `issue.url`
+  (or top-level `url`). Preserve those keys, or co-change
+  [`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py).
+- **The name is the dedup key.** `schema_version` and new fields live in the body,
+  never in `EpisodeSpec.name`; the checkpoint dedups on `name`.
+- **Terminal-snapshot only.** Episodes are immutable and PRs are ingested terminally,
+  so every field is stable at ingest. No field requires a post-ingest update; there is
+  no episode-upsert path.
+- **Budgeted body.** The body is trimmed to a token budget (`_fit_budget`); oversized
+  JSON episodes degrade extraction.
+
+## Measure each wave
+
+End-to-end skill quality is unmeasurable until the detector/compiler land, so gate
+on proxies. [`eval/graph_stats.py`](https://github.com/buildrelic/relic-core/blob/main/eval/graph_stats.py)
+reports entity/edge structure, Person dedup-forking rate, citation integrity, and a
+**routing probe** (the people who reviewed/authored work touching an area, ranked by
+support: the shape the detector will run). Run it before and after a change and diff.
+
+```bash
+uv run python eval/graph_stats.py --repo owner/name --area src/auth
+```
+
+## Open questions for Abhinav
+
+- Does the detector group on **edge types** (`TAGS`, `REQUESTED_REVIEW`, `TOUCHES_PATH`)
+  or node attributes? This decides whether each field becomes an edge vs a node field.
+- `requested_reviewers`: a separate `REQUESTED_REVIEW` edge, or a `kind` discriminator
+  on the existing `Reviewed` edge?
+- Confirm labels/areas as deterministic edges/attributes, and file-area grouping
+  detector-side.
+- `schema_version`: hard-fail on an unknown version, or best-effort?
+- Commits/checks as first-class entities (more extraction cost) or inline body text only?
+- Where should `graph_stats.py` live long-term (a `relic` subcommand)?

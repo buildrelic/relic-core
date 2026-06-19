@@ -15,6 +15,7 @@ query Issues($after: String) {
     nodes {
       identifier
       title
+      description
       url
       state { name }
       assignee { name }
@@ -70,6 +71,9 @@ def _node_to_issue(node: dict[str, Any]) -> IssueRec:
         title=node.get("title", ""),
         url=node.get("url", ""),
         state=state,
+        # The description is the substance an issue carries; it was previously not
+        # even queried, so every Linear episode landed with a null body.
+        body=node.get("description"),
         assignees=assignees,
         labels=labels,
         created_at=node.get("createdAt"),

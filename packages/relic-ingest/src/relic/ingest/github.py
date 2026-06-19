@@ -17,7 +17,16 @@ from typing import TYPE_CHECKING, Any
 
 from githubkit import GitHub
 
-from relic.ingest.mappers import FileChange, IssueRec, PullRequestRec, RepoBundle, ReviewRec
+from relic.ingest.mappers import (
+    CommitRec,
+    FileChange,
+    IssueRec,
+    LinkedIssueRec,
+    PullRequestRec,
+    RepoBundle,
+    RequestedReviewerRec,
+    ReviewRec,
+)
 
 if TYPE_CHECKING:
     from relic.config import Settings
@@ -33,8 +42,12 @@ _DAYS_PER_MONTH = 30.44
 _PR_PAGE_SIZE = 25
 _FILES_PER_PR = 100
 _REVIEWS_PER_PR = 50
+_COMMITS_PER_PR = 30
+_LABELS_PER_PR = 20
+_LINKED_ISSUES_PER_PR = 10
 
-_PR_QUERY = """
+_PR_QUERY = (
+    """
 query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(
@@ -54,19 +67,41 @@ query PRs($owner: String!, $name: String!, $first: Int!, $after: String) {
         mergedAt
         closedAt
         updatedAt
+        additions
+        deletions
+        changedFiles
+        baseRefName
+        headRefName
         author { login url }
+        labels(first: __LABELS__) { nodes { name } }
         files(last: __FILES__) { nodes { path additions deletions } }
         reviews(last: __REVIEWS__) {
           nodes { state submittedAt url body author { login url __typename } }
         }
         reviewRequests(first: __REVIEWS__) {
-          nodes { requestedReviewer { ... on User { login } } }
+          nodes {
+            requestedReviewer {
+              __typename
+              ... on User { login url }
+            }
+          }
+        }
+        commits(last: __COMMITS__) {
+          nodes { commit { oid message author { user { login } } } }
+        }
+        closingIssuesReferences(first: __LINKED__) {
+          nodes { number repository { nameWithOwner } }
         }
       }
     }
   }
 }
-""".replace("__FILES__", str(_FILES_PER_PR)).replace("__REVIEWS__", str(_REVIEWS_PER_PR))
+""".replace("__FILES__", str(_FILES_PER_PR))
+    .replace("__REVIEWS__", str(_REVIEWS_PER_PR))
+    .replace("__COMMITS__", str(_COMMITS_PER_PR))
+    .replace("__LABELS__", str(_LABELS_PER_PR))
+    .replace("__LINKED__", str(_LINKED_ISSUES_PER_PR))
+)
 
 
 def resolve_github_token(settings: Settings) -> str:
@@ -187,11 +222,43 @@ def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
             )
         )
 
-    requested_reviewers = [
-        login
-        for rr in _nodes(node.get("reviewRequests"))
-        if (login := (rr.get("requestedReviewer") or {}).get("login"))
-    ]
+    requested_reviewers: list[RequestedReviewerRec] = []
+    for rr in _nodes(node.get("reviewRequests")):
+        reviewer = rr.get("requestedReviewer") or {}
+        if reviewer.get("__typename") == "Team":
+            # A team request is a distinct routing signal (team-scoped review), kept
+            # separate from a person request so the graph can express both.
+            name = reviewer.get("name") or reviewer.get("slug")
+            if name:
+                requested_reviewers.append(RequestedReviewerRec(name=name, kind="team"))
+        elif login := reviewer.get("login"):
+            requested_reviewers.append(
+                RequestedReviewerRec(name=login, kind="user", profile_url=reviewer.get("url"))
+            )
+
+    commits: list[CommitRec] = []
+    for cnode in _nodes(node.get("commits")):
+        commit = cnode.get("commit") or {}
+        commit_author = (commit.get("author") or {}).get("user") or {}
+        commits.append(
+            CommitRec(
+                sha=commit.get("oid"),
+                message=commit.get("message"),
+                author_login=commit_author.get("login"),
+            )
+        )
+
+    # PRs this PR closes via "Closes #N" / a linked-issue reference: the lifecycle edge.
+    linked_issues: list[LinkedIssueRec] = []
+    for inode in _nodes(node.get("closingIssuesReferences")):
+        number = inode.get("number")
+        repo_full = (inode.get("repository") or {}).get("nameWithOwner")
+        if number is not None and repo_full:
+            linked_issues.append(
+                LinkedIssueRec(identifier=f"{repo_full}#{number}", relation="closes")
+            )
+
+    labels = [lab["name"] for lab in _nodes(node.get("labels")) if lab.get("name")]
 
     return PullRequestRec(
         number=int(node["number"]),
@@ -206,6 +273,14 @@ def _pr_node_to_rec(node: dict[str, Any]) -> PullRequestRec:
         reviews=reviews,
         requested_reviewers=requested_reviewers,
         files=files,
+        labels=labels,
+        base_ref=node.get("baseRefName"),
+        head_ref=node.get("headRefName"),
+        additions=node.get("additions"),
+        deletions=node.get("deletions"),
+        changed_files=node.get("changedFiles"),
+        commits=commits,
+        linked_issues=linked_issues,
         raw=node,
     )
 

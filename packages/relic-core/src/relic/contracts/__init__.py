@@ -12,6 +12,18 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from relic.contracts.episode import EpisodeSpec
+from relic.contracts.episode_body import (
+    SCHEMA_VERSION,
+    CiRunEpisodeBody,
+    CommitEpisodeBody,
+    ConversationEpisodeBody,
+    DiscussionEpisodeBody,
+    DocEpisodeBody,
+    IncidentEpisodeBody,
+    IssueEpisodeBody,
+    PrEpisodeBody,
+    ReleaseEpisodeBody,
+)
 from relic.ontology import Citation, FieldSpec, SkillIR
 
 # Recall as an injected function, so serve carries no graph dependency:
@@ -20,9 +32,19 @@ from relic.ontology import Citation, FieldSpec, SkillIR
 RecallFn = Callable[[str, int], Awaitable[str]]
 
 __all__ = [
+    "SCHEMA_VERSION",
+    "CiRunEpisodeBody",
     "Citation",
+    "CommitEpisodeBody",
+    "ConversationEpisodeBody",
+    "DiscussionEpisodeBody",
+    "DocEpisodeBody",
     "EpisodeSpec",
     "FieldSpec",
+    "IncidentEpisodeBody",
+    "IssueEpisodeBody",
+    "PrEpisodeBody",
     "RecallFn",
+    "ReleaseEpisodeBody",
     "SkillIR",
 ]

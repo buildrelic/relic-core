@@ -24,7 +24,7 @@ two stubs that land in later phases.
 Pull merged PRs, reviews, and issues into the graph.
 
 ```
-relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no-progress]
+relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no-progress] [--no-load]
 ```
 
 - `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
@@ -36,18 +36,58 @@ relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no
 - `--fresh` (optional): ignore the checkpoint and reload every episode. Pair it
   with clearing the repo's graph, or you get duplicates.
 - `--no-progress` (optional): disable the live progress bar. It already turns off under `--verbose` and when stderr is not a terminal.
+- `--no-load` (optional): run only the fast, no-LLM half (fetch, map, raw store,
+  spool) and stop. No FalkorDB or `OPENAI_API_KEY` needed. The episodes are left on
+  the spool under `./data/spool/<group_id>/`; run `relic load` to extract them.
 
-Needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB. Pulls Linear too
+An ingest has two halves: a fast deterministic capture and a slow LLM extraction.
+The default runs both. `--no-load` runs the first and hands off to `relic load`, so
+the expensive step can run later, on a schedule, or one batch at a time.
+
+A full ingest needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB; a
+`--no-load` capture needs only a GitHub token (no graph, no OpenAI). Pulls Linear too
 when `LINEAR_API_KEY` is set. Resumable: a re-run skips episodes already landed
 (the per-repo checkpoint under `./data/ingest/`). See [ingestion.md](/ingestion).
 
 Exit codes: `0` on success (including a no-op re-run where everything was already
-loaded), `2` for a malformed `--repo`, `1` when the graph is unreachable or the run
-loaded nothing because every episode failed.
+loaded, and a `--no-load` capture), `2` for a malformed `--repo`, `1` when the graph
+is unreachable or the run loaded nothing because every episode failed.
 
 ```bash
 uv run relic ingest --repo astral-sh/uv --limit 20
+uv run relic ingest --repo astral-sh/uv --no-load   # capture only, extract later
 uv run relic --verbose ingest --repo astral-sh/uv   # debug logging
+```
+
+### relic load
+
+Extract spooled episodes into the graph: the LLM-heavy half of ingest, run on demand.
+
+```
+relic load --repo OWNER/NAME [--limit N] [--bulk] [--fresh] [--no-progress]
+```
+
+- `--repo` (required): the `owner/name` whose spooled episodes to extract. Reads
+  `./data/spool/<group_id>/`, written by a prior `relic ingest`. Anything without a
+  `/` exits 2.
+- `--limit` (optional): extract at most N not-yet-loaded episodes, for case-by-case
+  loading. Re-run to drain more.
+- `--bulk` (optional): load via batched `add_episode_bulk`. Also set by `BULK_LOAD`.
+- `--fresh` (optional): ignore the checkpoint and reload every spooled episode. Pair
+  it with clearing the repo's graph, or you get duplicates.
+- `--no-progress` (optional): disable the live progress bar.
+
+Needs `OPENAI_API_KEY` and a running FalkorDB, but no GitHub token: it reads the
+spool, not the network. Resumable and idempotent: it skips episodes the checkpoint
+already records, so a re-run only extracts what is new. An empty spool is a no-op.
+
+Exit codes: `0` on success (including an empty spool and a no-op re-run), `2` for a
+malformed `--repo`, `1` when the graph is unreachable or every episode failed.
+
+```bash
+uv run relic ingest --repo astral-sh/uv --no-load   # capture
+uv run relic load --repo astral-sh/uv --limit 5     # extract the first 5, on demand
+uv run relic load --repo astral-sh/uv               # extract the rest
 ```
 
 ### relic recall
@@ -203,7 +243,8 @@ relic compile --skill ARCHETYPE
 
 | Command | Required args | Key flags | Needs graph |
 |---|---|---|---|
-| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh`, `--no-progress` | yes |
+| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh`, `--no-progress`, `--no-load` | yes (no with `--no-load`) |
+| `load` | `--repo` | `--limit`, `--bulk`, `--fresh`, `--no-progress` | yes |
 | `recall` | `query` | `--repo`, `--num-results` | yes |
 | `query` | `text` | `--repo` | yes |
 | `eval` | none | `--path`, `--num-results`, `--json` | yes |

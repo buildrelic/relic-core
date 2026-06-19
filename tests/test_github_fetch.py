@@ -32,10 +32,20 @@ def _node(
     reviews: list[dict[str, Any]] | None = None,
     files: list[dict[str, Any]] | None = None,
     requested: list[dict[str, Any]] | None = None,
+    labels: list[dict[str, Any]] | None = None,
+    commits: list[dict[str, Any]] | None = None,
+    linked: list[dict[str, Any]] | None = None,
+    additions: int | None = None,
+    deletions: int | None = None,
+    changed_files: int | None = None,
+    base_ref: str | None = None,
+    head_ref: str | None = None,
 ) -> dict[str, Any]:
     # Defaults model a merged PR (the common case); pass closed=/state="CLOSED" with no
     # merged= for a close-without-merge. closedAt falls back to mergedAt so a merged node
-    # still carries one, matching what GraphQL returns.
+    # still carries one, matching what GraphQL returns. The Wave-A fields (labels,
+    # commits, linked issues, diff stats, branches) default to absent, and the parser
+    # tolerates their absence, so the windowing tests are unaffected by them.
     return {
         "number": number,
         "title": f"PR {number}",
@@ -46,10 +56,18 @@ def _node(
         "mergedAt": merged,
         "closedAt": closed or merged,
         "updatedAt": updated,
+        "additions": additions,
+        "deletions": deletions,
+        "changedFiles": changed_files,
+        "baseRefName": base_ref,
+        "headRefName": head_ref,
         "author": {"login": author, "url": f"https://github.com/{author}"} if author else None,
+        "labels": {"nodes": labels or []},
         "files": {"nodes": files or []},
         "reviews": {"nodes": reviews or []},
         "reviewRequests": {"nodes": requested or []},
+        "commits": {"nodes": commits or []},
+        "closingIssuesReferences": {"nodes": linked or []},
     }
 
 
@@ -198,14 +216,18 @@ async def test_pr_node_parses_and_maps_to_the_same_episode() -> None:
     assert rec.files[0].path == "infra/gcp.tf"
     assert rec.reviews[0].login == "paris-phan"
     assert rec.reviews[0].state == "COMMENTED"
-    assert rec.requested_reviewers == ["abhinavp5"]
+    assert [(rr.name, rr.kind) for rr in rec.requested_reviewers] == [("abhinavp5", "user")]
     assert rec.raw is node  # raw payload kept for the raw store
 
     # Parity: the GraphQL-derived rec maps to the same episode body shape.
     body = json.loads(pr_to_episode(rec, _repo()).body)
     assert body["pull_request"]["number"] == 7
     assert body["reviews"][0]["comment"] == "please add a regression test"
-    assert body["requested_reviewers"] == ["abhinavp5"]
+    assert body["requested_reviewers"][0]["name"] == "abhinavp5"
+    assert body["requested_reviewers"][0]["kind"] == "user"
+    # Per-file stats are now carried (recovered dead payload), feeding TOUCHES_PATH.
+    assert body["files"][0]["additions"] == 100
+    assert body["files"][0]["deletions"] == 2
 
 
 def test_pr_node_closed_without_merge_is_labeled_closed() -> None:
@@ -267,6 +289,55 @@ def test_pr_query_keeps_newest_reviews_and_files() -> None:
     assert "reviews(last:" in _PR_QUERY
     assert "files(last:" in _PR_QUERY
     assert "reviews(first:" not in _PR_QUERY
+    # Wave A: the routing signals must be in the query, paged from the END for commits.
+    assert "commits(last:" in _PR_QUERY
+    assert "closingIssuesReferences(first:" in _PR_QUERY
+    assert "__typename" in _PR_QUERY  # user-vs-team request discrimination
+
+
+def test_pr_node_parses_team_request_commits_linked_issues_and_stats() -> None:
+    # The Wave-A review-routing payload: a team review request, commit authors (the
+    # active-maintainer signal), a closed-issue link, diff stats, branches, labels.
+    node = _node(
+        8,
+        updated="2025-08-02T00:00:00Z",
+        merged="2025-08-02T00:00:00Z",
+        author="alice",
+        labels=[{"name": "area:auth"}, {"name": "type:fix"}],
+        additions=120,
+        deletions=30,
+        changed_files=4,
+        base_ref="main",
+        head_ref="alice/fix-auth",
+        requested=[
+            {"requestedReviewer": {"__typename": "User", "login": "bob", "url": "https://gh/bob"}},
+            {"requestedReviewer": {"__typename": "Team", "name": "auth-team", "slug": "auth"}},
+        ],
+        commits=[
+            {"commit": {"oid": "abc123", "message": "fix", "author": {"user": {"login": "alice"}}}},
+            {"commit": {"oid": "def456", "message": "add test", "author": {"user": None}}},
+        ],
+        linked=[{"number": 100, "repository": {"nameWithOwner": "o/r"}}],
+    )
+    rec = _pr_node_to_rec(node)
+
+    assert [(rr.name, rr.kind) for rr in rec.requested_reviewers] == [
+        ("bob", "user"),
+        ("auth-team", "team"),
+    ]
+    assert [(c.sha, c.author_login) for c in rec.commits] == [("abc123", "alice"), ("def456", None)]
+    assert [(li.identifier, li.relation) for li in rec.linked_issues] == [("o/r#100", "closes")]
+    assert rec.labels == ["area:auth", "type:fix"]
+    assert (rec.additions, rec.deletions, rec.changed_files) == (120, 30, 4)
+    assert (rec.base_ref, rec.head_ref) == ("main", "alice/fix-auth")
+
+    # Parity into the episode body.
+    body = json.loads(pr_to_episode(rec, _repo()).body)
+    assert body["pull_request"]["labels"] == ["area:auth", "type:fix"]
+    assert body["pull_request"]["diff_stats"]["changed_files"] == 4
+    assert {rr["kind"] for rr in body["requested_reviewers"]} == {"user", "team"}
+    assert body["linked_issues"][0] == {"identifier": "o/r#100", "relation": "closes"}
+    assert body["commits"][0]["author_login"] == "alice"
 
 
 # --- issues windowing (REST) -------------------------------------------------

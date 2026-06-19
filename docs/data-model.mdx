@@ -102,45 +102,82 @@ allows `REPORTS_TO`. These three dicts (`ENTITY_TYPES`, `EDGE_TYPES`,
 `EDGE_TYPE_MAP`) are passed to every `add_episode` call so extraction stays
 typed and bounded ([`load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/load.py)).
 
-## The episode JSON
+## The episode body (a typed, versioned contract)
 
 The bridge from ingestion to the graph. [`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py)
-turns each fetched record into an `EpisodeSpec` whose `body` is a JSON string. The
-keys in that JSON mirror the flat `*Node` attribute names, so Graphiti's extractor
-maps the values onto the typed entities.
+turns each fetched record into an `EpisodeSpec`. The `body` is a JSON string on the
+wire (Graphiti requires a str), but its shape is no longer implicit: it is built from
+a typed Pydantic model in
+[`relic.contracts.episode_body`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
+(`PrEpisodeBody` / `IssueEpisodeBody`) and serialized with `model_dump_json()`. The
+model is the shared schema both sides read: ingest builds it, and the graph side
+(extraction, recall, the detector, the compiler) deserializes it against the same
+type, so the seam cannot drift. The keys mirror the flat `*Node` attribute names, so
+the extractor maps values onto typed entities.
 
-A PR episode body looks like:
+A PR episode body (`schema_version` 2):
 
 ```json
 {
-  "repo": {"full_name": "buildrelic/relic-core", "url": "https://github.com/buildrelic/relic-core"},
+  "schema_version": 2,
+  "source_type": "pull_request",
+  "context": "merged PR, 2 reviews, 1 file",
+  "repo": {"full_name": "buildrelic/relic-core", "url": "...", "default_branch": "main"},
   "pull_request": {
-    "number": 12,
-    "title": "...",
-    "description": "...",
+    "number": 12, "title": "...", "description": "...",
     "url": "https://github.com/buildrelic/relic-core/pull/12",
-    "state": "merged",
-    "created_at": "...",
-    "merged_at": "...",
+    "state": "merged", "created_at": "...", "merged_at": "...",
+    "base_ref": "main", "head_ref": "paris/auth-routing",
+    "labels": ["area:auth", "type:fix"],
     "author": {"login": "...", "profile_url": "..."},
-    "co_authors": [{"name": "...", "email": "..."}]
+    "co_authors": [{"name": "...", "email": "..."}],
+    "timestamps": {"created_at": "...", "first_review_at": "...", "approved_at": "...", "merged_at": "...", "time_to_merge_hours": 26.0},
+    "diff_stats": {"total_additions": 80, "total_deletions": 10, "changed_files": 1}
   },
-  "reviews": [{"reviewer": {"login": "...", "profile_url": "..."}, "state": "approved", "submitted_at": "...", "url": "...", "comment": "..."}],
-  "requested_reviewers": ["..."],
-  "files": [{"path": "src/relic/cli.py"}]
+  "reviews": [{"reviewer": {"login": "...", "profile_url": "..."}, "state": "APPROVED", "submitted_at": "...", "url": "...", "comment": "..."}],
+  "requested_reviewers": [{"name": "alice", "kind": "user", "profile_url": "..."}, {"name": "auth-team", "kind": "team"}],
+  "files": [{"path": "src/auth/login.py", "additions": 80, "deletions": 10}],
+  "commits": [{"sha": "...", "message": "...", "author_login": "..."}],
+  "checks": [],
+  "linked_issues": [{"identifier": "buildrelic/relic-core#100", "relation": "closes"}]
 }
 ```
 
-An issue episode body is smaller: an `issue` object with identifier, title,
-description, state, url, assignees, labels, and parent (the parent issue identifier for a sub-issue, else null). The same shape covers GitHub and
-Linear issues, since both map to the `IssueRec` record.
+An issue episode body is an `issue` object with identifier, title, description,
+state, url, assignees, labels, parent, and created/closed times. The same shape
+covers GitHub and Linear, since both map to the `IssueRec` record. Reserved fields
+(`checks`; the issue's `priority`, `estimate`, `cycle`, `state_history`, `relations`)
+are declared in the contract and default empty, so the schema is the full target
+while capture fills it wave by wave.
 
 Each `EpisodeSpec` also carries a `name` (for example `PR buildrelic/relic-core#12`),
-a `source_description` (`github pull request`, `github issue`, `linear issue`), a
-`reference_time` (the merge or creation timestamp, parsed tz-aware), and the
-`group_id` (the slugified repo). Bodies are clipped to 2000 characters and reviews are
-capped per PR (bots dropped) to bound extraction cost
+a `source_description`, a `reference_time` (the merge or creation timestamp, parsed
+tz-aware), the `group_id` (the slugified repo), and the `schema_version`.
+
+Two invariants the body shape must keep:
+
+- **Citation anchors.** `pull_request.url` / `issue.url` are read by
+  [`recall._extract_url`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)
+  to attach a source URL to every recalled fact. Moving them degrades every citation
+  to a bare uuid.
+- **The name is the dedup key.** `schema_version` and every new field live in the
+  body, never in `name`. The checkpoint dedups on `name`, so a version woven into it
+  would re-ingest and fork the graph.
+
+The free-text fields are clipped (description 2000 chars, review comment 1500, commit
+message 1000) and the assembled body is trimmed to a per-episode token budget
+(`_fit_budget`), because oversized JSON episodes degrade extraction. Bot reviews are
+dropped and human reviews capped, most-informative kept
 ([`_clip`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py), `_select_reviews`).
+
+<Note>
+Several body fields are richer than the entity/edge schema in
+[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py)
+consumes today (`requested_reviewers` with `kind`, `labels`, `linked_issues`, per-file
+`additions`/`deletions`, `commits`, derived `timestamps`). They are the agreed target
+the graph side adds entity/edge types for (`REQUESTED_REVIEW`, `TAGS`, `CLOSES`,
+`TOUCHES_PATH` attributes), so capture leads and extraction follows.
+</Note>
 
 <Warning>
 **Raw payload shapes are not uniform.** The episode JSON above is stable, but the

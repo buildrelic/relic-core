@@ -1,7 +1,7 @@
 ---
 title: "Configuration"
 icon: "sliders"
-description: "Environment variables, the four stores, secret handling, and the doctor report."
+description: "Environment variables, the five stores, secret handling, and the doctor report."
 ---
 
 All runtime configuration is environment variables, loaded from `.env` into a
@@ -24,7 +24,7 @@ Run `just doctor` to confirm what is configured.
 
 | Variable | Default | Required for | What it does |
 |---|---|---|---|
-| `OPENAI_API_KEY` | none | `ingest`, `recall`, `query`, `eval`, `serve` recall | Graphiti extraction, embeddings, reranking |
+| `OPENAI_API_KEY` | none | `ingest`, `load`, `recall`, `query`, `eval`, `serve` recall | Graphiti extraction, embeddings, reranking |
 | `GITHUB_TOKEN` | none | `ingest` (or `gh auth`) | read GitHub history; falls back to `gh auth token` |
 | `LINEAR_API_KEY` | none | Linear ingest | enables the Linear source when set |
 | `ANTHROPIC_API_KEY` | none | Phase 4 compiler | skill compilation (not used yet) |
@@ -38,10 +38,10 @@ Run `just doctor` to confirm what is configured.
 | `REGISTRY_DB_PATH` | `./data/registry.db` | skill commands | SQLite registry location |
 | `TARGET_REPO` | none | optional | default `owner/name` for `recall`, `query`, `eval` |
 | `FETCH_CONCURRENCY` | `10` | `ingest` | concurrent GitHub requests (rate-limit safe) |
-| `GRAPHITI_MAX_COROUTINES` | `20` | `ingest` | Graphiti internal LLM concurrency during load; lower to ~5 for the `gemini` provider (see note) |
-| `BULK_LOAD` | `false` | `ingest` | load via batched `add_episode_bulk` (also `--bulk`) |
-| `BULK_BATCH_SIZE` | `10` | `ingest` | episodes per bulk call; lower it to ease OpenAI rate limits |
-| `SEMAPHORE_LIMIT` | `10` | `ingest` | deprecated shared knob, superseded by the two above |
+| `GRAPHITI_MAX_COROUTINES` | `20` | `ingest`, `load` | Graphiti internal LLM concurrency during load; lower to ~5 for the `gemini` provider (see note) |
+| `BULK_LOAD` | `false` | `ingest`, `load` | load via batched `add_episode_bulk` (also `--bulk`) |
+| `BULK_BATCH_SIZE` | `10` | `ingest`, `load` | episodes per bulk call; lower it to ease OpenAI rate limits |
+| `SEMAPHORE_LIMIT` | `10` | `ingest`, `load` | deprecated shared knob, superseded by the two above |
 
 Unknown keys in `.env` are ignored (`extra="ignore"`), so a leftover variable from
 an earlier version does no harm.
@@ -77,7 +77,7 @@ half-filled `.env` fails clean rather than sending a garbage credential.
 
 ## The stores
 
-Four stores, all under `./data/` by default (gitignored).
+Five stores, all under `./data/` by default (gitignored).
 
 - **The graph (memory).** FalkorDB, addressed by `FALKORDB_*`. Not a local file:
   it is a networked service. Per-repo graphs are named by `group_id`; the
@@ -87,6 +87,9 @@ Four stores, all under `./data/` by default (gitignored).
   See [skills.md](/skills).
 - **The raw store.** Plain JSON under `./data/raw/<source>/<id>.json`, written by
   `ingest`. See [ingestion.md](/ingestion).
+- **The episode spool.** Mapped episodes under `./data/spool/<group_id>/`, one JSON
+  file per episode. Written by capture (`ingest`), read by `relic load`. It decouples
+  the fast, no-LLM capture from the slow extraction. See [ingestion.md](/ingestion).
 - **The ingest checkpoint.** A per-repo ledger at `./data/ingest/<group_id>.log`,
   one landed episode name per line. Lets a re-run skip what already loaded and
   resume a failed run. `ingest --fresh` clears it. See [ingestion.md](/ingestion).

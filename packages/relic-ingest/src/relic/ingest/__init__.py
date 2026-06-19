@@ -20,6 +20,14 @@ from relic.ingest.mappers import (
     repo_group_id,
 )
 from relic.ingest.raw_store import dump_raw, raw_path
+from relic.ingest.spool import (
+    clear_spool,
+    read_spool,
+    sort_episodes,
+    spool_count,
+    spool_dir,
+    spool_episodes,
+)
 from relic.ingest.timing import format_ingest_timing
 
 __all__ = [
@@ -30,6 +38,7 @@ __all__ = [
     "ReviewRec",
     "checkpoint_path",
     "clear",
+    "clear_spool",
     "dump_raw",
     "fetch_issues",
     "fetch_repo",
@@ -40,7 +49,12 @@ __all__ = [
     "make_github",
     "pr_to_episode",
     "raw_path",
+    "read_spool",
     "record_done",
     "repo_group_id",
     "resolve_github_token",
+    "sort_episodes",
+    "spool_count",
+    "spool_dir",
+    "spool_episodes",
 ]

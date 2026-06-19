@@ -12,9 +12,14 @@ import typer
 from rich.console import Console
 
 if TYPE_CHECKING:
+    import logging
     from collections.abc import Awaitable, Callable
 
     from graphiti_core import Graphiti
+
+    from relic.config import Settings
+    from relic.contracts import EpisodeSpec
+    from relic.graph import LoadStats
 
 app = typer.Typer(
     name="relic",
@@ -60,15 +65,35 @@ def ingest(
     no_progress: Annotated[
         bool, typer.Option("--no-progress", help="disable the live progress bar")
     ] = False,
+    no_load: Annotated[
+        bool,
+        typer.Option(
+            "--no-load",
+            help="capture and spool episodes but skip LLM extraction; run `relic load` after",
+        ),
+    ] = False,
 ) -> None:
-    """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2)."""
+    """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2).
+
+    Two halves: a fast, deterministic capture (fetch, map, raw store, spool) with no
+    LLM, then the LLM-heavy extraction into the graph. ``--no-load`` runs only the
+    first half and stops, leaving the episodes spooled for a later ``relic load``.
+    """
     import asyncio
 
     from relic.obs import get_logger
 
     try:
         asyncio.run(
-            _ingest(repo, limit, months=months, bulk=bulk, fresh=fresh, no_progress=no_progress)
+            _ingest(
+                repo,
+                limit,
+                months=months,
+                bulk=bulk,
+                fresh=fresh,
+                no_progress=no_progress,
+                no_load=no_load,
+            )
         )
     except typer.Exit:
         raise
@@ -81,57 +106,60 @@ def ingest(
         raise typer.Exit(code=1) from exc
 
 
+@app.command()
+def load(
+    repo: Annotated[str, typer.Option(help="owner/name whose spooled episodes to extract")],
+    limit: Annotated[
+        int | None,
+        typer.Option(help="extract at most N not-yet-loaded episodes, for case-by-case loading"),
+    ] = None,
+    bulk: Annotated[
+        bool,
+        typer.Option("--bulk", help="load via batched add_episode_bulk (faster, experimental)"),
+    ] = False,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
+    ] = False,
+    no_progress: Annotated[
+        bool, typer.Option("--no-progress", help="disable the live progress bar")
+    ] = False,
+) -> None:
+    """Extract spooled episodes into the graph: the LLM-heavy half of ingest, on demand.
+
+    Reads what `relic ingest --no-load` spooled for the repo and runs Graphiti
+    extraction. Run it whenever: right after capture, on a schedule, or one batch at a
+    time with ``--limit``. Resumable and idempotent: the checkpoint skips episodes that
+    already landed, so a re-run only extracts what is new.
+    """
+    import asyncio
+
+    from relic.obs import get_logger
+
+    try:
+        asyncio.run(_load(repo, limit, bulk=bulk, fresh=fresh, no_progress=no_progress))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - report infra failures concisely, not as a traceback
+        log = get_logger("load")
+        log.error("load failed: %s", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+        log.debug("load traceback", exc_info=exc)
+        raise typer.Exit(code=1) from exc
+
+
 def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
 
 
-async def _ingest(
-    repo: str,
-    limit: int | None = None,
-    *,
-    months: int = 12,
-    bulk: bool = False,
-    fresh: bool = False,
-    no_progress: bool = False,
-) -> None:
+def _quiet_background_errors(log: "logging.Logger") -> None:
+    """Route the FalkorDB driver's detached index-build errors to debug.
+
+    The driver schedules an index build in its constructor as an orphaned task. If the
+    graph is unhealthy that task fails too, and asyncio dumps a full traceback to
+    stderr. The run's own error reporting already covers the foreground failure, so
+    these orphaned-task errors go to debug.
+    """
     import asyncio
-    import logging
-    import time
-    from collections.abc import Callable
 
-    from relic.config import get_settings
-    from relic.graph import (
-        LoadStats,
-        falkordb_reachable,
-        load_episodes,
-        load_episodes_bulk,
-        make_engram,
-    )
-    from relic.ingest import (
-        RepoBundle,
-        checkpoint_path,
-        clear,
-        dump_raw,
-        fetch_issues,
-        fetch_repo,
-        format_ingest_timing,
-        issue_to_episode,
-        linear_enabled,
-        load_done,
-        make_github,
-        pr_to_episode,
-        record_done,
-        repo_group_id,
-        resolve_github_token,
-    )
-    from relic.obs import get_logger, stderr_console
-
-    log = get_logger("ingest")
-
-    # The FalkorDB driver schedules an index build in its constructor as a detached
-    # task. If the graph is unhealthy it fails there too, and asyncio dumps a full
-    # traceback to stderr. Route those orphaned-task errors to debug: the run's own
-    # error reporting already covers the failure on the foreground path.
     def _on_loop_error(_loop: object, context: dict) -> None:
         log.debug(
             "background task error: %s", context.get("message"), exc_info=context.get("exception")
@@ -139,21 +167,40 @@ async def _ingest(
 
     asyncio.get_running_loop().set_exception_handler(_on_loop_error)
 
-    if "/" not in repo:
-        err_console.print("[red]--repo must be owner/name[/]")
-        raise typer.Exit(code=2)
-    settings = get_settings()
+
+async def _capture(
+    repo: str,
+    limit: int | None,
+    *,
+    months: int,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> "tuple[list[EpisodeSpec], str, float, float]":
+    """Fetch, map, raw-store, and spool episodes: the fast, no-LLM half of an ingest.
+
+    Returns ``(episodes, group_id, fetch_seconds, prepare_seconds)``. ``group_id`` is
+    the capture key (the GitHub repo's slug); Linear episodes carry their own group but
+    spool under this key, mirroring the checkpoint. ``prepare_seconds`` covers mapping,
+    the raw dump, and the spool write.
+    """
+    import time
+
+    from relic.ingest import (
+        RepoBundle,
+        dump_raw,
+        fetch_issues,
+        fetch_repo,
+        issue_to_episode,
+        linear_enabled,
+        make_github,
+        pr_to_episode,
+        repo_group_id,
+        resolve_github_token,
+        sort_episodes,
+        spool_episodes,
+    )
+
     owner, name = repo.split("/", 1)
-    ingest_start = time.monotonic()
-
-    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
-        raise typer.Exit(code=1)
-
     fetch_start = time.monotonic()
     token = resolve_github_token(settings)
     async with make_github(token) as gh:
@@ -168,8 +215,8 @@ async def _ingest(
         repo,
         fetch_seconds,
     )
-    prepare_start = time.monotonic()
 
+    prepare_start = time.monotonic()
     raw_count = 0
     for pr in bundle.pull_requests:
         dump_raw(pr.raw, source="github", ident=f"pr-{pr.number}")
@@ -194,16 +241,55 @@ async def _ingest(
         log.info("Linear skipped (LINEAR_API_KEY not set)")
 
     log.debug("wrote %d raw payloads under data/raw", raw_count)
+    # Canonical load order, so the combined ingest feeds the order-sensitive loader the
+    # same sequence `relic load` reads back from the spool (both oldest-first).
+    episodes = sort_episodes(episodes)
+    if episodes:
+        spool_episodes(episodes, group_id)
+        log.debug("spooled %d episodes under data/spool/%s", len(episodes), group_id)
+    prepare_seconds = time.monotonic() - prepare_start
+    return episodes, group_id, fetch_seconds, prepare_seconds
 
-    if not episodes:
-        log.warning("nothing to ingest")
-        return
+
+async def _extract(
+    repo: str,
+    episodes: "list[EpisodeSpec]",
+    group_id: str,
+    *,
+    settings: "Settings",
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    limit: int | None,
+    progress_label: str,
+    log: "logging.Logger",
+) -> "tuple[LoadStats, bool]":
+    """Run Graphiti extraction over episodes: the LLM-heavy half. Returns (stats, used_bulk).
+
+    ``fresh`` clears the checkpoint first so every episode reloads. ``limit`` caps how
+    many not-yet-loaded episodes extract this run, for case-by-case loading; ``None``
+    loads all pending (the loader skips checkpointed names internally).
+    """
+    import logging
+    from collections.abc import Callable
+
+    from relic.graph import LoadStats, load_episodes, load_episodes_bulk, make_engram
+    from relic.ingest import checkpoint_path, clear, load_done, record_done
+    from relic.obs import stderr_console
 
     ledger = checkpoint_path(group_id)
     if fresh:
         clear(ledger)
     done = load_done(ledger)
-    prepare_seconds = time.monotonic() - prepare_start
+
+    # A limited run pre-filters to pending and slices, so N means N freshly loaded; an
+    # unbounded run hands the loader the full list plus the skip set, so it reports the
+    # resume count.
+    if limit is not None:
+        to_load = [spec for spec in episodes if spec.name not in done][:limit]
+        skip: set[str] = set()
+    else:
+        to_load, skip = episodes, done
 
     engram = make_engram(
         host=settings.falkordb_host,
@@ -220,16 +306,16 @@ async def _ingest(
         # when active, so they aren't emitted twice.
         common = {
             "group_id": group_id,
-            "skip": done,
+            "skip": skip,
             "on_loaded": lambda name: record_done(ledger, name),
             "on_progress": on_progress,
             "progress": on_progress is None,
         }
         if use_bulk:
             return await load_episodes_bulk(
-                engram, episodes, batch_size=settings.bulk_batch_size, **common
+                engram, to_load, batch_size=settings.bulk_batch_size, **common
             )
-        return await load_episodes(engram, episodes, **common)
+        return await load_episodes(engram, to_load, **common)
 
     # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
     # and --no-progress; otherwise fall back to the heartbeat log lines.
@@ -259,7 +345,7 @@ async def _ingest(
                 TimeRemainingColumn(),
                 console=bar_console,
             ) as bar:
-                task = bar.add_task(f"ingesting {repo}", total=len(episodes), counts="")
+                task = bar.add_task(progress_label, total=len(to_load), counts="")
 
                 def _on_progress(s: LoadStats) -> None:
                     bar.update(
@@ -275,25 +361,178 @@ async def _ingest(
         await engram.close()
 
     summary = (
-        f"ingested {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
+        f"extracted {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
         f"({stats.skipped} skipped, {stats.failed} failed)"
     )
     if stats.failed:
         log.warning(summary)
     else:
         log.info(summary)
+    return stats, use_bulk
+
+
+async def _ingest(
+    repo: str,
+    limit: int | None = None,
+    *,
+    months: int = 12,
+    bulk: bool = False,
+    fresh: bool = False,
+    no_progress: bool = False,
+    no_load: bool = False,
+) -> None:
+    import time
+
+    from relic.config import get_settings
+    from relic.graph import falkordb_reachable
+    from relic.ingest import format_ingest_timing
+    from relic.obs import get_logger, stderr_console
+
+    log = get_logger("ingest")
+    _quiet_background_errors(log)
+
+    if "/" not in repo:
+        err_console.print("[red]--repo must be owner/name[/]")
+        raise typer.Exit(code=2)
+    settings = get_settings()
+    ingest_start = time.monotonic()
+
+    # The graph is only needed for extraction. A capture-only run (--no-load) needs no
+    # FalkorDB, so the preflight probe is skipped; a full run keeps the early-fail.
+    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    episodes, group_id, fetch_seconds, prepare_seconds = await _capture(
+        repo, limit, months=months, settings=settings, log=log
+    )
+    if not episodes:
+        log.warning("nothing to ingest")
+        return
+
+    if no_load:
+        total_seconds = time.monotonic() - ingest_start
+        log.info(
+            "captured %d episodes from %s in %.1fs (fetch %.1fs, map + spool %.1fs); "
+            "extract them with `relic load --repo %s`",
+            len(episodes),
+            repo,
+            total_seconds,
+            fetch_seconds,
+            prepare_seconds,
+            repo,
+        )
+        return
+
+    stats, use_bulk = await _extract(
+        repo,
+        episodes,
+        group_id,
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=None,
+        progress_label=f"ingesting {repo}",
+        log=log,
+    )
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - ingest_start
     # The honest remainder: FalkorDB probe, token resolve, engram build, and the
     # index build (which the loader's duration_s deliberately excludes).
     setup_seconds = max(0.0, total_seconds - fetch_seconds - prepare_seconds - stats.duration_s)
-    bar_console.print(
+    stderr_console().print(
         format_ingest_timing(
             repo,
             [
                 ("fetch", fetch_seconds),
-                ("map + raw store", prepare_seconds),
+                ("map + raw store + spool", prepare_seconds),
+                ("load (extraction)", stats.duration_s),
+                ("setup + index", setup_seconds),
+            ],
+            total_seconds,
+            loaded=stats.loaded,
+            skipped=stats.skipped,
+            failed=stats.failed,
+            per_episode_seconds=stats.duration_s / extracted if extracted else 0.0,
+            bulk=use_bulk,
+        ),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+    if stats.loaded == 0 and stats.failed:
+        raise typer.Exit(code=1)
+
+
+async def _load(
+    repo: str,
+    limit: int | None = None,
+    *,
+    bulk: bool = False,
+    fresh: bool = False,
+    no_progress: bool = False,
+) -> None:
+    import time
+
+    from relic.config import get_settings
+    from relic.graph import falkordb_reachable
+    from relic.ingest import format_ingest_timing, read_spool, repo_group_id
+    from relic.obs import get_logger, stderr_console
+
+    log = get_logger("load")
+    _quiet_background_errors(log)
+
+    if "/" not in repo:
+        err_console.print("[red]--repo must be owner/name[/]")
+        raise typer.Exit(code=2)
+    settings = get_settings()
+    load_start = time.monotonic()
+
+    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    group_id = repo_group_id(repo)
+    read_start = time.monotonic()
+    episodes = read_spool(group_id)
+    read_seconds = time.monotonic() - read_start
+    if not episodes:
+        log.warning("spool empty for %s; run `relic ingest --no-load --repo %s` first", repo, repo)
+        return
+    log.info("read %d spooled episodes for %s", len(episodes), repo)
+
+    stats, use_bulk = await _extract(
+        repo,
+        episodes,
+        group_id,
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=limit,
+        progress_label=f"extracting {repo}",
+        log=log,
+    )
+
+    extracted = stats.loaded + stats.failed
+    total_seconds = time.monotonic() - load_start
+    setup_seconds = max(0.0, total_seconds - read_seconds - stats.duration_s)
+    stderr_console().print(
+        format_ingest_timing(
+            repo,
+            [
+                ("read spool", read_seconds),
                 ("load (extraction)", stats.duration_s),
                 ("setup + index", setup_seconds),
             ],

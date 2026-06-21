@@ -15,11 +15,18 @@ paths, the scorecard, and the FalkorDB workaround.
 ## The engram
 
 [`make_engram`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) builds the Graphiti client. It wires
-FalkorDB as the graph driver and OpenAI for the three model jobs:
+FalkorDB as the graph driver and, by default (`GRAPHITI_LLM_PROVIDER=openai`),
+OpenAI for the three model jobs:
 
 - **LLM.** `OpenAIClient` with `gpt-4o-mini` (extraction during ingest).
 - **Embeddings.** `OpenAIEmbedder` with `text-embedding-3-small` (semantic search).
 - **Reranker.** `OpenAIRerankerClient` with `gpt-4o-mini` (ordering search hits).
+
+`GRAPHITI_LLM_PROVIDER=gemini` is the alternative. It moves only the extraction LLM
+to Gemini (`GEMINI_MODEL`, default `gemini-2.5-flash-lite`), whose higher TPM limits
+help on a large backfill. Embeddings and reranking stay on OpenAI, so it needs both
+`GEMINI_API_KEY` and `OPENAI_API_KEY`. See [Configuration](/configuration) for the
+concurrency tuning the gemini provider wants.
 
 Connection params (`FALKORDB_*`) and the OpenAI key fall back to settings when not
 passed, so a caller can build a default-local client with no arguments. If no
@@ -135,9 +142,10 @@ match, and a case with no expected sources can never hit.
 
 ## The FalkorDB workaround
 
-[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) monkeypatches two graphiti-core
-fulltext-query builders at `make_engram` time (`_patch_falkordb_empty_query`,
-applied once). It fixes two issues in graphiti-core 0.29.x on FalkorDB:
+[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) applies two compatibility
+monkeypatches to graphiti-core 0.29.x at `make_engram` time, each applied once. The
+first (`_patch_falkordb_empty_query`) guards the two FalkorDB fulltext-query
+builders against two issues:
 
 1. **Empty fulltext queries.** When an extracted entity's name sanitizes to
    nothing (all punctuation or stopwords, common in real history: version tags,
@@ -149,9 +157,18 @@ applied once). It fixes two issues in graphiti-core 0.29.x on FalkorDB:
    inside quotes, so a `group_id` like `relic-core` breaks the query. The patch
    escapes hyphens in the `group_id` filter on the final query string.
 
-Both are flagged to remove once upstream guards them. They matter because a slug
+The second (`_patch_prompt_json_datetime`) makes graphiti's `to_prompt_json`
+serializer tolerate `datetime` values. Without it, `add_episode_bulk` raises
+`TypeError: Object of type datetime is not JSON serializable` and falls back to
+slow per-episode loading. This shows up with the Gemini provider, which populates
+node timestamps (`created_at`, `valid_at`) that OpenAI often leaves null.
+
+<Warning>
+Both patches target graphiti-core 0.29.x and are flagged to remove once upstream
+guards these cases. Revisit on every Graphiti upgrade. They matter because a slug
 like `buildrelic__relic-core` contains a hyphen, and real repos produce entity
 names that sanitize to empty.
+</Warning>
 
 ## History: Kuzu to FalkorDB
 
@@ -162,4 +179,4 @@ not work the way recall needs. FalkorDB gives both: per-repo graphs by `group_id
 and working RediSearch fulltext. The cost is that FalkorDB is a networked service
 you must run (Docker locally), where Kuzu was a file. The recall and query code
 did not change across the migration, because both are built on the portable
-`graphiti.search` API. See [roadmap.md](/roadmap).
+`graphiti.search` API. See [Roadmap](/roadmap).

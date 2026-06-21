@@ -113,7 +113,7 @@ later.
 network, no LLM. It turns each record into an `EpisodeSpec` whose body is a typed,
 versioned model from
 [`relic.contracts.episode_body`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
-(see [data-model.md](/data-model) for the full shape and invariants).
+(see [Data model](/data-model) for the full shape and invariants).
 
 - `pr_to_episode` maps a PR in any state, builds a `PrEpisodeBody` (repo, pull_request, reviews, requested_reviewers with `kind`, files with per-file stats, commits, linked_issues, derived timestamps, diff stats, labels), names it `PR <repo>#<number>`, and anchors `reference_time` to the merge time, falling back to the creation time, then to the epoch if both are missing.
 - `issue_to_episode` builds an `IssueEpisodeBody` and names it `Issue <identifier>`.
@@ -130,7 +130,7 @@ versioned model from
 The episode body keys mirror the flat `*Node` attributes so the extractor maps them
 onto typed entities. Several fields are richer than the entity/edge schema consumes
 today; they are the agreed target the graph side adds types for (see the note in
-[data-model.md](/data-model)).
+[Data model](/data-model)).
 
 ## Step 5: spool the episodes
 
@@ -170,7 +170,7 @@ and `relic load` starts here.
 - Each `add_episode` passes `entity_types`, `edge_types`, `edge_type_map`, and the
   episode's `group_id`. Graphiti routes the write to the FalkorDB graph named by
   that `group_id`, partitioning the graph per repo (see
-  [memory-and-recall.md](/memory-and-recall)).
+  [Memory and recall](/memory-and-recall)).
 - The loop is **resilient**: one episode that fails extraction (a rate limit, a
   malformed entity) is caught, counted, and logged, and the run carries on. A
   single bad PR never aborts the whole ingest.
@@ -180,11 +180,13 @@ and `relic load` starts here.
 The engram client for ingestion is built by `make_engram` with the default
 `FALKORDB_DATABASE` and `max_coroutines=GRAPHITI_MAX_COROUTINES`. It is always
 closed in a `finally` so the connection does not leak. `make_engram` also applies
-two compatibility monkeypatches to graphiti-core 0.29.1: one guards an empty
-FalkorDB fulltext query, the other makes the prompt JSON serializer
-(`to_prompt_json`) tolerate `datetime` values — without it, `add_episode_bulk`
-raises `TypeError: Object of type datetime is not JSON serializable` and falls back
-to slow per-episode loading (seen with the Gemini provider, which populates edge
+two compatibility monkeypatches to graphiti-core 0.29.1: one fixes the FalkorDB
+fulltext query builders (it returns an empty query when the text sanitizes to
+nothing, and escapes hyphens in `group_id` filters so RediSearch does not read them
+as negation), the other makes the prompt JSON serializer (`to_prompt_json`)
+tolerate `datetime` values. Without it, `add_episode_bulk` raises `TypeError:
+Object of type datetime is not JSON serializable` and falls back to slow
+per-episode loading (seen with the Gemini provider, which populates node
 timestamps). Both are documented in [`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py).
 
 <Note>
@@ -200,14 +202,25 @@ The split exists because extraction dominates the clock. Capture is a few second
 extraction is minutes-to-hours, ~6 to 8 LLM calls per episode, strictly sequential.
 Pulling them apart lets each run on its own cadence.
 
-```bash
-# capture only: fast, deterministic, no graph or OpenAI key needed
-uv run relic ingest --repo astral-sh/uv --no-load
-
-# extraction: later, on a schedule, or on another machine
-uv run relic load --repo astral-sh/uv --limit 10   # drain 10 at a time
-uv run relic load --repo astral-sh/uv              # drain the rest
-```
+<Steps>
+  <Step title="Capture: no graph or OpenAI key needed">
+    ```bash
+    uv run relic ingest --repo astral-sh/uv --no-load
+    ```
+    Fetches, maps, and spools episodes, then stops. Fast and deterministic.
+  </Step>
+  <Step title="Extract on demand, a batch at a time">
+    ```bash
+    uv run relic load --repo astral-sh/uv --limit 10
+    ```
+    Drains 10 spooled episodes into the graph. Re-run to drain more.
+  </Step>
+  <Step title="Drain the rest">
+    ```bash
+    uv run relic load --repo astral-sh/uv
+    ```
+  </Step>
+</Steps>
 
 `relic load` reads the spool, not the network, so it needs `OPENAI_API_KEY` and a
 running FalkorDB but no GitHub token. `--limit N` extracts at most N not-yet-loaded
@@ -270,11 +283,11 @@ result of `ingest` is the populated graph, not its console output.
   took, whether Linear ran, and a final summary: episodes loaded, skipped, and
   failed, with the wall-clock duration.
 - **Phase timing.** A full `ingest` ends with a compact timing block on stderr:
-  fetch, map + raw store + spool, load (extraction), and setup, each with its share
-  of the total, plus the per-episode load rate. It makes the LLM-bound shape obvious
-  at a glance: the load phase is almost the whole clock. `relic load` prints the same
-  block over its own phases (read spool, load, setup), and a `--no-load` capture logs
-  one line with the fetch and map + spool times.
+  fetch, map + raw store + spool, load (extraction), and setup + index, each with
+  its share of the total, plus the per-episode load rate. It makes the LLM-bound
+  shape obvious at a glance: the load phase is almost the whole clock. `relic load`
+  prints the same block over its own phases (read spool, load, setup + index), and a
+  `--no-load` capture logs one line with the fetch and map + spool times.
 - **Failures.** Each failed episode logs one `WARNING` line with its name and the
   error. A run that loads nothing but hits failures exits non-zero. A whole-run
   failure (no token, graph down, bad key) logs one `ERROR` line, not a traceback.

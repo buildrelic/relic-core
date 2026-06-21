@@ -29,7 +29,7 @@ relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no
 
 - `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
 - `--limit` (optional): cap merged PRs and issues pulled, most recent first.
-- `--months` (optional, default 12): how many months of history to backfill — PRs
+- `--months` (optional, default 12): how many months of history to backfill. PRs
   merged and issues updated within the window are pulled.
 - `--bulk` (optional): load via batched `add_episode_bulk` for a faster backfill
   (experimental; sequential is the default). Also set by `BULK_LOAD`.
@@ -47,7 +47,7 @@ the expensive step can run later, on a schedule, or one batch at a time.
 A full ingest needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB; a
 `--no-load` capture needs only a GitHub token (no graph, no OpenAI). Pulls Linear too
 when `LINEAR_API_KEY` is set. Resumable: a re-run skips episodes already landed
-(the per-repo checkpoint under `./data/ingest/`). See [ingestion.md](/ingestion).
+(the per-repo checkpoint under `./data/ingest/`). See [Ingestion](/ingestion).
 
 Exit codes: `0` on success (including a no-op re-run where everything was already
 loaded, and a `--no-load` capture), `2` for a malformed `--repo`, `1` when the graph
@@ -122,8 +122,8 @@ de-duplicated by name.
 
 ### relic eval
 
-Score recall against a gold set: does it cite the PR or issue that holds each
-answer? A malformed or unreadable gold set exits 1.
+Score recall against a gold set by checking whether it cites the PR or issue that
+holds each answer. A malformed or unreadable gold set exits 1.
 
 ```
 relic eval [--path PATH] [--num-results N] [--json PATH]
@@ -206,7 +206,7 @@ relic catalog
 ### relic serve
 
 Serve verified skills and memory recall as MCP tools over stdio. The one
-long-running command. See [skills.md](/skills).
+long-running command. See [Skills](/skills).
 
 ```
 relic serve
@@ -217,7 +217,7 @@ relic serve
 ### relic doctor
 
 Report registry, graph, and key status for this setup. Reads only, changes
-nothing, never raises. See [configuration.md](/configuration).
+nothing, never raises. See [Configuration](/configuration).
 
 ```
 relic doctor

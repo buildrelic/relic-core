@@ -7,7 +7,7 @@ description: "The SkillIR lifecycle, the SQLite registry, render, emit, catalog,
 The serve side holds typed skills, moves them through a lifecycle, and delivers
 them to coding agents. It is decoupled from the graph: nothing here imports
 ingestion or recall. The unit of currency is `SkillIR` (see
-[data-model.md](/data-model)).
+[Data model](/data-model)).
 
 ## Lifecycle
 
@@ -31,6 +31,12 @@ flowchart LR
 - **deprecated.** Retired by `relic deprecate`. Stops being emitted or served, and
   `emit` removes its previously written files. A deprecated skill cannot be
   verified again.
+
+<Note>
+Verify is the one human gate. Only verified skills are emitted to `.claude/skills/`
+or exposed by `relic serve`. Drafts and deprecated skills are never served, and a
+deprecated skill cannot be verified again.
+</Note>
 
 ## The registry
 
@@ -178,4 +184,4 @@ threshold. The compiler ([`compile/compiler.py`](https://github.com/buildrelic/r
 will feed that grounded evidence to Anthropic with `SkillIR` as a structured-output
 schema, so the model can only return a valid skill, every field cites its source,
 and `status` is always `draft`. Both are docstring-only stubs today. See
-[roadmap.md](/roadmap).
+[Roadmap](/roadmap).

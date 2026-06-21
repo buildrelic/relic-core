@@ -11,15 +11,20 @@ output, the registry row, and the MCP tool schema, all one type.
 
 ## The two halves
 
-**Capture, memory, recall (the graph side).** Pull engineering history, structure
-it in a temporal knowledge graph, and answer questions against it with sources
-attached. This is `ingest`, `recall`, `query`, and `eval`. It is backed by
-Graphiti on FalkorDB and uses OpenAI for extraction, embeddings, and reranking.
-
-**Skills, serve (the registry side).** Hold typed skills, move them through a
-lifecycle, and deliver them to agents as files or over MCP. This is `register`,
-`list`, `show`, `verify`, `deprecate`, `emit`, `catalog`, and `serve`. It is
-backed by a SQLite registry and has no graph or network dependency.
+<CardGroup cols={2}>
+  <Card title="Capture, memory, recall" icon="brain">
+    The graph side. Pull engineering history, structure it in a temporal knowledge
+    graph, and answer questions against it with sources attached. This is `ingest`,
+    `load`, `recall`, `query`, and `eval`. It is backed by Graphiti on FalkorDB and
+    uses OpenAI for extraction, embeddings, and reranking.
+  </Card>
+  <Card title="Skills, serve" icon="screwdriver-wrench">
+    The registry side. Hold typed skills, move them through a lifecycle, and deliver
+    them to agents as files or over MCP. This is `register`, `list`, `show`,
+    `verify`, `deprecate`, `emit`, `catalog`, and `serve`. It is backed by a SQLite
+    registry and has no graph or network dependency.
+  </Card>
+</CardGroup>
 
 The halves are deliberately decoupled. The serve side never imports the graph
 side. The MCP server takes a recall function by injection rather than importing
@@ -49,11 +54,11 @@ Memory and skills live in separate stores on purpose.
 **The graph (memory).** A FalkorDB graph, accessed through Graphiti. It holds
 people, repos, pull requests, reviews, issues, and the edges between them,
 extracted from episodes. It is partitioned per repo by `group_id`. See
-[memory-and-recall.md](/memory-and-recall).
+[Memory and recall](/memory-and-recall).
 
 **The registry (skills).** A SQLite database at `./data/registry.db`. It holds
 `SkillIR` documents plus denormalized columns for cheap listing. See
-[skills.md](/skills).
+[Skills](/skills).
 
 A third store sits beside them: the **raw store**, plain JSON files under
 `./data/raw/<source>/<id>.json`, an immutable copy of every fetched payload so a
@@ -64,7 +69,7 @@ skill can always cite the original ([`raw_store.py`](https://github.com/buildrel
 ```mermaid
 flowchart TB
     subgraph sources [External sources]
-        GH[GitHub REST]
+        GH[GitHub: GraphQL PRs + REST issues]
         LN[Linear GraphQL]
     end
 
@@ -76,7 +81,7 @@ flowchart TB
     subgraph capture [Capture / memory / recall]
         ING[ingest]
         MAP[mappers: deterministic records to episodes]
-        LOAD[graph.load: add_episode per repo group_id]
+        LOAD[load: add_episode per repo group_id]
         REC[recall / query / eval]
     end
 
@@ -96,7 +101,7 @@ flowchart TB
 
     GH --> ING
     LN --> ING
-    ING --> MAP --> LOAD
+    ING --> MAP -->|spool, then relic load| LOAD
     ING --> RAW
     LOAD -->|OpenAI extraction| OAI
     LOAD --> FALKOR
@@ -116,11 +121,11 @@ flowchart TB
 
 Relic is not a single running service. It is a set of processes, most of them
 short-lived CLI invocations, over shared stores. See
-[processes.md](/processes) for each one in detail.
+[Processes](/processes) for each one in detail.
 
 - **CLI commands** are one-shot. `ingest`, `recall`, `query`, `eval`, `emit`,
   and the rest run, do their work, and exit. The async ones
-  (`ingest`/`recall`/`query`/`eval`/`serve`) wrap their body in `asyncio.run`.
+  (`ingest`/`load`/`recall`/`query`/`eval`/`serve`) wrap their body in `asyncio.run`.
 - **`relic serve`** is the one long-running process. It speaks MCP over stdio and
   stays up for the life of the client connection.
 - **FalkorDB** is a persistent service, run locally via Docker
@@ -207,7 +212,7 @@ That is what makes the candidates trustworthy.
 **Three type layers, not one.** The rich ontology in `ontology/` is the source of
 truth for the typed domain. Graphiti needs flat scalar models, so `engram.py`
 holds a separate flat `*Node` layer. `SkillIR` is its own ported-verbatim
-contract. See [data-model.md](/data-model) for why.
+contract. See [Data model](/data-model) for why.
 
 **Cheap model for the graph, frontier model for compilation.** Graphiti uses
 OpenAI `gpt-4o-mini` for extraction and reranking and `text-embedding-3-small`
@@ -235,5 +240,5 @@ fact or claim with no source is not the point of the system.
 
 The graph DB was migrated from embedded Kuzu to FalkorDB. FalkorDB was chosen for
 multi-tenant `group_id` partitioning (per-repo graphs) and working full-text
-search. See [memory-and-recall.md](/memory-and-recall) and
-[roadmap.md](/roadmap).
+search. See [Memory and recall](/memory-and-recall) and
+[Roadmap](/roadmap).

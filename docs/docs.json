@@ -8,6 +8,12 @@
     "dark": "#16A34A"
   },
   "description": "Memory layer for AI-native teams: ingest engineering history, recall grounded answers with sources, and compile skills for coding agents.",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "/"
+  },
+  "favicon": "/favicon.svg",
   "navigation": {
     "groups": [
       {
@@ -38,7 +44,18 @@
         "label": "GitHub",
         "href": "https://github.com/buildrelic/relic-core"
       }
-    ]
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Quickstart",
+      "href": "/quickstart"
+    }
+  },
+  "contextual": {
+    "options": ["copy", "view", "claude", "chatgpt"]
+  },
+  "seo": {
+    "indexing": "navigable"
   },
   "footer": {
     "socials": {

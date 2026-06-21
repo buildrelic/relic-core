@@ -1,5 +1,6 @@
 ---
 title: "Ingestion contract handoff"
+icon: "file-contract"
 description: "The typed episode-body seam, the graph-side types it expects, the invariants, and the open questions for Phase 4."
 ---
 
@@ -21,7 +22,7 @@ The seam is a typed, versioned model, so the two sides cannot drift:
   pins the invariants below and carries `canonical_pr_record()` / `canonical_issue_record()`,
   the reference instances to tune entity/edge extraction against.
 
-The full body shape is documented in [data-model.md](/data-model).
+The full body shape is documented in [Data model](/data-model).
 
 ## Source taxonomy (development sources)
 
@@ -36,7 +37,7 @@ as the full target, with capture landing wave by wave. Each carries a top-level
 | Artifact type | `source_type` | Body model | Sources that map onto it | `source_description` | Grounded in | Status |
 |---|---|---|---|---|---|---|
 | Pull request | `pull_request` | `PrEpisodeBody` | GitHub PR, GitLab MR, Bitbucket PR | `github pull request` | review-routing fields | **populated** |
-| Issue / ticket | `issue` | `IssueEpisodeBody` | GitHub issue, Linear, Jira | `github issue` / `linear issue` | — | **populated** |
+| Issue / ticket | `issue` | `IssueEpisodeBody` | GitHub issue, Linear, Jira | `github issue` / `linear issue` | none | **populated** |
 | Commit | `commit` | `CommitEpisodeBody` | git / GitHub / GitLab commit | `github commit` | Conventional Commits | defined |
 | Release | `release` | `ReleaseEpisodeBody` | GitHub/GitLab release, tag | `github release` | SemVer + Keep a Changelog + DORA | defined |
 | CI / CD run | `ci_run` | `CiRunEpisodeBody` | GitHub Actions, GitLab pipeline, deploy | `github ci run` | DORA four keys | defined |

@@ -5,7 +5,7 @@ description: "Local setup, the test suite, CI, and code conventions."
 ---
 
 Relic is a uv workspace on Python 3.12: five packages under `packages/` (see
-[architecture.md](/architecture)), installed editable into one shared venv. The
+[Architecture](/architecture)), installed editable into one shared venv. The
 toolchain is ruff (lint and format), pyright (types), pytest (tests), and
 import-linter (subsystem boundaries). CI runs all four, with ruff in check-only mode: `ruff format` is local, via `just fmt`.
 
@@ -21,9 +21,9 @@ import-linter (subsystem boundaries). CI runs all four, with ruff in check-only 
 ## Setup
 
 <Note>
-  New here? The [Quickstart](/quickstart) walks setup plus your first ingest and
-  recall. This page covers the contributor workflow: setup, tests, CI, and
-  conventions.
+  New contributors should start with the [Quickstart](/quickstart), which walks
+  setup plus your first ingest and recall. This page covers the contributor
+  workflow: setup, tests, CI, and conventions.
 </Note>
 
 From a fresh clone:
@@ -69,7 +69,7 @@ Tooling config is in [`pyproject.toml`](https://github.com/buildrelic/relic-core
 - **ruff.** Line length 100, target py312, lint rules `E`, `F`, `I`, `UP`, `B`,
   `SIM`. One per-file ignore: `skill_ir.py` keeps `Optional[...]` (`UP` off)
   because it is ported verbatim and must not drift from the system-design doc.
-- **pyright.** Basic mode over `src` and `tests`, against the `.venv`.
+- **pyright.** Basic mode over `packages` and `tests`, against the `.venv`.
 - **pytest.** `asyncio_mode = "auto"` (async tests need no decorator), quiet
   output, tests under `tests/`.
 
@@ -101,13 +101,17 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 |---|---|
 | [`test_ontology.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ontology.py) | ontology models round-trip, SkillIR schema |
 | [`test_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mappers.py) | deterministic payload to episode transforms |
+| [`test_contract_episode.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_contract_episode.py) | the typed episode-body contract: bodies validate, the citation URL resolves, the name stays version-free, and the body trims to budget |
 | [`test_raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_raw_store.py) | raw artifact paths and writes |
+| [`test_spool.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_spool.py) | the episode spool: round-trip, upsert by name, and chronological read order |
 | [`test_github_connector.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_connector.py) | the pure GitHub connector helpers (state, node parsing), no network |
 | [`test_github_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_fetch.py) | windowed GraphQL PR paging, node parsing, and issue windowing, no network |
 | [`test_ingest_integration.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_integration.py) | the fetch and map path with stubbed sources |
 | [`test_cli_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_ingest.py) | the `ingest` command: gates, exit codes, and checkpoint wiring (sources stubbed) |
+| [`test_cli_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_load.py) | the `load` command and `ingest --no-load`: the capture/load split, gates, and exit codes (graph stubbed) |
 | [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-repo checkpoint ledger: append, load, skip, and `--fresh` clear |
 | [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, resume skipping |
+| [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
 | [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
 | [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |

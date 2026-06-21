@@ -13,12 +13,25 @@ optional, so importing config (and `relic --help`) never needs a populated `.env
 
 `just setup` does the full setup. For just the configuration pieces:
 
-```bash
-just env   # copy .env.example to .env if missing, then fill in keys
-just up    # start the graph on localhost:6379, UI on http://localhost:3000
-```
-
-Run `just doctor` to confirm what is configured.
+<Steps>
+  <Step title="Create your .env">
+    ```bash
+    just env
+    ```
+    Copies `.env.example` to `.env` if missing. Fill in your keys.
+  </Step>
+  <Step title="Start the graph">
+    ```bash
+    just up
+    ```
+    Starts FalkorDB on `localhost:6379`, with the browser UI on http://localhost:3000.
+  </Step>
+  <Step title="Confirm what is configured">
+    ```bash
+    just doctor
+    ```
+  </Step>
+</Steps>
 
 ## Variables
 
@@ -29,7 +42,7 @@ Run `just doctor` to confirm what is configured.
 | `LINEAR_API_KEY` | none | Linear ingest | enables the Linear source when set |
 | `ANTHROPIC_API_KEY` | none | Phase 4 compiler | skill compilation (not used yet) |
 | `GEMINI_API_KEY` | none | `ingest` when provider is `gemini` | Gemini key for extraction; the `gemini` provider is hybrid and **also** needs `OPENAI_API_KEY` for embeddings |
-| `GRAPHITI_LLM_PROVIDER` | `openai` | none | graph LLM provider: `openai` (default) or `gemini` (hybrid — Gemini LLM + OpenAI embeddings/rerank) |
+| `GRAPHITI_LLM_PROVIDER` | `openai` | none | graph LLM provider: `openai` (default) or `gemini` (hybrid: Gemini LLM + OpenAI embeddings/rerank) |
 | `GEMINI_MODEL` | `gemini-2.5-flash-lite` | `gemini` provider | model used when `GRAPHITI_LLM_PROVIDER=gemini` |
 | `FALKORDB_HOST` | `localhost` | graph commands | FalkorDB host |
 | `FALKORDB_PORT` | `6379` | graph commands | FalkorDB port |
@@ -52,7 +65,7 @@ The defaults (`GRAPHITI_MAX_COROUTINES=20`, `BULK_BATCH_SIZE=10`) are sized for 
 whose rate-limiting naturally spreads out the graph writes. Gemini is fast enough that
 those same writes arrive at once and can overrun FalkorDB's query queue during `--bulk`
 (`ResponseError: Max pending queries exceeded`), which forces a slow per-episode
-fallback. Lowering both to ~5 keeps bulk under FalkorDB's cap — and is *faster* overall
+fallback. Lowering both to ~5 keeps bulk under FalkorDB's cap, and is *faster* overall
 because nothing falls back:
 
 ```bash
@@ -79,20 +92,29 @@ half-filled `.env` fails clean rather than sending a garbage credential.
 
 Five stores, all under `./data/` by default (gitignored).
 
-- **The graph (memory).** FalkorDB, addressed by `FALKORDB_*`. Not a local file:
-  it is a networked service. Per-repo graphs are named by `group_id`; the
-  `FALKORDB_DATABASE` graph holds ungrouped data. See
-  [memory-and-recall.md](/memory-and-recall).
-- **The registry (skills).** SQLite at `REGISTRY_DB_PATH`. Created on first write.
-  See [skills.md](/skills).
-- **The raw store.** Plain JSON under `./data/raw/<source>/<id>.json`, written by
-  `ingest`. See [ingestion.md](/ingestion).
-- **The episode spool.** Mapped episodes under `./data/spool/<group_id>/`, one JSON
-  file per episode. Written by capture (`ingest`), read by `relic load`. It decouples
-  the fast, no-LLM capture from the slow extraction. See [ingestion.md](/ingestion).
-- **The ingest checkpoint.** A per-repo ledger at `./data/ingest/<group_id>.log`,
-  one landed episode name per line. Lets a re-run skip what already loaded and
-  resume a failed run. `ingest --fresh` clears it. See [ingestion.md](/ingestion).
+<CardGroup cols={2}>
+  <Card title="The graph (memory)" icon="brain" href="/memory-and-recall">
+    FalkorDB, addressed by `FALKORDB_*`. Not a local file: it is a networked service.
+    Per-repo graphs are named by `group_id`; the `FALKORDB_DATABASE` graph holds
+    ungrouped data.
+  </Card>
+  <Card title="The registry (skills)" icon="database" href="/skills">
+    SQLite at `REGISTRY_DB_PATH`. Created on first write.
+  </Card>
+  <Card title="The raw store" icon="box-archive" href="/ingestion">
+    Plain JSON under `./data/raw/<source>/<id>.json`, written by `ingest`.
+  </Card>
+  <Card title="The episode spool" icon="layer-group" href="/ingestion">
+    Mapped episodes under `./data/spool/<group_id>/`, one JSON file per episode.
+    Written by capture (`ingest`), read by `relic load`. It decouples the fast,
+    no-LLM capture from the slow extraction.
+  </Card>
+  <Card title="The ingest checkpoint" icon="list-check" href="/ingestion">
+    A per-repo ledger at `./data/ingest/<group_id>.log`, one landed episode name per
+    line. Lets a re-run skip what already loaded and resume a failed run.
+    `ingest --fresh` clears it.
+  </Card>
+</CardGroup>
 
 ## Logging
 

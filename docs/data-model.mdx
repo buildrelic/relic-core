@@ -146,15 +146,17 @@ A PR episode body (`schema_version` 2):
 An issue episode body is an `issue` object with identifier, title, description,
 state, url, assignees, labels, parent, and created/closed times. The same shape
 covers GitHub and Linear, since both map to the `IssueRec` record. Reserved fields
-(`checks`; the issue's `priority`, `estimate`, `cycle`, `state_history`, `relations`)
-are declared in the contract and default empty, so the schema is the full target
-while capture fills it wave by wave.
+default empty in the contract so the schema is the full target while capture fills
+it wave by wave: `checks` on the PR body, and on the issue the `priority`,
+`estimate`, `cycle`, `state_history`, and `relations` Linear has but GitHub does
+not.
 
 Each `EpisodeSpec` also carries a `name` (for example `PR buildrelic/relic-core#12`),
 a `source_description`, a `reference_time` (the merge or creation timestamp, parsed
 tz-aware), the `group_id` (the slugified repo), and the `schema_version`.
 
-Two invariants the body shape must keep:
+<Warning>
+**Two invariants the body shape must keep.**
 
 - **Citation anchors.** `pull_request.url` / `issue.url` are read by
   [`recall._extract_url`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)
@@ -163,6 +165,7 @@ Two invariants the body shape must keep:
 - **The name is the dedup key.** `schema_version` and every new field live in the
   body, never in `name`. The checkpoint dedups on `name`, so a version woven into it
   would re-ingest and fork the graph.
+</Warning>
 
 The free-text fields are clipped (description 2000 chars, review comment 1500, commit
 message 1000) and the assembled body is trimmed to a per-episode token budget
@@ -218,4 +221,4 @@ comment, doc, or message). An example lives at
 [`examples/skills/pr-review-routing.json`](https://github.com/buildrelic/relic-core/blob/main/examples/skills/pr-review-routing.json).
 
 How `SkillIR` is stored, rendered, served, and emitted is covered in
-[skills.md](/skills).
+[Skills](/skills).

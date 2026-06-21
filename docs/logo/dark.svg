@@ -1,0 +1,20 @@
+<svg width="430" height="120" viewBox="0 0 430 120" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="relic">
+  <g transform="translate(6,6) scale(0.9)">
+    <g stroke="#4ADE80" stroke-width="6" stroke-linecap="round" stroke-opacity="0.5">
+      <line x1="60" y1="60" x2="28" y2="32"/>
+      <line x1="60" y1="60" x2="92" y2="26"/>
+      <line x1="60" y1="60" x2="96" y2="92"/>
+      <line x1="60" y1="60" x2="32" y2="94"/>
+      <line x1="28" y1="32" x2="92" y2="26"/>
+      <line x1="32" y1="94" x2="96" y2="92"/>
+    </g>
+    <g fill="#4ADE80">
+      <circle cx="28" cy="32" r="8.5"/>
+      <circle cx="92" cy="26" r="8.5"/>
+      <circle cx="96" cy="92" r="8.5"/>
+      <circle cx="32" cy="94" r="8.5"/>
+    </g>
+    <circle cx="60" cy="60" r="10.5" fill="#86EFAC"/>
+  </g>
+  <text x="130" y="83" font-family="Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="66" font-weight="600" letter-spacing="-2" fill="#F4F7F4">relic</text>
+</svg>

@@ -11,7 +11,7 @@ Relic is a memory layer for AI-native teams, built on
 history, structures it as a temporal knowledge graph, and serves two things to
 coding agents over MCP: grounded answers about past work, each citing its source,
 and compiled skills, the repeatable procedures an agent can follow. This repo,
-`relic-core`, is the prototype: about 4,200 lines of Python in a uv workspace of
+`relic-core`, is the prototype: about 5,400 lines of Python in a uv workspace of
 five owned packages, driven by a Typer CLI.
 
 ## Core loop
@@ -30,7 +30,8 @@ GitHub / Linear ─► ingest ─► Graphiti extraction ─► FalkorDB graph �
 1. **Capture.** `ingest --repo owner/name` pulls merged PRs (title, description,
    files, reviews, reviewers) and issues from GitHub, optionally Linear issues. It
    writes the raw payloads to disk for citation and maps each record to a JSON
-   episode.
+   episode. `ingest --no-load` stops after capture and spools the episodes.
+   `relic load --repo owner/name` runs the LLM extraction half on demand.
 2. **Memory.** Episodes are added to Graphiti one at a time. An LLM extracts typed
    entities and edges into a FalkorDB graph. Each repo is its own tenant, keyed by
    `group_id`.
@@ -86,9 +87,9 @@ carries the MCP transport.
 - Config is a `pydantic-settings` model over `.env`. All API keys are optional, so
   `relic --help` and imports never need a populated env. A validator drops blank,
   whitespace-bearing, or `#`-commented secrets.
-- 15 CLI commands: 13 wired (`ingest`, `recall`, `query`, `eval`, `register`,
-  `list`, `show`, `verify`, `deprecate`, `emit`, `catalog`, `serve`, `doctor`) and
-  2 stubs (`resolve`, `compile`).
+- 16 CLI commands: 14 wired (`ingest`, `load`, `recall`, `query`, `eval`,
+  `register`, `list`, `show`, `verify`, `deprecate`, `emit`, `catalog`, `serve`,
+  `doctor`) and 2 stubs (`resolve`, `compile`).
 
 ## Stack
 
@@ -96,7 +97,9 @@ carries the MCP transport.
 - Graph DB: FalkorDB, self-hosted via Docker. Chosen over embedded Kuzu for
   `group_id` multi-tenancy and full-text search.
 - Models: OpenAI `gpt-4o-mini` for extraction and reranking,
-  `text-embedding-3-small` for embeddings.
+  `text-embedding-3-small` for embeddings. A `GRAPHITI_LLM_PROVIDER=gemini` hybrid
+  swaps Gemini Flash in for extraction (higher TPM) while keeping OpenAI for
+  embeddings and reranking.
 - Server: FastMCP (stdio). CLI: Typer and Rich. Schema: Pydantic v2. Rendering:
   Jinja2.
 - Tooling: ruff (lint and format), pyright (basic), pytest. CI runs all three
@@ -106,7 +109,7 @@ carries the MCP transport.
 
 Built: capture, memory, recall, the SQLite registry and skill lifecycle,
 emit/catalog reconciliation, the MCP server, the recall scorecard, and doctor. The
-test suite is 25 files. 24 run offline against throwaway SQLite and in-memory
+test suite is 29 files. 28 run offline against throwaway SQLite and in-memory
 fakes. One live integration test is skip-gated on `OPENAI_API_KEY` and a reachable
 FalkorDB.
 

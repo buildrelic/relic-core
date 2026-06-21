@@ -15,7 +15,7 @@ later phases.
 Every command is a subcommand of the `relic` CLI in the `relic-cli` package, the
 composition root: it imports each subsystem's public API (`relic.ingest`,
 `relic.graph`, `relic.serve`) and wires them together. The subsystems never call
-each other directly. See [architecture.md](/architecture).
+each other directly. See [Architecture](/architecture).
 
 ## At a glance
 
@@ -23,7 +23,8 @@ each other directly. See [architecture.md](/architecture).
 |---|---|---|---|---|---|
 | FalkorDB | service | persistent | graph | graph | Docker |
 | `relic serve` | server | per connection | registry, graph | nothing | registry; graph optional |
-| `relic ingest` | CLI | one-shot | GitHub, Linear | graph, raw store | GitHub token, OpenAI, FalkorDB |
+| `relic ingest` | CLI | one-shot | GitHub, Linear | graph, raw store, spool | GitHub token, OpenAI, FalkorDB |
+| `relic load` | CLI | one-shot | spool, graph | graph, checkpoint | OpenAI, FalkorDB |
 | `relic recall` | CLI | one-shot | graph | nothing | OpenAI, FalkorDB |
 | `relic query` | CLI | one-shot | graph | nothing | OpenAI, FalkorDB |
 | `relic eval` | CLI | one-shot | graph, gold set | nothing | OpenAI, FalkorDB |
@@ -58,7 +59,7 @@ The graph database. Relic runs it locally as a Docker container
   is enabled. Start it before any of them.
 
 In production this becomes a managed or hosted FalkorDB instance. See
-[roadmap.md](/roadmap).
+[Roadmap](/roadmap).
 
 ### relic serve
 
@@ -78,7 +79,7 @@ team's verified skills and its memory to any MCP client over stdio.
   stray bytes corrupt the stream ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py),
   `_serve`).
 - **Client config.** Point any MCP client at it over stdio. For Claude Code, add
-  it to `.mcp.json`. See [skills.md](/skills).
+  it to `.mcp.json`. See [Skills](/skills).
 
 ## Capture and memory processes
 
@@ -86,17 +87,21 @@ team's verified skills and its memory to any MCP client over stdio.
 
 The capture pipeline. Pulls engineering history into the graph.
 
-- **Invocation.** `relic ingest --repo owner/name [--limit N] [--months M] [--bulk] [--fresh]`.
+- **Invocation.** `relic ingest --repo owner/name [--limit N] [--months M] [--bulk] [--fresh] [--no-progress] [--no-load]`.
 - **Reads.** GitHub GraphQL (merged PRs with files and reviews, batched per page) and
   GitHub REST (non-PR issues); both windowed to the last `--months`. Linear GraphQL when
   `LINEAR_API_KEY` is set; the per-repo checkpoint ledger.
 - **Writes.** The FalkorDB graph (one episode per PR and per issue, landed under
   the repo's `group_id`); the raw store at `./data/raw/<source>/<id>.json`; the
-  checkpoint at `./data/ingest/<group_id>.log`.
+  episode spool at `./data/spool/<group_id>/`; the checkpoint at
+  `./data/ingest/<group_id>.log`.
 - **Depends on.** A GitHub token (from `GITHUB_TOKEN` or `gh auth token`),
   `OPENAI_API_KEY` (Graphiti extraction and embeddings), and FalkorDB.
+- **Two halves.** A fast, deterministic capture (fetch, map, raw store, spool) with
+  no LLM, then the LLM-heavy extraction into the graph. `--no-load` runs only the
+  first half and stops, leaving the episodes spooled for a later `relic load`.
 - **Flow.** Probe the graph, fetch the window (PRs in one batched GraphQL query per page),
-  dump raw, map to deterministic episodes, then add episodes to Graphiti — sequentially by
+  dump raw, map to deterministic episodes, then add episodes to Graphiti: sequentially by
   default so later episodes resolve entities from earlier ones, or batched via `--bulk`.
 - **Resumable.** The checkpoint records each episode that lands, so a re-run skips
   what already loaded and a failed run resumes where it stopped. `--fresh` clears
@@ -107,7 +112,28 @@ The capture pipeline. Pulls engineering history into the graph.
 - **`--limit`.** Caps PRs and issues pulled, most recent first, to bound API and
   per-episode LLM cost on a large repo.
 
-Full detail in [ingestion.md](/ingestion).
+Full detail in [Ingestion](/ingestion).
+
+### relic load
+
+The LLM-heavy half of ingest, run on demand. Extracts spooled episodes into the
+graph.
+
+- **Invocation.** `relic load --repo owner/name [--limit N] [--bulk] [--fresh] [--no-progress]`.
+- **Reads.** The episode spool at `./data/spool/<group_id>/`, written by a prior
+  `relic ingest` (or `relic ingest --no-load`); the per-repo checkpoint ledger; the
+  graph.
+- **Writes.** The FalkorDB graph (one episode per PR and per issue); the checkpoint
+  at `./data/ingest/<group_id>.log`.
+- **Depends on.** `OPENAI_API_KEY` (Graphiti extraction and embeddings) and
+  FalkorDB. No GitHub token: it reads the spool, not the network.
+- **Resumable.** Shares the checkpoint with `ingest`, so it skips episodes already
+  loaded and a re-run only extracts what is new. An empty spool is a no-op.
+- **`--limit`.** Extracts at most N not-yet-loaded episodes for case-by-case
+  loading. Re-run to drain the rest. `--fresh` ignores the checkpoint and reloads
+  every spooled episode.
+
+Full detail in [Ingestion](/ingestion).
 
 ### relic recall
 
@@ -225,7 +251,7 @@ These run outside Relic, invoked per command as HTTP calls.
 
 ## Pending processes
 
-These are stubs today. See [roadmap.md](/roadmap).
+These are stubs today. See [Roadmap](/roadmap).
 
 - **`relic resolve` (Phase 3).** Unify a person across GitHub and Linear into one
   `Person` node. Prints "not implemented yet" and exits 1.

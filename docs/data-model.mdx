@@ -174,9 +174,11 @@ dropped and human reviews capped, most-informative kept
 Several body fields are richer than the entity/edge schema in
 [`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py)
 consumes today (`requested_reviewers` with `kind`, `labels`, `linked_issues`, per-file
-`additions`/`deletions`, `commits`, derived `timestamps`). They are the agreed target
-the graph side adds entity/edge types for (`REQUESTED_REVIEW`, `TAGS`, `CLOSES`,
-`TOUCHES_PATH` attributes), so capture leads and extraction follows.
+`additions`/`deletions`, `commits`, derived `timestamps`). The full target schema the
+graph side grows into, the node and edge types with their `(source, target)` signatures
+and attributes, the multi-valued rule, and the connector-to-provides map, is the
+[engram graph ontology ADR](/adr/0001-engram-graph-ontology). Capture leads, extraction
+follows.
 </Note>
 
 <Warning>

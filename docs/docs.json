@@ -27,6 +27,10 @@
         "pages": ["cli-reference", "configuration"]
       },
       {
+        "group": "Decisions",
+        "pages": ["adr/0001-engram-graph-ontology"]
+      },
+      {
         "group": "Contributing",
         "pages": ["development", "roadmap"]
       }

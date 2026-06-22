@@ -133,3 +133,61 @@ def test_gemini_clients_builds_hybrid_triple() -> None:
     assert llm.model == "gemini-2.5-flash-lite"
     assert type(embedder).__name__ == "OpenAIEmbedder"
     assert type(cross_encoder).__name__ == "OpenAIRerankerClient"
+
+
+# --- The REL-93 ontology registration (docs/adr/0001-engram-graph-ontology.mdx) ---
+#
+# These lock the type dicts the LLM extractor is handed per add_episode, so a drift
+# from the accepted ontology -- a re-added Review node, a reserved attribute name, an
+# unfed Project type -- fails here rather than silently polluting a real graph.
+
+
+def test_ontology_registers_the_rel93_in_scope_types() -> None:
+    # engram registers exactly the REL-93 types the captured PR/issue bodies feed.
+    from relic.graph.engram import EDGE_TYPES, ENTITY_TYPES
+
+    assert set(ENTITY_TYPES) == {"Person", "Repo", "PullRequest", "Issue", "Label", "File"}
+    assert set(EDGE_TYPES) == {
+        "AUTHORED",
+        "REVIEWED",
+        "REQUESTED_REVIEW",
+        "TOUCHES_PATH",
+        "HAS_LABEL",
+        "IN_REPO",
+        "ASSIGNED_TO",
+        "PARENT_OF",
+        "CLOSES",
+    }
+
+
+def test_ontology_omits_removed_and_unfed_types() -> None:
+    # Guard the ADR's "register only what a captured body feeds" calls against regression.
+    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+
+    assert "Review" not in ENTITY_TYPES  # Review is the REVIEWED edge, not a node
+    assert "Procedure" not in ENTITY_TYPES  # detector/compiler is a separate track
+    assert "Project" not in ENTITY_TYPES  # deferred: issue body carries no project field
+    assert "REPORTS_TO" not in EDGE_TYPES  # deferred: no connector feeds org structure
+    assert "IN_PROJECT" not in EDGE_TYPES
+    assert ("Issue", "Repo") not in EDGE_TYPE_MAP  # issue body carries no repo (group_id does)
+
+
+def test_edge_type_map_is_closed_over_registered_types() -> None:
+    # Every (source, target) label and every relation in the map must be registered.
+    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+
+    for (src, tgt), relations in EDGE_TYPE_MAP.items():
+        assert src in ENTITY_TYPES, f"unregistered source label: {src}"
+        assert tgt in ENTITY_TYPES, f"unregistered target label: {tgt}"
+        for rel in relations:
+            assert rel in EDGE_TYPES, f"unregistered relation: {rel}"
+
+
+def test_entity_types_avoid_graphiti_reserved_names() -> None:
+    # The guard behind the opened_at rename: a created_at attribute would collide with
+    # Graphiti's EntityNode fields and be rejected by validate_entity_types.
+    from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
+
+    from relic.graph.engram import ENTITY_TYPES
+
+    assert validate_entity_types(ENTITY_TYPES) is True

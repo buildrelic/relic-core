@@ -12,6 +12,8 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "pydantic>=2.11.5",
+    # ASGI server for `relic serve-http` (the web app's connector-status API).
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]

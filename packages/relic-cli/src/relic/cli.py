@@ -5,8 +5,9 @@ import-clean. Heavier work is imported inside each command as it lands in its
 phase.
 """
 
+from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -680,6 +681,155 @@ async def _serve() -> None:
         conn.close()
         if engram is not None:
             await engram.close()
+
+
+def _connector_status() -> dict[str, Any]:
+    """Synthesize per-source sync status from the on-disk ingest checkpoints.
+
+    Reads the per-repo checkpoint ledgers under data/ingest/ (the only persisted
+    ingest state) plus which source keys are configured. No graph connection: the
+    connector control plane only needs what has landed and when. Episode names
+    carry the source: "PR owner/name#42" and "Issue owner/name#7" are GitHub,
+    "Issue REL-10" is Linear.
+    """
+    from datetime import datetime
+
+    from relic.config import get_settings
+    from relic.ingest import load_done
+
+    settings = get_settings()
+    base = Path("data/ingest")
+    ledgers = sorted(base.glob("*.log")) if base.exists() else []
+
+    github_items = 0
+    linear_items = 0
+    repos: list[str] = []
+    last_mtime = 0.0
+    for ledger in ledgers:
+        repos.append(ledger.stem.replace("__", "/"))
+        last_mtime = max(last_mtime, ledger.stat().st_mtime)
+        for name in load_done(ledger):
+            if "#" in name:
+                github_items += 1
+            elif name.startswith("Issue "):
+                linear_items += 1
+
+    last_sync = (
+        datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
+    )
+    return {
+        "connectors": [
+            {
+                "source": "github",
+                "connected": bool(settings.github_token) or github_items > 0,
+                "itemCount": github_items,
+                "itemLabel": "pull requests",
+                "lastSyncAt": last_sync if github_items else None,
+                "repos": repos,
+            },
+            {
+                "source": "linear",
+                "connected": bool(settings.linear_api_key) or linear_items > 0,
+                "itemCount": linear_items,
+                "itemLabel": "issues",
+                "lastSyncAt": last_sync if linear_items else None,
+                "repos": repos if linear_items else [],
+            },
+        ]
+    }
+
+
+def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
+    """Ingest run history plus totals.
+
+    Run records are appended to data/ingest/runs.jsonl as ingests complete; this
+    returns the most recent ``limit`` (filtered by repo when given), newest first.
+    ``totals`` is synthesized from the checkpoints so the page has live numbers
+    even before the first recorded run.
+    """
+    import json
+    from datetime import datetime
+
+    from relic.config import get_settings
+    from relic.ingest import load_done
+
+    runs: list[dict[str, Any]] = []
+    runs_path = Path("data/ingest/runs.jsonl")
+    if runs_path.exists():
+        for raw in runs_path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if repo and record.get("repo") != repo:
+                continue
+            runs.append(record)
+    runs = runs[-limit:][::-1]
+
+    base = Path("data/ingest")
+    ledgers = sorted(base.glob("*.log")) if base.exists() else []
+    total = 0
+    last_mtime = 0.0
+    for ledger in ledgers:
+        total += len(load_done(ledger))
+        last_mtime = max(last_mtime, ledger.stat().st_mtime)
+
+    settings = get_settings()
+    sources_connected = sum(
+        1 for key in (settings.github_token, settings.linear_api_key) if key
+    ) or (1 if total else 0)
+    last_run = (
+        datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
+    )
+    return {
+        "runs": runs,
+        "totals": {
+            "memories": total,
+            "sourcesConnected": sources_connected,
+            "lastRunAt": last_run,
+        },
+    }
+
+
+@app.command(name="serve-http")
+def serve_http(
+    host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="bind port")] = 8787,
+    token: Annotated[
+        str | None,
+        typer.Option(help="require Authorization: Bearer <token>; defaults to $RELIC_HTTP_TOKEN"),
+    ] = None,
+) -> None:
+    """Serve connector and ingest status over HTTP for the web app.
+
+    GET /v1/connectors, GET /v1/ingest/runs, GET /v1/status. Reads the ingest
+    checkpoints on disk, so it needs no graph connection or OpenAI key.
+    """
+    import os
+
+    import uvicorn
+
+    from relic.obs import get_logger
+    from relic.serve import build_http_app
+
+    log = get_logger("serve-http")
+
+    async def connectors() -> dict[str, Any]:
+        return _connector_status()
+
+    async def ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
+        return _ingest_runs(repo, limit)
+
+    api = build_http_app(
+        connectors=connectors,
+        ingest_runs=ingest_runs,
+        token=token or os.environ.get("RELIC_HTTP_TOKEN"),
+    )
+    log.info("serving connector status on http://%s:%d (GET /v1/connectors)", host, port)
+    uvicorn.run(api, host=host, port=port, log_level="info")
 
 
 @app.command()

@@ -58,6 +58,10 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 
 - **Recall.** A general `recall` that returns facts with sources, over the CLI and
   as an MCP `recall_memory` tool, alongside the narrower `query`.
+- **HTTP status surface.** `serve-http` exposes connector and ingest status as an
+  HTTP API (`GET /v1/connectors`, `GET /v1/ingest/runs`) for the web app's
+  connector control plane. First HTTP surface on relic-core, reads the ingest
+  checkpoints so it needs no graph. See [CLI reference](/cli-reference).
 - **The scorecard.** `eval` measures recall against a gold set, so retrieval
   changes are measured rather than guessed.
 - **doctor.** A read-only setup health check.

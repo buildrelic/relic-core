@@ -212,6 +212,27 @@ long-running command. See [Skills](/skills).
 relic serve
 ```
 
+### relic serve-http
+
+Serve connector and ingest status over HTTP for the web app. `GET /v1/connectors`
+returns each source's sync status, `GET /v1/ingest/runs` returns run history plus
+totals, `GET /v1/status` is a liveness check. Long-running. Reads the ingest
+checkpoints on disk, so it needs no graph connection or `OPENAI_API_KEY`. Recall
+is not here: that is an agent feature, served over MCP by `relic serve`.
+
+```
+relic serve-http [--host HOST] [--port PORT] [--token TOKEN]
+```
+
+- `--host` (optional, default `127.0.0.1`): bind host.
+- `--port` (optional, default `8787`): bind port.
+- `--token` (optional): when set, the data routes require `Authorization: Bearer <token>`. Defaults to `RELIC_HTTP_TOKEN`. Leave unset for local dev.
+
+```bash
+uv run relic serve-http --port 8787
+curl "http://127.0.0.1:8787/v1/connectors"
+```
+
 ## Diagnostics
 
 ### relic doctor
@@ -256,6 +277,7 @@ relic compile --skill ARCHETYPE
 | `emit` | `--repo` | none | no |
 | `catalog` | none | none | no |
 | `serve` | none | none | optional |
+| `serve-http` | none | `--host`, `--port`, `--token` | no |
 | `doctor` | none | none | no |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

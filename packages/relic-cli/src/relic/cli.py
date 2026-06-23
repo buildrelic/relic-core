@@ -441,6 +441,7 @@ async def _ingest(
         progress_label=f"ingesting {repo}",
         log=log,
     )
+    _record_run(stats, repo)
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - ingest_start
@@ -525,6 +526,7 @@ async def _load(
         progress_label=f"extracting {repo}",
         log=log,
     )
+    _record_run(stats, repo)
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - load_start
@@ -683,6 +685,45 @@ async def _serve() -> None:
             await engram.close()
 
 
+# Run-history ledger: ingest/load append a record here as they complete;
+# serve-http's /v1/ingest/runs reads it. JSONL, one run per line.
+_RUNS_LEDGER = Path("data/ingest/runs.jsonl")
+
+
+def _record_run(stats: "LoadStats", repo: str, *, source: str = "GitHub") -> None:
+    """Append a run record to the run-history ledger, for the web app's Ingest view.
+
+    Called after extraction completes (so a capture-only --no-load run records
+    nothing). Shapes the LoadStats into the JSON the web app's adapter expects.
+    """
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    finished = datetime.now(UTC)
+    started = finished - timedelta(seconds=stats.duration_s)
+    note: str | None = None
+    if stats.failures:
+        first = stats.failures[0]
+        reason = first[1] if len(first) > 1 else ""
+        note = f"{stats.failed} failed: {reason}".strip().rstrip(": ")
+    record = {
+        "id": f"{stats.group_id}-{int(finished.timestamp() * 1000)}",
+        "repo": repo,
+        "source": source,
+        "startedAt": started.isoformat(),
+        "durationSeconds": round(stats.duration_s, 1),
+        "attempted": stats.attempted,
+        "loaded": stats.loaded,
+        "skipped": stats.skipped,
+        "failed": stats.failed,
+        "status": "failed" if stats.failed and stats.loaded == 0 else "success",
+        "note": note,
+    }
+    _RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with _RUNS_LEDGER.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
 def _connector_status() -> dict[str, Any]:
     """Synthesize per-source sync status from the on-disk ingest checkpoints.
 
@@ -714,9 +755,7 @@ def _connector_status() -> dict[str, Any]:
             elif name.startswith("Issue "):
                 linear_items += 1
 
-    last_sync = (
-        datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
-    )
+    last_sync = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
     return {
         "connectors": [
             {
@@ -754,7 +793,7 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     from relic.ingest import load_done
 
     runs: list[dict[str, Any]] = []
-    runs_path = Path("data/ingest/runs.jsonl")
+    runs_path = _RUNS_LEDGER
     if runs_path.exists():
         for raw in runs_path.read_text(encoding="utf-8").splitlines():
             raw = raw.strip()
@@ -781,9 +820,7 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     sources_connected = sum(
         1 for key in (settings.github_token, settings.linear_api_key) if key
     ) or (1 if total else 0)
-    last_run = (
-        datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
-    )
+    last_run = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
     return {
         "runs": runs,
         "totals": {

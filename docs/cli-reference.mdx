@@ -217,8 +217,10 @@ relic serve
 Serve connector and ingest status over HTTP for the web app. `GET /v1/connectors`
 returns each source's sync status, `GET /v1/ingest/runs` returns run history plus
 totals, `GET /v1/status` is a liveness check. Long-running. Reads the ingest
-checkpoints on disk, so it needs no graph connection or `OPENAI_API_KEY`. Recall
-is not here: that is an agent feature, served over MCP by `relic serve`.
+checkpoints on disk, so it needs no graph connection or `OPENAI_API_KEY`. Run
+history comes from `data/ingest/runs.jsonl`, which `relic ingest` and `relic
+load` append to as each run completes. Recall is not here: that is an agent
+feature, served over MCP by `relic serve`.
 
 ```
 relic serve-http [--host HOST] [--port PORT] [--token TOKEN]

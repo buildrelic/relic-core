@@ -58,6 +58,9 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 
 - **Recall.** A general `recall` that returns facts with sources, over the CLI and
   as an MCP `recall_memory` tool, alongside the narrower `query`.
+- **HTTP recall.** `serve-http` exposes recall as an HTTP API (`GET /v1/recall`)
+  for the web app, returning the facts and their sources as JSON. First HTTP
+  surface on relic-core. See [CLI reference](/cli-reference).
 - **The scorecard.** `eval` measures recall against a gold set, so retrieval
   changes are measured rather than guessed.
 - **doctor.** A read-only setup health check.

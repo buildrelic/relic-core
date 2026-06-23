@@ -6,7 +6,7 @@ phase.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from relic.config import Settings
     from relic.contracts import EpisodeSpec
-    from relic.graph import LoadStats
+    from relic.graph import LoadStats, RecallAnswer
 
 app = typer.Typer(
     name="relic",
@@ -680,6 +680,106 @@ async def _serve() -> None:
         conn.close()
         if engram is not None:
             await engram.close()
+
+
+def _answer_to_dict(answer: "RecallAnswer") -> dict[str, Any]:
+    """Serialize a RecallAnswer to the JSON shape the web app consumes.
+
+    The MCP path returns format_answer()'s human string; the HTTP path returns
+    the struct so the web app keeps each fact and its sources separate (it draws
+    a citation chip per source).
+    """
+    return {
+        "query": answer.query,
+        "facts": [
+            {
+                "fact": fact.fact,
+                "relation": fact.relation,
+                "sources": [{"label": s.label, "url": s.url} for s in fact.sources],
+            }
+            for fact in answer.facts
+        ],
+    }
+
+
+def _make_http_recall_fn(
+    settings: "Settings", log: "logging.Logger"
+) -> tuple[
+    "Callable[[str, str | None, int], Awaitable[dict[str, Any]]]",
+    "Callable[[], Awaitable[None]]",
+]:
+    """Build the HTTP recall function and its shutdown hook.
+
+    The engram (FalkorDB + LLM clients) is built lazily on the first recall and
+    reused, not at boot: ``make_engram`` connects eagerly, so building it at boot
+    would crash the server whenever the graph is down. If it can't be built, the
+    call degrades to an empty answer (matching ``recall``'s never-raise contract)
+    and the next call retries, so the server recovers once FalkorDB is up.
+    """
+    holder: dict[str, Any] = {"engram": None}
+
+    async def recall_fn(
+        query: str, repo: str | None = None, num_results: int = 10
+    ) -> dict[str, Any]:
+        from relic.graph import recall
+        from relic.ingest import repo_group_id
+
+        engram = holder["engram"]
+        if engram is None:
+            from relic.graph import make_engram
+
+            try:
+                engram = make_engram(
+                    host=settings.falkordb_host,
+                    port=settings.falkordb_port,
+                    password=settings.falkordb_password,
+                    database=settings.falkordb_database,
+                    api_key=settings.openai_api_key,
+                )
+            except Exception as exc:  # noqa: BLE001 - graph may be down; degrade to empty
+                log.warning("recall unavailable (graph not reachable): %s", exc)
+                return {"query": query, "facts": []}
+            holder["engram"] = engram
+
+        group_id = repo_group_id(repo) if repo else None
+        answer = await recall(engram, query, group_id=group_id, num_results=num_results)
+        return _answer_to_dict(answer)
+
+    async def close() -> None:
+        engram = holder["engram"]
+        if engram is not None:
+            await engram.close()
+
+    return recall_fn, close
+
+
+@app.command(name="serve-http")
+def serve_http(
+    host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="bind port")] = 8787,
+    token: Annotated[
+        str | None,
+        typer.Option(help="require Authorization: Bearer <token>; defaults to $RELIC_HTTP_TOKEN"),
+    ] = None,
+) -> None:
+    """Serve memory recall over HTTP for the web app: GET /v1/recall, GET /v1/status."""
+    import os
+
+    import uvicorn
+
+    from relic.config import get_settings
+    from relic.obs import get_logger
+    from relic.serve import build_http_app
+
+    log = get_logger("serve-http")
+    recall_fn, close = _make_http_recall_fn(get_settings(), log)
+    api = build_http_app(
+        recall_fn,
+        token=token or os.environ.get("RELIC_HTTP_TOKEN"),
+        on_shutdown=[close],
+    )
+    log.info("serving recall on http://%s:%d (GET /v1/recall)", host, port)
+    uvicorn.run(api, host=host, port=port, log_level="info")
 
 
 @app.command()

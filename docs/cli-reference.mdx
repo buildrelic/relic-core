@@ -212,6 +212,26 @@ long-running command. See [Skills](/skills).
 relic serve
 ```
 
+### relic serve-http
+
+Serve memory recall over HTTP for the web app. `GET /v1/recall` returns facts
+with their sources as JSON, `GET /v1/status` is a liveness check. Long-running.
+The engram is built on the first recall, so the server starts even when the
+graph is down and degrades to an empty answer until it is up.
+
+```
+relic serve-http [--host HOST] [--port PORT] [--token TOKEN]
+```
+
+- `--host` (optional, default `127.0.0.1`): bind host.
+- `--port` (optional, default `8787`): bind port.
+- `--token` (optional): when set, `/v1/recall` requires `Authorization: Bearer <token>`. Defaults to `RELIC_HTTP_TOKEN`. Leave unset for local dev.
+
+```bash
+uv run relic serve-http --port 8787
+curl "http://127.0.0.1:8787/v1/recall?q=who+reviews+auth&repo=owner/name"
+```
+
 ## Diagnostics
 
 ### relic doctor
@@ -256,6 +276,7 @@ relic compile --skill ARCHETYPE
 | `emit` | `--repo` | none | no |
 | `catalog` | none | none | no |
 | `serve` | none | none | optional |
+| `serve-http` | none | `--host`, `--port`, `--token` | optional |
 | `doctor` | none | none | no |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

@@ -831,6 +831,31 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     }
 
 
+# Repo -> the running `relic ingest` subprocess, so a second trigger for the same
+# repo while one is in flight is a conflict, not a duplicate run.
+_INGEST_PROCS: dict[str, Any] = {}
+
+
+def _trigger_ingest(repo: str) -> dict[str, Any]:
+    """Kick off a background ingest for ``repo`` and return its status.
+
+    Spawns `relic ingest --repo <repo>` as a subprocess, isolated from the
+    server's event loop. The checkpoint makes it effectively incremental: a
+    re-run only extracts episodes that are new, so a webhook can call this on
+    every push and only the new PR or issue gets loaded. A single-item fetch is a
+    later optimization that would avoid re-fetching the whole repo each time.
+    """
+    import subprocess
+    import sys
+
+    running = _INGEST_PROCS.get(repo)
+    if running is not None and running.poll() is None:
+        return {"status": "already_running", "repo": repo}
+    proc = subprocess.Popen([sys.executable, "-m", "relic", "ingest", "--repo", repo])  # noqa: S603
+    _INGEST_PROCS[repo] = proc
+    return {"status": "running", "repo": repo}
+
+
 @app.command(name="serve-http")
 def serve_http(
     host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
@@ -840,10 +865,11 @@ def serve_http(
         typer.Option(help="require Authorization: Bearer <token>; defaults to $RELIC_HTTP_TOKEN"),
     ] = None,
 ) -> None:
-    """Serve connector and ingest status over HTTP for the web app.
+    """Serve connector status and the ingest trigger over HTTP for the web app.
 
-    GET /v1/connectors, GET /v1/ingest/runs, GET /v1/status. Reads the ingest
-    checkpoints on disk, so it needs no graph connection or OpenAI key.
+    GET /v1/connectors, GET /v1/ingest/runs, GET /v1/status, POST /v1/ingest.
+    Status reads the ingest checkpoints on disk (no graph needed); the trigger
+    spawns `relic ingest`, so a full run still needs FalkorDB and the source keys.
     """
     import os
 
@@ -860,12 +886,16 @@ def serve_http(
     async def ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
         return _ingest_runs(repo, limit)
 
+    async def ingest_trigger(repo: str) -> dict[str, Any]:
+        return _trigger_ingest(repo)
+
     api = build_http_app(
         connectors=connectors,
         ingest_runs=ingest_runs,
+        ingest_trigger=ingest_trigger,
         token=token or os.environ.get("RELIC_HTTP_TOKEN"),
     )
-    log.info("serving connector status on http://%s:%d (GET /v1/connectors)", host, port)
+    log.info("serving connector status + ingest trigger on http://%s:%d", host, port)
     uvicorn.run(api, host=host, port=port, log_level="info")
 
 

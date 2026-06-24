@@ -877,7 +877,7 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
 _INGEST_PROCS: dict[str, Any] = {}
 
 
-def _trigger_ingest(repo: str) -> dict[str, Any]:
+def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
     """Kick off a background ingest for ``repo`` and return its status.
 
     Spawns `relic ingest --repo <repo>` as a subprocess, isolated from the
@@ -885,14 +885,24 @@ def _trigger_ingest(repo: str) -> dict[str, Any]:
     re-run only extracts episodes that are new, so a webhook can call this on
     every push and only the new PR or issue gets loaded. A single-item fetch is a
     later optimization that would avoid re-fetching the whole repo each time.
+
+    ``token`` is the connecting user's GitHub token, so ingest reads their repos
+    and not just ours. It goes to the child through its environment, never argv,
+    so it does not leak to the process list. The child's settings.github_token
+    picks it up; no token means the child inherits the server's own credentials
+    (its GITHUB_TOKEN, else its `gh auth` login).
     """
+    import os
     import subprocess
     import sys
 
     running = _INGEST_PROCS.get(repo)
     if running is not None and running.poll() is None:
         return {"status": "already_running", "repo": repo}
-    proc = subprocess.Popen([sys.executable, "-m", "relic", "ingest", "--repo", repo])  # noqa: S603
+    env = {**os.environ, "GITHUB_TOKEN": token} if token else None
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-m", "relic", "ingest", "--repo", repo], env=env
+    )
     _INGEST_PROCS[repo] = proc
     return {"status": "running", "repo": repo}
 
@@ -927,8 +937,8 @@ def serve_http(
     async def ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
         return _ingest_runs(repo, limit)
 
-    async def ingest_trigger(repo: str) -> dict[str, Any]:
-        return _trigger_ingest(repo)
+    async def ingest_trigger(repo: str, token: str | None) -> dict[str, Any]:
+        return _trigger_ingest(repo, token)
 
     api = build_http_app(
         connectors=connectors,

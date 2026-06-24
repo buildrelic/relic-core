@@ -1,0 +1,174 @@
+---
+title: "Web app HTTP contract"
+icon: "browser"
+description: "What the landing web app expects from relic serve-http: the endpoints, JSON shapes, auth, and the open per-user-token gap (REL-102)."
+---
+
+This page is the handoff from the web app (Zidan, the landing repo) to relic-core's
+HTTP API (`relic serve-http`). It pins what the web app calls, the exact shapes it
+expects back, and the one gap that blocks external teams. The web app and relic-core
+do not share a database, so this HTTP API is the only seam. Read it before changing
+`relic serve-http`, the ingest trigger, or the connector and ingest status endpoints.
+
+The shapes here mirror `lib/relic/client.ts` in the landing repo. That file is the
+executable definition. If a shape here disagrees with the code, the code wins and
+this page is stale.
+
+## Ownership boundary
+
+The web app owns Clerk identity and its own Firestore store: connector config,
+per-user OAuth tokens, selected repos, ui state. relic-core does not read Firestore.
+When relic-core needs something the web app holds, the web app passes it over this
+API.
+
+relic-core owns the graph, ingest, recall, and this HTTP API.
+
+Recall stays on MCP. `relic serve` exposes a `recall_memory` tool over MCP. Do not
+add a recall HTTP endpoint or a web recall surface. One was built and removed (PR #28
+closed). The web app is a connector control plane, not a recall ui.
+
+## Auth and transport
+
+The web app calls this API server-side, from code already behind its Clerk gate. The
+base url is `RELIC_CORE_API_URL`. When `RELIC_HTTP_TOKEN` is set, the web app sends
+`Authorization: Bearer <token>`, matching `relic serve-http --token`.
+
+This is single-tenant today: our own org, one graph, one github token. Multi-tenant
+scoping is net-new. See REL-102 and the multi-tenancy section.
+
+## Endpoints (built, keep stable)
+
+### GET /v1/connectors
+
+Per-source connection state and counts, synthesized from the on-disk ingest
+checkpoints. No graph needed. The web app calls this to overlay live status onto its
+static connector catalog.
+
+```json
+{ "connectors": [
+  {
+    "source": "github",
+    "connected": true,
+    "itemCount": 84,
+    "itemLabel": "commits",
+    "lastSyncAt": "2026-06-24T01:00:00Z",
+    "repos": ["buildrelic/relic-core"]
+  }
+]}
+```
+
+`lastSyncAt` is ISO 8601 or null. `source` is `github`, `linear`, and so on.
+
+### GET /v1/ingest/runs
+
+Run history plus rollup totals. Query params: `repo` (optional, filter to one repo)
+and `limit` (default 50). The web app fans out one call per connected repo and merges
+the results.
+
+```json
+{
+  "runs": [
+    {
+      "id": "r1",
+      "repo": "buildrelic/relic-core",
+      "source": "GitHub",
+      "startedAt": "2026-06-24T00:54:00Z",
+      "durationSeconds": 64,
+      "attempted": 90,
+      "loaded": 84,
+      "skipped": 6,
+      "failed": 0,
+      "status": "success",
+      "note": "optional human note"
+    }
+  ],
+  "totals": { "memories": 14820, "sourcesConnected": 2, "lastRunAt": "2026-06-24T00:55:00Z" }
+}
+```
+
+`status` is `success`, `running`, or `failed`. `startedAt` and `lastRunAt` are ISO or
+null.
+
+One thing to confirm. The web app merges per-repo responses by summing
+`totals.memories` and taking the max `lastRunAt`. That assumes per-repo totals are
+scoped to the repo. If `/v1/ingest/runs?repo=X` returns global totals, the sum
+overcounts. Tell Zidan which it is and the web app changes its merge to match.
+
+### GET /v1/status
+
+Health and liveness. The web app uses it for the live-versus-mock decision.
+
+### POST /v1/ingest
+
+Trigger an ingest of one repo. The github webhook calls this on `pull_request.closed`
+and `issues` events. The checkpoint makes the re-run incremental.
+
+```json
+{ "repo": "owner/name" }
+```
+
+Returns 202 when the run is accepted (spawns `relic ingest`), 409 when a run for that
+repo is already in flight.
+
+This endpoint is where REL-102 lives.
+
+## REL-102: the per-user-token gap
+
+<Warning>
+This is the blocker for any team that is not us. Everything else at the seam works.
+</Warning>
+
+Today `POST /v1/ingest` takes only `{repo}`, and `relic ingest` authenticates with
+relic-core's own `GITHUB_TOKEN` through `resolve_github_token`. It can only read repos
+that one token sees. That works for our org. It does not work for an external team,
+whose connected token is never used.
+
+The web app already holds what is needed, server-side, per Clerk org and user, in
+Firestore:
+
+- the user's github oauth `accessToken`
+- the github app `installationId`
+- the selected `repos`
+
+The proposed change, to agree on with Paris before building. `POST /v1/ingest`
+accepts a per-request credential. Either `{ repo, token }`, where the web app passes
+the Firestore token, or `{ repo, installationId }`, where relic-core mints an
+installation token from the app private key. The web app passing the token is simpler
+and keeps relic-core stateless on user secrets. Minting from `installationId` is the
+alternative if relic-core should hold the app private key.
+
+Same story for linear once a linear ingest path exists. The web app stores the linear
+token, but nothing consumes it, and there is no linear webhook receiver yet.
+
+Once the endpoint accepts a token, the web app plumbs the Firestore token through its
+webhook and connect flow. That part is small.
+
+## Multi-tenancy
+
+For external teams, not our own org.
+
+- **Per-tenant graph isolation.** Graph data scoped per org, with FalkorDB `group_id`
+  as the lever, so one team cannot recall another team's memory. Served recall carries
+  the tenant scope. Today there is one shared graph.
+- **A hosted, per-user-authed MCP endpoint.** External partners need something to
+  point their agent at. Recall is local stdio today.
+
+These are backend-owned and gate the real launch. The connector control plane on the
+web side is done.
+
+## What the web app already handles
+
+So relic-core does not duplicate it: the connect and auth ui, oauth flows and csrf,
+token storage in Firestore, the github webhook receipt with hmac verification and
+uninstall cleanup, the connectors, ingest, and settings pages, and org members and
+roles through Clerk. At the seam, relic-core's job is narrow. Serve the four endpoints
+above with these shapes, accept a per-tenant token on `/v1/ingest`, and keep recall on
+MCP.
+
+## Linear
+
+- **REL-102.** Per-user and per-tenant token in ingest, Paris. The blocker.
+- **REL-76.** The HTTP API. Built, extend for REL-102.
+- Per-tenant graph isolation, Abhinav. Single-item fetch primitive, Paris, an
+  optimization. Run-record persistence is done (`data/ingest/runs.jsonl`), confirm
+  `/v1/ingest/runs` surfaces per-run history.

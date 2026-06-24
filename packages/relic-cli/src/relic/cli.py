@@ -730,8 +730,10 @@ def _connector_status() -> dict[str, Any]:
     Reads the per-repo checkpoint ledgers under data/ingest/ (the only persisted
     ingest state) plus which source keys are configured. No graph connection: the
     connector control plane only needs what has landed and when. Episode names
-    carry the source: "PR owner/name#42" and "Issue owner/name#7" are GitHub,
-    "Issue REL-10" is Linear.
+    carry the source and type: "PR owner/name#42" is a github pull request,
+    "Issue owner/name#7" a github issue, "Issue REL-10" a Linear issue. Counts,
+    repos, and last-sync are tracked per source so one source's activity never
+    bleeds into the other's connector card.
     """
     from datetime import datetime
 
@@ -742,37 +744,53 @@ def _connector_status() -> dict[str, Any]:
     base = Path("data/ingest")
     ledgers = sorted(base.glob("*.log")) if base.exists() else []
 
-    github_items = 0
-    linear_items = 0
-    repos: list[str] = []
-    last_mtime = 0.0
+    github_prs = 0
+    linear_issues = 0
+    github_repos: list[str] = []
+    linear_repos: list[str] = []
+    github_mtime = 0.0
+    linear_mtime = 0.0
     for ledger in ledgers:
-        repos.append(ledger.stem.replace("__", "/"))
-        last_mtime = max(last_mtime, ledger.stat().st_mtime)
+        repo = ledger.stem.replace("__", "/")
+        mtime = ledger.stat().st_mtime
+        has_github = False
+        has_linear = False
         for name in load_done(ledger):
-            if "#" in name:
-                github_items += 1
-            elif name.startswith("Issue "):
-                linear_items += 1
+            if name.startswith("PR "):
+                github_prs += 1
+                has_github = True
+            elif "#" in name:  # "Issue owner/name#7": a github issue
+                has_github = True
+            elif name.startswith("Issue "):  # "Issue REL-10": a linear issue
+                linear_issues += 1
+                has_linear = True
+        if has_github:
+            github_repos.append(repo)
+            github_mtime = max(github_mtime, mtime)
+        if has_linear:
+            linear_repos.append(repo)
+            linear_mtime = max(linear_mtime, mtime)
 
-    last_sync = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
+    def _iso(mtime: float) -> str | None:
+        return datetime.fromtimestamp(mtime, tz=UTC).isoformat() if mtime else None
+
     return {
         "connectors": [
             {
                 "source": "github",
-                "connected": bool(settings.github_token) or github_items > 0,
-                "itemCount": github_items,
+                "connected": bool(settings.github_token) or bool(github_repos),
+                "itemCount": github_prs,
                 "itemLabel": "pull requests",
-                "lastSyncAt": last_sync if github_items else None,
-                "repos": repos,
+                "lastSyncAt": _iso(github_mtime),
+                "repos": github_repos,
             },
             {
                 "source": "linear",
-                "connected": bool(settings.linear_api_key) or linear_items > 0,
-                "itemCount": linear_items,
+                "connected": bool(settings.linear_api_key) or bool(linear_repos),
+                "itemCount": linear_issues,
                 "itemLabel": "issues",
-                "lastSyncAt": last_sync if linear_items else None,
-                "repos": repos if linear_items else [],
+                "lastSyncAt": _iso(linear_mtime),
+                "repos": linear_repos,
             },
         ]
     }
@@ -790,7 +808,7 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     from datetime import datetime
 
     from relic.config import get_settings
-    from relic.ingest import load_done
+    from relic.ingest import checkpoint_path, load_done, repo_group_id
 
     runs: list[dict[str, Any]] = []
     runs_path = _RUNS_LEDGER
@@ -808,8 +826,15 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
             runs.append(record)
     runs = runs[-limit:][::-1]
 
-    base = Path("data/ingest")
-    ledgers = sorted(base.glob("*.log")) if base.exists() else []
+    # totals: when a repo is given, scope to that repo's ledger only. the web app
+    # fans out one /v1/ingest/runs call per connected repo and sums totals.memories,
+    # so a global total here would overcount once more than one repo is connected.
+    if repo:
+        repo_ledger = checkpoint_path(repo_group_id(repo))
+        ledgers = [repo_ledger] if repo_ledger.exists() else []
+    else:
+        base = Path("data/ingest")
+        ledgers = sorted(base.glob("*.log")) if base.exists() else []
     total = 0
     last_mtime = 0.0
     for ledger in ledgers:

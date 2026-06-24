@@ -104,44 +104,51 @@ Trigger an ingest of one repo. The github webhook calls this on `pull_request.cl
 and `issues` events. The checkpoint makes the re-run incremental.
 
 ```json
-{ "repo": "owner/name" }
+{ "repo": "owner/name", "token": "gho_... (optional)" }
 ```
 
+`token` is the connecting user's github oauth token. When set, ingest authenticates as
+that user and reads their repos. When absent or blank, ingest falls back to the
+server's own credentials. The token lives in the request body only: relic-core hands it
+to the ingest process through the environment, never argv, and never logs, stores, or
+returns it. A malformed token (whitespace, control bytes, over 255 chars) is rejected
+with 400 rather than run as the wrong identity.
+
 Returns 202 when the run is accepted (spawns `relic ingest`), 409 when a run for that
-repo is already in flight.
+repo is already in flight, and 400 for a non-JSON body, a repo that is not
+`owner/name`, or a malformed token.
 
 This endpoint is where REL-102 lives.
 
 ## REL-102: the per-user-token gap
 
 <Warning>
-This is the blocker for any team that is not us. Everything else at the seam works.
+The relic-core half is done. `POST /v1/ingest` now accepts a per-user `token`. The
+remaining gap is the web app sending it: until landing plumbs the token through, an
+external team's ingest still runs as our `GITHUB_TOKEN`.
 </Warning>
 
-Today `POST /v1/ingest` takes only `{repo}`, and `relic ingest` authenticates with
-relic-core's own `GITHUB_TOKEN` through `resolve_github_token`. It can only read repos
-that one token sees. That works for our org. It does not work for an external team,
-whose connected token is never used.
+`relic ingest` authenticated only with relic-core's own `GITHUB_TOKEN` through
+`resolve_github_token`, so it could read only the repos that one token sees. That works
+for our org. It did not work for an external team, whose connected token was never used.
 
 The web app already holds what is needed, server-side, per Clerk org and user, in
-Firestore:
+Firestore: the user's github oauth `accessToken`, the github app `installationId`, and
+the selected `repos`.
 
-- the user's github oauth `accessToken`
-- the github app `installationId`
-- the selected `repos`
+relic-core now closes its side. `POST /v1/ingest` accepts `{ repo, token }`. The token
+overrides `GITHUB_TOKEN` for that one run, and falls back to the server token when it is
+absent. relic-core stays stateless on user secrets: it hands the token to the ingest
+process through the environment, never argv, and never logs or stores it. Minting a
+token from `installationId` is the alternative if relic-core should ever hold the app
+private key. Not built.
 
-The proposed change, to agree on with Paris before building. `POST /v1/ingest`
-accepts a per-request credential. Either `{ repo, token }`, where the web app passes
-the Firestore token, or `{ repo, installationId }`, where relic-core mints an
-installation token from the app private key. The web app passing the token is simpler
-and keeps relic-core stateless on user secrets. Minting from `installationId` is the
-alternative if relic-core should hold the app private key.
+What is left is on landing: plumb the Firestore `accessToken` into the webhook and
+connect flow so the trigger call carries it. That part is small, and rides on the
+connector-config work (REL-104).
 
 Same story for linear once a linear ingest path exists. The web app stores the linear
 token, but nothing consumes it, and there is no linear webhook receiver yet.
-
-Once the endpoint accepts a token, the web app plumbs the Firestore token through its
-webhook and connect flow. That part is small.
 
 ## Multi-tenancy
 
@@ -167,8 +174,10 @@ MCP.
 
 ## Linear
 
-- **REL-102.** Per-user and per-tenant token in ingest, Paris. The blocker.
-- **REL-76.** The HTTP API. Built, extend for REL-102.
+- **REL-102.** Per-user token in ingest. relic-core's `POST /v1/ingest` accepts
+  `{repo, token}` and runs ingest as that token. Landing still has to send the Firestore
+  token through its webhook and connect flow.
+- **REL-76.** The HTTP API. Built.
 - Per-tenant graph isolation, Abhinav. Single-item fetch primitive, Paris, an
   optimization. Run-record persistence is done (`data/ingest/runs.jsonl`), confirm
   `/v1/ingest/runs` surfaces per-run history.

@@ -27,11 +27,27 @@ from starlette.routing import Route
 ConnectorsFn = Callable[[], Awaitable[dict[str, Any]]]
 # (repo | None, limit) -> {"runs": [...], "totals": {...}}
 IngestRunsFn = Callable[[str | None, int], Awaitable[dict[str, Any]]]
-# (repo) -> {"status": "running" | "already_running", "repo": ...}
-IngestTriggerFn = Callable[[str], Awaitable[dict[str, Any]]]
+# (repo, token | None) -> {"status": "running" | "already_running", "repo": ...}
+IngestTriggerFn = Callable[[str, str | None], Awaitable[dict[str, Any]]]
 
 _MAX_LIMIT = 200
 _DEFAULT_LIMIT = 50
+_MAX_TOKEN_LEN = 255
+
+
+def _valid_token(token: str) -> bool:
+    """A per-user github token must be short and printable with no whitespace.
+
+    The child's Settings._clean_secret nulls a token with whitespace or a leading
+    `#`, after which ingest falls back to the server's own identity. Reject the same
+    shapes here, with a length bound, so a malformed token is a clean 400 instead of
+    a silent run as the wrong identity or a 500 from an unprintable byte.
+    """
+    return (
+        0 < len(token) <= _MAX_TOKEN_LEN
+        and not token.startswith("#")
+        and all(c.isprintable() and not c.isspace() for c in token)
+    )
 
 
 def build_http_app(
@@ -76,7 +92,15 @@ def build_http_app(
         repo = str(body.get("repo", "")).strip()
         if "/" not in repo:
             return JSONResponse({"error": "repo must be owner/name"}, status_code=400)
-        result = await ingest_trigger(repo)
+        # Optional per-user GitHub token: ingest authenticates as the connecting user
+        # so it reads their repos, not just ours. Absent or blank falls back to the
+        # server's own credentials. A malformed token is a 400, not a silent run as
+        # the wrong identity. Never logged or echoed back in the response.
+        raw_token = body.get("token")
+        user_token = raw_token.strip() if isinstance(raw_token, str) else ""
+        if user_token and not _valid_token(user_token):
+            return JSONResponse({"error": "invalid token"}, status_code=400)
+        result = await ingest_trigger(repo, user_token or None)
         # A run already in flight for this repo is a conflict, not a new job.
         code = 409 if result.get("status") == "already_running" else 202
         return JSONResponse(result, status_code=code)

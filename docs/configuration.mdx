@@ -50,6 +50,7 @@ optional, so importing config (and `relic --help`) never needs a populated `.env
 | `FALKORDB_DATABASE` | `relic` | graph commands | default graph for ungrouped data |
 | `REGISTRY_DB_PATH` | `./data/registry.db` | skill commands | SQLite registry location |
 | `TARGET_REPO` | none | optional | default `owner/name` for `recall`, `query`, `eval` |
+| `RELIC_HTTP_TOKEN` | none | `serve-http` (optional) | when set in the environment, `serve-http` requires `Authorization: Bearer <token>` on its data routes; the `--token` flag overrides it. Leave unset for local dev |
 | `FETCH_CONCURRENCY` | `10` | `ingest` | concurrent GitHub requests (rate-limit safe) |
 | `GRAPHITI_MAX_COROUTINES` | `20` | `ingest`, `load` | Graphiti internal LLM concurrency during load; lower to ~5 for the `gemini` provider (see note) |
 | `BULK_LOAD` | `false` | `ingest`, `load` | load via batched `add_episode_bulk` (also `--bulk`) |

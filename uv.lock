@@ -1462,6 +1462,7 @@ dependencies = [
     { name = "relic-serve" },
     { name = "rich" },
     { name = "typer" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -1473,6 +1474,7 @@ requires-dist = [
     { name = "relic-serve", editable = "packages/relic-serve" },
     { name = "rich", specifier = ">=13.7" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]
@@ -1540,6 +1542,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "jinja2" },
     { name = "relic-core" },
+    { name = "starlette" },
 ]
 
 [package.metadata]
@@ -1547,6 +1550,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3,<4" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "relic-core", editable = "packages/relic-core" },
+    { name = "starlette", specifier = ">=0.37" },
 ]
 
 [[package]]

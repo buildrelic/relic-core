@@ -8,6 +8,9 @@ dependencies = [
     "relic-core",
     "fastmcp>=3,<4",
     "jinja2>=3.1",
+    # Thin HTTP surface for the web app (relic/serve/http_server.py). Starlette
+    # ships under fastmcp already; declared here because we import it directly.
+    "starlette>=0.37",
 ]
 
 [build-system]

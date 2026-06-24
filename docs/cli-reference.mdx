@@ -212,6 +212,37 @@ long-running command. See [Skills](/skills).
 relic serve
 ```
 
+### relic serve-http
+
+Serve connector status and the ingest trigger over HTTP for the web app. `GET
+/v1/connectors` returns each source's sync status, `GET /v1/ingest/runs` returns
+run history plus totals, `GET /v1/status` is a liveness check, and `POST
+/v1/ingest` with `{"repo": "owner/name"}` kicks off an ingest. Long-running. The
+status routes read the ingest checkpoints on disk, so they need no graph
+connection or `OPENAI_API_KEY`; the trigger spawns `relic ingest`, so a full run
+still needs FalkorDB and the source keys. The checkpoint makes a re-run
+incremental (only new episodes are extracted), so a webhook can call `POST
+/v1/ingest` on every push and only the new PR or issue gets loaded; a repo with a
+run already in flight gets `409`. Run history comes from
+`data/ingest/runs.jsonl`, which `relic ingest` and `relic load` append to as each
+run completes. Recall is not here: that is an agent feature, served over MCP by
+`relic serve`.
+
+```
+relic serve-http [--host HOST] [--port PORT] [--token TOKEN]
+```
+
+- `--host` (optional, default `127.0.0.1`): bind host.
+- `--port` (optional, default `8787`): bind port.
+- `--token` (optional): when set, the data routes require `Authorization: Bearer <token>`. Defaults to `RELIC_HTTP_TOKEN`. Leave unset for local dev.
+
+```bash
+uv run relic serve-http --port 8787
+curl "http://127.0.0.1:8787/v1/connectors"
+curl -X POST -H 'content-type: application/json' \
+  -d '{"repo":"owner/name"}' "http://127.0.0.1:8787/v1/ingest"
+```
+
 ## Diagnostics
 
 ### relic doctor
@@ -256,6 +287,7 @@ relic compile --skill ARCHETYPE
 | `emit` | `--repo` | none | no |
 | `catalog` | none | none | no |
 | `serve` | none | none | optional |
+| `serve-http` | none | `--host`, `--port`, `--token` | no |
 | `doctor` | none | none | no |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

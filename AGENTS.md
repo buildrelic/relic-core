@@ -126,6 +126,8 @@ and code ship together, not in a follow-up.
 - A new env var or store: `docs/configuration.mdx`.
 - A schema, graph node, or episode change: `docs/data-model.mdx`.
 - A stub that became wired, or a phase that landed: `docs/roadmap.mdx`.
+- The HTTP API the web app consumes (`relic serve-http`), or the ingest trigger:
+  `docs/web-contract.mdx`. Read it before changing the seam.
 - A new page: add `title` and `description` frontmatter and list it in the right
   group in `docs/docs.json`.
 

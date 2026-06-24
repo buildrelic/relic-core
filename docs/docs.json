@@ -30,7 +30,7 @@
       },
       {
         "group": "Reference",
-        "pages": ["cli-reference", "configuration"]
+        "pages": ["cli-reference", "configuration", "web-contract"]
       },
       {
         "group": "Contributing",

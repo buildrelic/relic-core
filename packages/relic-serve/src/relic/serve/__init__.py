@@ -1,9 +1,10 @@
-"""Serve: deliver verified skills to coding agents.
+"""Serve: deliver verified skills to coding agents, and serve connector status.
 
-Public API for the serve subsystem: the MCP server, the file emitter, the catalog
-index, and the SKILL.md renderer. Other subsystems and the composition root import
+Public API for the serve subsystem: the MCP server, the HTTP server (connector
+and ingest status for the web app), the file emitter, the catalog index, and the
+SKILL.md renderer. Other subsystems and the composition root import
 ``from relic.serve import ...``. Serve depends only on ``relic.contracts`` and its
-own internals (registry, render) plus an injected ``RecallFn``: it never imports
+own internals (registry, render) plus injected providers: it never imports
 ingest or graph.
 """
 
@@ -16,10 +17,14 @@ from relic.serve.emit_files import (
     skill_dir,
     skill_path,
 )
+from relic.serve.http_server import ConnectorsFn, IngestRunsFn, build_http_app
 from relic.serve.mcp_server import build_server, input_schema
 from relic.serve.render import render
 
 __all__ = [
+    "ConnectorsFn",
+    "IngestRunsFn",
+    "build_http_app",
     "build_server",
     "emit_catalog",
     "emit_skill",

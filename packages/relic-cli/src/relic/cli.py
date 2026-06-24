@@ -5,8 +5,9 @@ import-clean. Heavier work is imported inside each command as it lands in its
 phase.
 """
 
+from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -440,6 +441,7 @@ async def _ingest(
         progress_label=f"ingesting {repo}",
         log=log,
     )
+    _record_run(stats, repo)
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - ingest_start
@@ -524,6 +526,7 @@ async def _load(
         progress_label=f"extracting {repo}",
         log=log,
     )
+    _record_run(stats, repo)
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - load_start
@@ -696,6 +699,245 @@ async def _serve(repo: str | None = None) -> None:
         conn.close()
         if engram is not None:
             await engram.close()
+
+
+# Run-history ledger: ingest/load append a record here as they complete;
+# serve-http's /v1/ingest/runs reads it. JSONL, one run per line.
+_RUNS_LEDGER = Path("data/ingest/runs.jsonl")
+
+
+def _record_run(stats: "LoadStats", repo: str, *, source: str = "GitHub") -> None:
+    """Append a run record to the run-history ledger, for the web app's Ingest view.
+
+    Called after extraction completes (so a capture-only --no-load run records
+    nothing). Shapes the LoadStats into the JSON the web app's adapter expects.
+    """
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    finished = datetime.now(UTC)
+    started = finished - timedelta(seconds=stats.duration_s)
+    note: str | None = None
+    if stats.failures:
+        first = stats.failures[0]
+        reason = first[1] if len(first) > 1 else ""
+        note = f"{stats.failed} failed: {reason}".strip().rstrip(": ")
+    record = {
+        "id": f"{stats.group_id}-{int(finished.timestamp() * 1000)}",
+        "repo": repo,
+        "source": source,
+        "startedAt": started.isoformat(),
+        "durationSeconds": round(stats.duration_s, 1),
+        "attempted": stats.attempted,
+        "loaded": stats.loaded,
+        "skipped": stats.skipped,
+        "failed": stats.failed,
+        "status": "failed" if stats.failed and stats.loaded == 0 else "success",
+        "note": note,
+    }
+    _RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with _RUNS_LEDGER.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _connector_status() -> dict[str, Any]:
+    """Synthesize per-source sync status from the on-disk ingest checkpoints.
+
+    Reads the per-repo checkpoint ledgers under data/ingest/ (the only persisted
+    ingest state) plus which source keys are configured. No graph connection: the
+    connector control plane only needs what has landed and when. Episode names
+    carry the source and type: "PR owner/name#42" is a github pull request,
+    "Issue owner/name#7" a github issue, "Issue REL-10" a Linear issue. Counts,
+    repos, and last-sync are tracked per source so one source's activity never
+    bleeds into the other's connector card.
+    """
+    from datetime import datetime
+
+    from relic.config import get_settings
+    from relic.ingest import load_done
+
+    settings = get_settings()
+    base = Path("data/ingest")
+    ledgers = sorted(base.glob("*.log")) if base.exists() else []
+
+    github_prs = 0
+    linear_issues = 0
+    github_repos: list[str] = []
+    linear_repos: list[str] = []
+    github_mtime = 0.0
+    linear_mtime = 0.0
+    for ledger in ledgers:
+        repo = ledger.stem.replace("__", "/")
+        mtime = ledger.stat().st_mtime
+        has_github = False
+        has_linear = False
+        for name in load_done(ledger):
+            if name.startswith("PR "):
+                github_prs += 1
+                has_github = True
+            elif "#" in name:  # "Issue owner/name#7": a github issue
+                has_github = True
+            elif name.startswith("Issue "):  # "Issue REL-10": a linear issue
+                linear_issues += 1
+                has_linear = True
+        if has_github:
+            github_repos.append(repo)
+            github_mtime = max(github_mtime, mtime)
+        if has_linear:
+            linear_repos.append(repo)
+            linear_mtime = max(linear_mtime, mtime)
+
+    def _iso(mtime: float) -> str | None:
+        return datetime.fromtimestamp(mtime, tz=UTC).isoformat() if mtime else None
+
+    return {
+        "connectors": [
+            {
+                "source": "github",
+                "connected": bool(settings.github_token) or bool(github_repos),
+                "itemCount": github_prs,
+                "itemLabel": "pull requests",
+                "lastSyncAt": _iso(github_mtime),
+                "repos": github_repos,
+            },
+            {
+                "source": "linear",
+                "connected": bool(settings.linear_api_key) or bool(linear_repos),
+                "itemCount": linear_issues,
+                "itemLabel": "issues",
+                "lastSyncAt": _iso(linear_mtime),
+                "repos": linear_repos,
+            },
+        ]
+    }
+
+
+def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
+    """Ingest run history plus totals.
+
+    Run records are appended to data/ingest/runs.jsonl as ingests complete; this
+    returns the most recent ``limit`` (filtered by repo when given), newest first.
+    ``totals`` is synthesized from the checkpoints so the page has live numbers
+    even before the first recorded run.
+    """
+    import json
+    from datetime import datetime
+
+    from relic.config import get_settings
+    from relic.ingest import checkpoint_path, load_done, repo_group_id
+
+    runs: list[dict[str, Any]] = []
+    runs_path = _RUNS_LEDGER
+    if runs_path.exists():
+        for raw in runs_path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if repo and record.get("repo") != repo:
+                continue
+            runs.append(record)
+    runs = runs[-limit:][::-1]
+
+    # totals: when a repo is given, scope to that repo's ledger only. the web app
+    # fans out one /v1/ingest/runs call per connected repo and sums totals.memories,
+    # so a global total here would overcount once more than one repo is connected.
+    if repo:
+        repo_ledger = checkpoint_path(repo_group_id(repo))
+        ledgers = [repo_ledger] if repo_ledger.exists() else []
+    else:
+        base = Path("data/ingest")
+        ledgers = sorted(base.glob("*.log")) if base.exists() else []
+    total = 0
+    last_mtime = 0.0
+    for ledger in ledgers:
+        total += len(load_done(ledger))
+        last_mtime = max(last_mtime, ledger.stat().st_mtime)
+
+    settings = get_settings()
+    sources_connected = sum(
+        1 for key in (settings.github_token, settings.linear_api_key) if key
+    ) or (1 if total else 0)
+    last_run = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
+    return {
+        "runs": runs,
+        "totals": {
+            "memories": total,
+            "sourcesConnected": sources_connected,
+            "lastRunAt": last_run,
+        },
+    }
+
+
+# Repo -> the running `relic ingest` subprocess, so a second trigger for the same
+# repo while one is in flight is a conflict, not a duplicate run.
+_INGEST_PROCS: dict[str, Any] = {}
+
+
+def _trigger_ingest(repo: str) -> dict[str, Any]:
+    """Kick off a background ingest for ``repo`` and return its status.
+
+    Spawns `relic ingest --repo <repo>` as a subprocess, isolated from the
+    server's event loop. The checkpoint makes it effectively incremental: a
+    re-run only extracts episodes that are new, so a webhook can call this on
+    every push and only the new PR or issue gets loaded. A single-item fetch is a
+    later optimization that would avoid re-fetching the whole repo each time.
+    """
+    import subprocess
+    import sys
+
+    running = _INGEST_PROCS.get(repo)
+    if running is not None and running.poll() is None:
+        return {"status": "already_running", "repo": repo}
+    proc = subprocess.Popen([sys.executable, "-m", "relic", "ingest", "--repo", repo])  # noqa: S603
+    _INGEST_PROCS[repo] = proc
+    return {"status": "running", "repo": repo}
+
+
+@app.command(name="serve-http")
+def serve_http(
+    host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="bind port")] = 8787,
+    token: Annotated[
+        str | None,
+        typer.Option(help="require Authorization: Bearer <token>; defaults to $RELIC_HTTP_TOKEN"),
+    ] = None,
+) -> None:
+    """Serve connector status and the ingest trigger over HTTP for the web app.
+
+    GET /v1/connectors, GET /v1/ingest/runs, GET /v1/status, POST /v1/ingest.
+    Status reads the ingest checkpoints on disk (no graph needed); the trigger
+    spawns `relic ingest`, so a full run still needs FalkorDB and the source keys.
+    """
+    import os
+
+    import uvicorn
+
+    from relic.obs import get_logger
+    from relic.serve import build_http_app
+
+    log = get_logger("serve-http")
+
+    async def connectors() -> dict[str, Any]:
+        return _connector_status()
+
+    async def ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
+        return _ingest_runs(repo, limit)
+
+    async def ingest_trigger(repo: str) -> dict[str, Any]:
+        return _trigger_ingest(repo)
+
+    api = build_http_app(
+        connectors=connectors,
+        ingest_runs=ingest_runs,
+        ingest_trigger=ingest_trigger,
+        token=token or os.environ.get("RELIC_HTTP_TOKEN"),
+    )
+    log.info("serving connector status + ingest trigger on http://%s:%d", host, port)
+    uvicorn.run(api, host=host, port=port, log_level="info")
 
 
 @app.command()

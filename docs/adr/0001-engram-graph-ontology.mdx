@@ -1,0 +1,248 @@
+---
+title: "Engram graph ontology"
+description: "Node types, edge types with (source, target) signatures and attributes, the multi-valued rule, and the connector-to-provides map for the five essential sources."
+icon: "diagram-project"
+---
+
+<Info>
+**Status:** accepted (2026-06-21). This is the schema the extraction work
+([REL-94](https://linear.app/buildrelic/issue/REL-94)) builds to. It defines the
+graph-facing types only. It does not change ingestion or extraction code.
+</Info>
+
+## Context
+
+Today the rich episode body lands mostly as episode text. Only a narrow node and
+edge set is extracted (`Person`, `Repo`, `PullRequest`, `Review`, `Issue`,
+`AUTHORED`, `REVIEWED`, `TOUCHES_PATH`, `REPORTS_TO` in
+[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py)).
+This record fixes the full target schema so the data we ingest becomes typed graph
+structure: nodes, edges, and attributes, under one ontology.
+
+It sits in the **flat graph layer** (layer 2 of the [data model](/data-model)). The
+rich ontology in `relic.ontology` stays the typed-API source of truth. These types
+are the Graphiti-facing mirror: flat scalar fields, no nested objects, no reserved
+names.
+
+Two framework facts shape every decision below, confirmed against `graphiti-core`
+0.29.1 and the Zep paper (arXiv:2501.13956):
+
+- **Writes are deterministic, extraction is not.** Graphiti writes through
+  predefined Cypher to keep the schema consistent, but *which* nodes and edges get
+  created is the LLM's call from the episode. So "edges are deterministic" is false:
+  determinism is a separate concern (REL-94's escape hatch), not a property of
+  choosing edges.
+- **Types are registered per `add_episode` call.** `entity_types` / `edge_types` /
+  `edge_type_map` are passed per episode
+  ([`load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/load.py)),
+  so the ontology can be scoped per source.
+
+## Scope
+
+The ontology covers the five planned-essential sources, mapping to four artifact
+types. Several sources collapse onto one type.
+
+| Source | Artifact type | `source_type` | Status |
+| -- | -- | -- | -- |
+| GitHub (PRs) | Pull request | `pull_request` | live |
+| GitHub, Linear | Issue | `issue` | live |
+| Notion, Granola | Document | `doc` | planned |
+| Slack | Conversation | `conversation` | planned |
+
+**Out of scope:** the other planned artifact types (`commit`, `release`, `ci_run`,
+`incident`, `discussion`). They stay contract-only until a connector feeds them:
+extend the graph on capture, not before. Commits and CI checks stay inline episode
+text. The procedure detector and compiler are a separate track.
+
+## The structural decisions
+
+### One vocabulary, scoped per source
+
+There is one `Person`, one `Label`, one `Decision`. A person who opens a Linear
+issue, gets mentioned in a Slack thread, and authors a Notion doc is one `Person`
+node. Source-specific types would shatter the graph into per-source islands and kill
+cross-source recall. Each source registers only the types that can occur in it (a
+`conversation` episode never sees `PullRequest`), which keeps extraction focused and
+`edge_type_map` tight.
+
+### Node-hood and edge-hood are earned by a live connector
+
+A thing becomes a node when something else needs to reference it and a connector
+feeds it. An edge gets a typed name when a connector's structured body already
+carries the link. Purely inferred cross-source links stay generic facts until
+measurement shows extraction can find them. This rule decided `Project` (node) vs
+`Cycle` (attribute), and the deferral of the Tier 3 edges below.
+
+### The multi-valued rule
+
+`labels`, touched `files`, `assignees`, `co_authors`, `participants` are lists.
+Graphiti entity attributes are flat scalars, so the rule is:
+
+> A multi-valued field becomes **edges to dedicated nodes** when its items are
+> entities (people, files, labels) or carry their own attributes (a file's
+> add/del, an action item's owner). It stays a flat **`list[str]` attribute** only
+> when items are bare strings with no per-item attributes and no traversal value.
+> Everything else stays **episode-body text**.
+
+This is gated on a spike, not a guess. A deterministic micro-test (no LLM) saved a
+Graphiti `EntityNode` to FalkorDB and read it back:
+
+- A `list[str]` attribute round-trips as a native FalkorDB array. Viable.
+- A `list[dict]` attribute is rejected: `Property values can only be of primitive
+  types or arrays of primitive types`.
+
+So per-file `additions`/`deletions`, `co_authors{name,email}`, and review records
+*cannot* be flat attributes. They are edges or they are text. Labels could be a
+`list[str]`, but become `Label` nodes anyway: a reused cross-artifact vocabulary
+earns "what else has this label" traversal.
+
+### Naming: the entity `name` carries the title
+
+The Graphiti `name` is the primary recall key (vector-embedded and BM25 indexed,
+paper §3.1) and the resolution key. So `name` is title-bearing, with the stable
+identifier kept as an attribute for exact-reference resolution. The identifier leads
+the PR/Issue name so identity holds even if a title drifts.
+
+| Node | `name` | Identifier attribute |
+| -- | -- | -- |
+| PullRequest | `relic-core#12 Add auth routing` | `number`, `url` |
+| Issue | `REL-42 Define the engram ontology` | `identifier`, `url` |
+| Document | the title | `url`, `version` |
+| Person | the full name | `github_login`, `email` |
+| Label, File | the label string, the path | (the name is the value) |
+
+The full body is not lost: the node `summary` distills it and the episode `content`
+keeps it verbatim and citable.
+
+### Reserved attribute names
+
+Graphiti reserves `uuid`, `name`, `group_id`, `labels`, `created_at`, `summary`,
+`attributes`, `name_embedding` (`validate_entity_types`). So a source create-time
+cannot be `created_at` (that collides with the node's graph-ingestion time). It is
+`opened_at` (PR, Issue) and `published_at` (Document). Identity strings live in
+`name`, never a custom attribute.
+
+## Node types
+
+`name` is shown for context; it is Graphiti's built-in, not a custom attribute. The
+listed attributes are the custom scalars.
+
+| Node | Custom scalar attributes |
+| -- | -- |
+| Person | full_name, preferred_name, email, github_login, slack_id, linear_id, profile_url, external_org |
+| Repo | full_name, url, default_branch |
+| PullRequest | number, title, state, url, opened_at, merged_at, base_ref, head_ref, time_to_merge_hours, first_review_at, approved_at, total_additions, total_deletions, changed_files |
+| Issue | identifier, title, state, url, source, opened_at, closed_at, priority, cycle |
+| Project | name, url, id, state |
+| Label | (none: the value is the `name`) |
+| File | (none: the path is the `name`) |
+| Document | title, doc_type, url, version, published_at, last_edited_at, status |
+| Conversation | title, medium, channel, occurred_at, url |
+| Decision \* | status, decided_at, url |
+| ActionItem \* | status, due_at, url |
+
+\* `Decision` and `ActionItem` are **provisional**: they are extracted from prose
+(Notion, Granola, Slack), not parsed from a structured body, so their quality is
+unproven. They are defined now and gated on measured extraction quality.
+
+`Document.doc_type` separates the shapes a `Document` spans: `wiki`, `meeting_notes`
+(Granola), `adr`, `runbook`, `reference`, and the rest of the `DocEpisodeBody`
+taxonomy. `Issue.source` is `github` or `linear`. `Issue.cycle` is a scalar string,
+not a node.
+
+## Edge types
+
+Edges are organized by how reliably they extract, which tracks whether a connector's
+structured body carries the link or the LLM must infer it.
+
+### Tier 1: body-derived (reliable)
+
+| Edge | (source to target) | Attributes | From body field |
+| -- | -- | -- | -- |
+| AUTHORED | Person to PullRequest, Person to Document | co_author | author, co_authors, doc authors |
+| REVIEWED | Person to PullRequest | state, submitted_at, comment | reviews[] |
+| REQUESTED_REVIEW | Person to PullRequest | — | requested_reviewers (user only) |
+| TOUCHES_PATH | PullRequest to File | additions, deletions | files[] |
+| HAS_LABEL | PullRequest to Label, Issue to Label | — | labels[] |
+| IN_REPO | PullRequest to Repo, Issue to Repo | — | repo |
+| IN_PROJECT | Issue to Project | — | (Linear) project |
+| ASSIGNED_TO | Issue to Person, ActionItem to Person | — | assignees, action-item owner |
+| PARENT_OF | Issue to Issue | — | parent |
+| CLOSES | PullRequest to Issue | relation | linked_issues[] |
+
+`co_author` is a bool on `AUTHORED`, because co-authors are `list[dict]` and cannot
+be a flat attribute. `ASSIGNED_TO` is reused for `ActionItem to Person`: a coarse
+edge whose `(source, target)` signature discriminates, the same move as `REVIEWED`.
+
+### Tier 2: prose-derived (provisional)
+
+| Edge | (source to target) | From |
+| -- | -- | -- |
+| PARTICIPATED_IN | Person to Conversation | participants |
+| RECORDS | Document to Decision, Conversation to Decision | extracted decisions |
+
+These extract from free text, so they carry the same provisional flag as the
+`Decision` and `ActionItem` nodes they touch.
+
+### Tier 3: cross-source inferred (deferred, not typed)
+
+`IMPLEMENTS` (PullRequest to Decision), `SUPERSEDES` (Document to Document, Decision
+to Decision), and `REFERENCES` (Conversation or Document to Issue, PR, Project) are
+the payoff edges, and the least reliable. A PR body rarely names the decision it
+implements, so the cross-source coreference is sparse. They are **not typed now**.
+Such links land as Graphiti generic facts; the ones that actually show up get
+promoted to typed edges in a future issue (measure, then type).
+
+## Decisions closed by this record
+
+- **`Review` is the `REVIEWED` edge, not a node.** A review is a relationship.
+  Nothing references it, and the temporal model handles re-reviews via edge
+  invalidation. Verified `REVIEWED` does not collide with a Graphiti built-in.
+- **`IN_REPO` is kept**, despite `group_id` already partitioning per repo, for an
+  explicit, connected `Repo` node and in-graph traversal.
+- **`Project` is a node, `Cycle` is an attribute.** Project is a durable container
+  Linear feeds; promoting an attribute to a node later forces re-ingestion, so the
+  node is the safer base. Cycle is a time-box with low traversal value.
+- **`Team` is dropped.** No source feeds team structure yet. Consequence:
+  `REQUESTED_REVIEW` is `Person to PullRequest` only; a team review-request stays
+  episode text until Team is modeled.
+- **Tier 3 edges and `REPORTS_TO` are deferred.** No connector feeds org structure;
+  cross-source edges are unproven.
+
+## Deferred and future
+
+- **Tier 3 edges** (`IMPLEMENTS`, `SUPERSEDES`, `REFERENCES`): a future issue, after
+  extraction is measured on real data.
+- **Team modeling**: later, as a peer relation between people
+  (`Person` to `Person`, `IS_ON_TEAM_WITH`), not a Team node. `REPORTS_TO` joins
+  this org-structure track once a source or manual seed exists.
+- **Conversation segmentation**: a Slack thread is segmented into bounded episodes
+  (about three turns) by the ingest connector. This is a `relic-ingest` decision and
+  wants its own issue, with an open question of whether Slack stays a JSON episode or
+  switches to Zep's native message episodes.
+- **Person resolution**: the deterministic-key-then-LLM matcher is Phase 3
+  ([`resolve/people.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/resolve/people.py)).
+  This ontology only guarantees the handle fields exist (`github_login`, `slack_id`,
+  `linear_id`, `email`); the matching precedence (email, then handle, then name) is
+  Phase 3's to pin.
+- **Deterministic exact-title lookup**: a recall-layer index if fuzzy search proves
+  insufficient. Not an ontology attribute.
+- **`schema_version`**: best-effort on load, tracked separately.
+
+## Connector to provides map
+
+| Connector | source_type | Status | Provides |
+| -- | -- | -- | -- |
+| GitHub GraphQL (PRs) | pull_request | live | author, co_authors, reviews (+state, +comment), requested_reviewers, files (+add/del), labels, linked_issues, diff_stats, base/head_ref, derived timestamps |
+| GitHub REST (issues) | issue | live | identifier, title, body, state, assignees, labels, timestamps |
+| Linear GraphQL | issue | live | identifier, title, description, state, assignee, labels, project, cycle, parent, created/completed |
+| Notion | doc | planned | title, doc_type, body, authors, version, last_edited |
+| Granola | doc (meeting_notes) | planned | title, summary, participants, decisions, action_items, occurred_at |
+| Slack | conversation | planned | messages (segmented), participants, channel, timestamps |
+
+## Done when
+
+This record is the input to REL-94. The extraction change in `engram.py` builds the
+`ENTITY_TYPES`, `EDGE_TYPES`, and `EDGE_TYPE_MAP` from the tables above, with no
+further modeling. The glossary of terms lives in
+[`CONTEXT.md`](https://github.com/buildrelic/relic-core/blob/main/CONTEXT.md).

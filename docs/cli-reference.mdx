@@ -209,8 +209,13 @@ Serve verified skills and memory recall as MCP tools over stdio. The one
 long-running command. See [Skills](/skills).
 
 ```
-relic serve
+relic serve [--repo OWNER/NAME]
 ```
+
+- `--repo` (optional): scope `recall_memory` to a repo's graph. Defaults to
+  `TARGET_REPO`. Recall reads one repo's graph, so without a repo set here or in
+  `TARGET_REPO` it reads the default graph and returns nothing for memory you
+  ingested under a repo.
 
 ## Diagnostics
 
@@ -255,7 +260,7 @@ relic compile --skill ARCHETYPE
 | `deprecate` | `skill_id` | none | no |
 | `emit` | `--repo` | none | no |
 | `catalog` | none | none | no |
-| `serve` | none | none | optional |
+| `serve` | none | `--repo` | optional |
 | `doctor` | none | none | no |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

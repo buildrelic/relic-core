@@ -630,30 +630,45 @@ def catalog() -> None:
 
 
 @app.command()
-def serve() -> None:
+def serve(
+    repo: Annotated[
+        str | None,
+        typer.Option(help="owner/name to scope recall to; defaults to TARGET_REPO"),
+    ] = None,
+) -> None:
     """Serve verified skills and memory recall as MCP tools over stdio."""
     import asyncio
 
-    asyncio.run(_serve())
+    asyncio.run(_serve(repo))
 
 
-def _make_recall_fn(engram: "Graphiti") -> "Callable[[str, int], Awaitable[str]]":
+def _make_recall_fn(
+    engram: "Graphiti", group_id: str | None
+) -> "Callable[[str, int], Awaitable[str]]":
     async def recall_fn(query: str, num_results: int = 10) -> str:
         from relic.graph import format_answer, recall
 
-        return format_answer(await recall(engram, query, num_results=num_results))
+        return format_answer(
+            await recall(engram, query, group_id=group_id, num_results=num_results)
+        )
 
     return recall_fn
 
 
-async def _serve() -> None:
+async def _serve(repo: str | None = None) -> None:
     from relic.config import get_settings
+    from relic.ingest import repo_group_id
     from relic.obs import get_logger
     from relic.registry import connect
     from relic.serve import build_server
 
     log = get_logger("serve")
     settings = get_settings()
+    # Recall reads one FalkorDB graph: the repo's group_id partition that ingest wrote
+    # to. Without this scope serve reads the empty default graph and recall_memory
+    # returns nothing even with data ingested. Mirrors `relic recall --repo`.
+    repo = repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
     conn = connect(settings.registry_db_path)
     engram = None
     recall_fn = None
@@ -664,10 +679,11 @@ async def _serve() -> None:
             host=settings.falkordb_host,
             port=settings.falkordb_port,
             password=settings.falkordb_password,
-            database=settings.falkordb_database,
+            database=group_id or settings.falkordb_database,
             api_key=settings.openai_api_key,
         )
-        recall_fn = _make_recall_fn(engram)
+        recall_fn = _make_recall_fn(engram, group_id)
+        log.info("memory recall scoped to %s", group_id or settings.falkordb_database)
     except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
         # The logger writes to stderr: stdout is the MCP transport and any bytes on it
         # would corrupt the stream.

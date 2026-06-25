@@ -50,10 +50,18 @@ def build_daemon_app(
     liveness without the secret.
     """
 
+    # An empty or whitespace token means "no auth", not "require the empty string":
+    # otherwise a blank RELIC_DAEMON_TOKEN would lock out every caller.
+    token = (token or "").strip() or None
+
     # Loop counters, surfaced on /status so the desktop app can show the loop turning.
+    # The *_errors counters make a degraded loop (e.g. the engram is down) visible
+    # without breaking a single turn.
     state: dict[str, Any] = {
         "injects": 0,
         "captures": 0,
+        "inject_errors": 0,
+        "capture_errors": 0,
         "last_inject_at": None,
         "last_capture_at": None,
     }
@@ -77,7 +85,13 @@ def build_daemon_app(
         if not prompt:
             return JSONResponse({"context": ""})
         num_results = _clamp_results(body.get("num_results"))
-        context = await recall(prompt, num_results)
+        # Recall failing (engram down, FalkorDB unreachable) must not break the user's
+        # turn: degrade to "no context injected" and count it, never a 500 on a hot path.
+        try:
+            context = await recall(prompt, num_results)
+        except Exception:  # noqa: BLE001 - any recall failure degrades, never breaks the turn
+            state["inject_errors"] += 1
+            return JSONResponse({"context": ""})
         state["injects"] += 1
         state["last_inject_at"] = _now()
         return JSONResponse({"context": context})
@@ -99,7 +113,13 @@ def build_daemon_app(
         # writing a hollow episode every time it ends.
         if not transcript and not summary:
             return JSONResponse({"status": "empty", "session_id": session_id})
-        result = await capture(session_id, transcript, summary or None)
+        # Write-back failing must not surface as a hook error either: record it and tell
+        # the caller, but stay a 200 so the SessionEnd hook always exits clean.
+        try:
+            result = await capture(session_id, transcript, summary or None)
+        except Exception:  # noqa: BLE001 - a failed write-back is counted, never fatal
+            state["capture_errors"] += 1
+            return JSONResponse({"status": "error", "session_id": session_id})
         state["captures"] += 1
         state["last_capture_at"] = _now()
         return JSONResponse(result)

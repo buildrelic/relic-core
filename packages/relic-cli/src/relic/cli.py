@@ -853,7 +853,8 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
     app_ = build_daemon_app(
         recall=_make_recall_fn(engram, recall_group),
         capture=_make_capture_fn(engram, write_group),
-        token=token or os.environ.get("RELIC_DAEMON_TOKEN"),
+        # empty/blank falls through to None (no auth), never the literal empty string
+        token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
     )
     log.info("daemon loop scoped to %s on http://%s:%d", write_group, host, port)
     config = uvicorn.Config(app_, host=host, port=port, log_level="info")

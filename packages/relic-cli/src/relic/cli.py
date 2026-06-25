@@ -708,6 +708,51 @@ def _make_recall_fn(
     return recall_fn
 
 
+def _make_capture_fn(
+    engram: "Graphiti", group_id: str
+) -> "Callable[[str, str, str | None], Awaitable[dict[str, Any]]]":
+    """Write a finished coding session into the engram as a Conversation episode.
+
+    The session is the daemon's write-back half. It is captured verbatim (transcript
+    plus an optional summary) and handed to the same loader ingest uses, so the
+    existing extraction turns it into typed facts with no new write path. Append-only
+    and idempotent per session: the episode name is the session id, the loader's
+    checkpoint dedup key, so a repeated capture does not fork the graph.
+    """
+
+    async def capture_fn(session_id: str, transcript: str, summary: str | None) -> dict[str, Any]:
+        from datetime import datetime
+
+        from relic.contracts import ConversationEpisodeBody, EpisodeSpec
+        from relic.graph import load_episodes
+
+        body = ConversationEpisodeBody(
+            url=f"session://{session_id}",
+            medium="other",
+            title=f"Coding session {session_id[:8]}",
+            occurred_at=datetime.now(UTC).isoformat(),
+            transcript=transcript or None,
+            summary=summary,
+        )
+        spec = EpisodeSpec(
+            name=f"Session {session_id}",
+            body=body.model_dump_json(),
+            source_description="Claude Code session (relic daemon)",
+            reference_time=datetime.now(UTC),
+            group_id=group_id,
+        )
+        stats = await load_episodes(engram, [spec], group_id=group_id, progress=False)
+        return {
+            "status": "captured",
+            "session_id": session_id,
+            "loaded": stats.loaded,
+            "skipped": stats.skipped,
+            "failed": stats.failed,
+        }
+
+    return capture_fn
+
+
 async def _serve(repo: str | None = None) -> None:
     from relic.config import get_settings
     from relic.ingest import repo_group_id
@@ -749,6 +794,141 @@ async def _serve(repo: str | None = None) -> None:
         conn.close()
         if engram is not None:
             await engram.close()
+
+
+@app.command()
+def daemon(
+    repo: Annotated[
+        str | None,
+        typer.Option(help="owner/name to scope the loop to; defaults to TARGET_REPO"),
+    ] = None,
+    host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="bind port")] = 8788,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            help="require Authorization: Bearer <token>; defaults to $RELIC_DAEMON_TOKEN"
+        ),
+    ] = None,
+) -> None:
+    """Run the closed-loop daemon: recall on inject, write-back on capture.
+
+    A loopback HTTP surface the Claude Code hooks call every turn: POST
+    /v1/daemon/inject reflects the engram onto the prompt, POST /v1/daemon/capture
+    writes the finished session back, GET /v1/daemon/status reports liveness and loop
+    counters. Scoped to one repo's engram partition, like `relic serve`. Install the
+    hooks with `relic install-hooks`.
+    """
+    import asyncio
+
+    asyncio.run(_daemon(repo, host, port, token))
+
+
+async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> None:
+    import os
+
+    import uvicorn
+
+    from relic.config import get_settings
+    from relic.graph import make_engram
+    from relic.ingest import repo_group_id
+    from relic.obs import get_logger
+    from relic.serve import build_daemon_app
+
+    log = get_logger("daemon")
+    settings = get_settings()
+    repo = repo or settings.target_repo
+    # Recall scopes to the repo's group_id partition (None reads the default graph,
+    # mirroring `relic serve`); write-back needs a concrete group, so it falls back to
+    # the configured database name. The engram database follows the same fallback.
+    recall_group = repo_group_id(repo) if repo else None
+    write_group = recall_group or settings.falkordb_database
+    engram = make_engram(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=write_group,
+        api_key=settings.openai_api_key,
+    )
+    app_ = build_daemon_app(
+        recall=_make_recall_fn(engram, recall_group),
+        capture=_make_capture_fn(engram, write_group),
+        token=token or os.environ.get("RELIC_DAEMON_TOKEN"),
+    )
+    log.info("daemon loop scoped to %s on http://%s:%d", write_group, host, port)
+    config = uvicorn.Config(app_, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    finally:
+        await engram.close()
+
+
+@app.command(name="install-hooks")
+def install_hooks(
+    settings_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--settings", help="Claude Code settings.json (default: ~/.claude/settings.json)"
+        ),
+    ] = None,
+) -> None:
+    """Wire the Relic daemon into Claude Code: inject on prompt, capture on session end.
+
+    Merges two command hooks into your Claude Code settings.json — UserPromptSubmit ->
+    inject, SessionEnd -> capture — both pointing at the stdlib shim. Idempotent:
+    re-running does not duplicate entries. Backs up an existing file to <name>.bak
+    first. After this, start the loop with `relic daemon --repo owner/name`.
+    """
+    import json
+    import sys
+
+    path = settings_path or Path.home() / ".claude" / "settings.json"
+    shim = Path(__file__).resolve().parent / "hooks" / "relic_hook.py"
+
+    settings: dict[str, Any] = {}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            err_console.print(f"[red]could not parse {path}: {exc}[/]")
+            raise typer.Exit(code=1) from exc
+        path.with_suffix(path.suffix + ".bak").write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+
+    hooks = settings.setdefault("hooks", {})
+    added: list[str] = []
+    for event, mode in (("UserPromptSubmit", "inject"), ("SessionEnd", "capture")):
+        command = f'{sys.executable} "{shim}" {mode}'
+        # Dedup on the shim+mode tail, not the whole command, so a re-run after the venv
+        # python path changes still recognises the existing hook instead of doubling it.
+        if _ensure_hook(hooks, event, command, marker=f'"{shim}" {mode}'):
+            added.append(event)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    if added:
+        console.print(f"[green]installed[/] Relic hooks: {', '.join(added)}")
+    else:
+        console.print("Relic hooks already installed; nothing to change.")
+    console.print(f"settings: {path}")
+    console.print("start the loop with [bold]relic daemon --repo owner/name[/].")
+
+
+def _ensure_hook(hooks: dict[str, Any], event: str, command: str, *, marker: str) -> bool:
+    """Add a command hook for ``event`` if no entry already matches ``marker``.
+
+    Returns True if a hook was added. Mirrors Claude Code's hook shape:
+    ``hooks[event] = [{"hooks": [{"type": "command", "command": ...}]}]``.
+    """
+    groups = hooks.setdefault(event, [])
+    for group in groups:
+        for entry in group.get("hooks", []):
+            if entry.get("type") == "command" and marker in str(entry.get("command", "")):
+                return False
+    groups.append({"hooks": [{"type": "command", "command": command}]})
+    return True
 
 
 # Run-history ledger: ingest/load append a record here as they complete;

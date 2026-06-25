@@ -9,6 +9,7 @@ ingest or graph.
 """
 
 from relic.serve.catalog import render_catalog
+from relic.serve.daemon_app import CaptureFn, build_daemon_app
 from relic.serve.emit_files import (
     emit_catalog,
     emit_skill,
@@ -22,8 +23,10 @@ from relic.serve.mcp_server import build_server, input_schema
 from relic.serve.render import render
 
 __all__ = [
+    "CaptureFn",
     "ConnectorsFn",
     "IngestRunsFn",
+    "build_daemon_app",
     "build_http_app",
     "build_server",
     "emit_catalog",

@@ -695,6 +695,16 @@ def serve(
     asyncio.run(_serve(repo))
 
 
+async def _recall_unavailable(_query: str, _num_results: int) -> str:
+    """Degraded recall when the engram could not be reached at daemon boot."""
+    raise RuntimeError("engram unavailable")
+
+
+async def _capture_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:
+    """Degraded write-back when the engram could not be reached at daemon boot."""
+    raise RuntimeError("engram unavailable")
+
+
 def _make_recall_fn(
     engram: "Graphiti", group_id: str | None
 ) -> "Callable[[str, int], Awaitable[str]]":
@@ -933,26 +943,40 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
     # the configured database name. The engram database follows the same fallback.
     recall_group = repo_group_id(repo) if repo else None
     write_group = recall_group or settings.falkordb_database
-    engram = make_engram(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=write_group,
-        api_key=settings.openai_api_key,
-    )
+    # Boot even when the engram is unreachable, the way `relic serve` keeps serving
+    # skills without recall. The hooks must always have a daemon to call; a down engram
+    # degrades to empty injects and counted write-back errors (visible in the app),
+    # never a daemon that won't start.
+    engram = None
+    try:
+        engram = make_engram(
+            host=settings.falkordb_host,
+            port=settings.falkordb_port,
+            password=settings.falkordb_password,
+            database=write_group,
+            api_key=settings.openai_api_key,
+        )
+        recall = _make_recall_fn(engram, recall_group)
+        capture = _make_capture_fn(engram, write_group)
+        log.info("daemon loop scoped to %s on http://%s:%d", write_group, host, port)
+    except Exception as exc:  # noqa: BLE001 - degrade rather than refuse to boot
+        log.warning("engram unavailable, daemon degraded (recall/capture will error): %s", exc)
+        recall = _recall_unavailable
+        capture = _capture_unavailable
+
     app_ = build_daemon_app(
-        recall=_make_recall_fn(engram, recall_group),
-        capture=_make_capture_fn(engram, write_group),
+        recall=recall,
+        capture=capture,
         # empty/blank falls through to None (no auth), never the literal empty string
         token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
     )
-    log.info("daemon loop scoped to %s on http://%s:%d", write_group, host, port)
     config = uvicorn.Config(app_, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     try:
         await server.serve()
     finally:
-        await engram.close()
+        if engram is not None:
+            await engram.close()
 
 
 @app.command(name="install-hooks")

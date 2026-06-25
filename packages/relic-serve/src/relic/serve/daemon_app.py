@@ -96,6 +96,27 @@ def build_daemon_app(
         state["last_inject_at"] = _now()
         return JSONResponse({"context": context})
 
+    async def recall_route(request: Request) -> JSONResponse:
+        # Manual recall: same recall as inject, but a human typing a question in the
+        # desktop app is not a loop turn, so it deliberately does not bump the inject
+        # counters. The request field is "query" (vs inject's "prompt") to keep the two
+        # call sites distinct.
+        if not _authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - any malformed body is a 400
+            return JSONResponse({"error": "invalid json body"}, status_code=400)
+        query = str(body.get("query", "")).strip()
+        if not query:
+            return JSONResponse({"context": ""})
+        num_results = _clamp_results(body.get("num_results"))
+        try:
+            context = await recall(query, num_results)
+        except Exception:  # noqa: BLE001 - degrade to no result, never error the ui
+            return JSONResponse({"context": "", "error": "recall_unavailable"})
+        return JSONResponse({"context": context})
+
     async def capture_route(request: Request) -> JSONResponse:
         if not _authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -128,6 +149,7 @@ def build_daemon_app(
         routes=[
             Route("/v1/daemon/status", status, methods=["GET"]),
             Route("/v1/daemon/inject", inject_route, methods=["POST"]),
+            Route("/v1/daemon/recall", recall_route, methods=["POST"]),
             Route("/v1/daemon/capture", capture_route, methods=["POST"]),
         ]
     )

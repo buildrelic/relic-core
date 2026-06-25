@@ -99,6 +99,18 @@ def test_capture_passes_fields_and_counts():
     assert client.get("/v1/daemon/status").json()["captures"] == 1
 
 
+def test_recall_returns_context_without_bumping_loop_counters():
+    async def recall(query, num_results):
+        return f"hit:{query}"
+
+    client = _client(recall=recall)
+    resp = client.post("/v1/daemon/recall", json={"query": "auth flow", "num_results": 3})
+    assert resp.status_code == 200
+    assert resp.json()["context"] == "hit:auth flow"
+    # a manual search is not a loop turn: inject counter stays at zero
+    assert client.get("/v1/daemon/status").json()["injects"] == 0
+
+
 def test_inject_degrades_when_recall_fails():
     async def recall(query, num_results):
         raise RuntimeError("engram down")

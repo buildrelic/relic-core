@@ -192,9 +192,18 @@ takes a `RecallFn` and never imports `relic-graph`; `relic.cli` builds the recal
 function from the graph and injects it. `import-linter` contracts in the root
 `pyproject.toml` fail the build if a subsystem reaches across a boundary.
 
+The **daemon** is now a composition root of its own (`relic daemon` in `relic-cli`).
+It builds the engram, injects a `RecallFn` and a capture function into a loopback HTTP
+surface ([`daemon_app.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/daemon_app.py),
+`build_daemon_app`), and closes the loop: Claude Code hooks call `inject` to recall
+context onto each prompt and `capture` to write the finished session back as a
+Conversation episode through the same `load_episodes` ingest uses. Serve still carries
+no graph dependency — the daemon's surface, like the MCP server's, takes recall by
+injection.
+
 `pipeline/run.py` is the future full-run orchestrator (ingest, resolve, detect,
 compile). It raises `NotImplementedError` today, lands across Phases 4 to 8, and
-will live in `relic-cli` as a second composition root alongside the daemon.
+will live in `relic-cli` as a third composition root alongside `serve` and the daemon.
 
 ## Key design decisions
 

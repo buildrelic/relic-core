@@ -708,23 +708,106 @@ def _make_recall_fn(
     return recall_fn
 
 
+# A coding session is captured as one Conversation episode. Clip to the most recent
+# chars, where the decisions land: 200k would be a single huge add_episode call.
+_MAX_SESSION_CHARS = 24_000
+
+
+def _distill_claude_transcript(raw: str) -> str:
+    """Turn a Claude Code transcript (JSONL) into clean User/Assistant prose.
+
+    Keeps real user prompts and assistant text; drops thinking, tool calls, tool
+    results, and the bookkeeping line types, so extraction sees a conversation rather
+    than tool-call noise (the engram ontology has no Decision/ActionItem types yet, so
+    clean prose is what gives it a chance). Falls back to the raw text when the input
+    is not the expected JSONL (an inline transcript). Clipped to the recent tail.
+    """
+    import json
+
+    turns: list[str] = []
+    parsed_any = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        parsed_any = True
+        if obj.get("type") not in ("user", "assistant"):
+            continue
+        msg = obj.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = "\n".join(
+                b["text"]
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            ).strip()
+        else:
+            text = ""
+        if text:
+            who = "User" if msg.get("role") == "user" else "Assistant"
+            turns.append(f"{who}: {text}")
+    distilled = "\n\n".join(turns) if parsed_any else raw
+    return distilled[-_MAX_SESSION_CHARS:]
+
+
+def _resolve_session_transcript(payload: dict[str, Any]) -> str:
+    """Read and distill the session text from a capture payload.
+
+    Prefer the transcript file the hook points at, so the size/curation policy lives
+    server-side (tunable without reinstalling hooks) and the HTTP payload stays small;
+    fall back to an inline transcript.
+    """
+    import os
+
+    raw = ""
+    path = str(payload.get("transcript_path", "")).strip()
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+        except OSError:
+            raw = ""
+    if not raw:
+        raw = str(payload.get("transcript", ""))
+    return _distill_claude_transcript(raw)
+
+
 def _make_capture_fn(
     engram: "Graphiti", group_id: str
-) -> "Callable[[str, str, str | None], Awaitable[dict[str, Any]]]":
+) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
     """Write a finished coding session into the engram as a Conversation episode.
 
-    The session is the daemon's write-back half. It is captured verbatim (transcript
-    plus an optional summary) and handed to the same loader ingest uses, so the
-    existing extraction turns it into typed facts with no new write path. Append-only
-    and idempotent per session: the episode name is the session id, the loader's
-    checkpoint dedup key, so a repeated capture does not fork the graph.
+    The session is the daemon's write-back half. The hook hands over a transcript_path
+    (and/or an inline transcript) plus an optional summary; the session is distilled to
+    clean prose and run through the same loader ingest uses, so existing extraction
+    turns it into typed facts with no new write path. Idempotent per session via the
+    group's checkpoint ledger: the episode name is the session id, so a repeated
+    SessionEnd (Claude Code can fire it more than once) is skipped, not re-extracted
+    into a fork.
     """
 
-    async def capture_fn(session_id: str, transcript: str, summary: str | None) -> dict[str, Any]:
+    async def capture_fn(payload: dict[str, Any]) -> dict[str, Any]:
         from datetime import datetime
 
         from relic.contracts import ConversationEpisodeBody, EpisodeSpec
         from relic.graph import load_episodes
+        from relic.ingest import checkpoint_path, load_done, record_done
+
+        session_id = str(payload.get("session_id", "")).strip()
+        summary = payload.get("summary") or None
+        transcript = _resolve_session_transcript(payload)
+
+        # Same dedup the ingest/load path uses: skip names already in the ledger, record
+        # each on success. Graphiti mints a fresh uuid per add_episode, so without this
+        # a repeated capture forks the graph.
+        ledger = checkpoint_path(group_id)
+        done = load_done(ledger)
 
         body = ConversationEpisodeBody(
             url=f"session://{session_id}",
@@ -741,7 +824,14 @@ def _make_capture_fn(
             reference_time=datetime.now(UTC),
             group_id=group_id,
         )
-        stats = await load_episodes(engram, [spec], group_id=group_id, progress=False)
+        stats = await load_episodes(
+            engram,
+            [spec],
+            group_id=group_id,
+            skip=done,
+            on_loaded=lambda name: record_done(ledger, name),
+            progress=False,
+        )
         return {
             "status": "captured",
             "session_id": session_id,
@@ -873,19 +963,29 @@ def install_hooks(
             "--settings", help="Claude Code settings.json (default: ~/.claude/settings.json)"
         ),
     ] = None,
+    token: Annotated[
+        str | None,
+        typer.Option(help="daemon token to bake into the hook env; default $RELIC_DAEMON_TOKEN"),
+    ] = None,
 ) -> None:
     """Wire the Relic daemon into Claude Code: inject on prompt, capture on session end.
 
     Merges two command hooks into your Claude Code settings.json — UserPromptSubmit ->
     inject, SessionEnd -> capture — both pointing at the stdlib shim. Idempotent:
     re-running does not duplicate entries. Backs up an existing file to <name>.bak
-    first. After this, start the loop with `relic daemon --repo owner/name`.
+    first. If the daemon runs with a token, it is baked into the hook command's env so
+    the hooks can authenticate (loopback-only, so the plaintext is acceptable). After
+    this, start the loop with `relic daemon --repo owner/name`.
     """
     import json
+    import os
     import sys
 
     path = settings_path or Path.home() / ".claude" / "settings.json"
     shim = Path(__file__).resolve().parent / "hooks" / "relic_hook.py"
+    # One source of truth for the token: whatever the daemon will use, the hook gets
+    # too. Baked into the command env so a --token daemon still authenticates.
+    hook_token = token or os.environ.get("RELIC_DAEMON_TOKEN") or None
 
     settings: dict[str, Any] = {}
     if path.exists():
@@ -898,12 +998,14 @@ def install_hooks(
             json.dumps(settings, indent=2), encoding="utf-8"
         )
 
+    env_prefix = f"RELIC_DAEMON_TOKEN={hook_token} " if hook_token else ""
     hooks = settings.setdefault("hooks", {})
     added: list[str] = []
     for event, mode in (("UserPromptSubmit", "inject"), ("SessionEnd", "capture")):
-        command = f'{sys.executable} "{shim}" {mode}'
-        # Dedup on the shim+mode tail, not the whole command, so a re-run after the venv
-        # python path changes still recognises the existing hook instead of doubling it.
+        command = f'{env_prefix}{sys.executable} "{shim}" {mode}'
+        # Match on the shim+mode tail, not the whole command, so a re-run after the venv
+        # python path or token changes refreshes the existing hook in place instead of
+        # doubling it.
         if _ensure_hook(hooks, event, command, marker=f'"{shim}" {mode}'):
             added.append(event)
 
@@ -918,16 +1020,21 @@ def install_hooks(
 
 
 def _ensure_hook(hooks: dict[str, Any], event: str, command: str, *, marker: str) -> bool:
-    """Add a command hook for ``event`` if no entry already matches ``marker``.
+    """Add or refresh our command hook for ``event``. Returns True if anything changed.
 
-    Returns True if a hook was added. Mirrors Claude Code's hook shape:
+    An existing entry matching ``marker`` (our shim+mode) is refreshed in place when the
+    full command differs (interpreter path or baked token changed), so re-running never
+    leaves a stale duplicate. Mirrors Claude Code's hook shape:
     ``hooks[event] = [{"hooks": [{"type": "command", "command": ...}]}]``.
     """
     groups = hooks.setdefault(event, [])
     for group in groups:
         for entry in group.get("hooks", []):
             if entry.get("type") == "command" and marker in str(entry.get("command", "")):
-                return False
+                if entry.get("command") == command:
+                    return False  # already exactly right
+                entry["command"] = command  # refresh a stale interpreter / token
+                return True
     groups.append({"hooks": [{"type": "command", "command": command}]})
     return True
 

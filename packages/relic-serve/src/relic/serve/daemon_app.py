@@ -21,16 +21,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from relic.contracts import RecallFn
 
-# (session_id, transcript, summary | None) -> {"status": ..., "loaded": int, ...}
-# The repo/group the session is written to is fixed at daemon boot, so the hook only
-# sends the session content; the composition root closes over the target group.
-CaptureFn = Callable[[str, str, str | None], Awaitable[dict[str, Any]]]
+# (capture request dict) -> {"status": ..., "loaded": int, ...}
+# The request carries session_id plus the session content (a transcript_path the
+# daemon reads, and/or an inline transcript, and an optional summary). The repo/group
+# is fixed at daemon boot, so the composition root closes over the target group and
+# owns how the session becomes an episode. Capture runs as a background task (LLM
+# extraction is slow), so this return value feeds the loop counters, not the HTTP reply.
+CaptureFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 _MAX_RESULTS = 25
 _DEFAULT_RESULTS = 10
@@ -117,6 +121,17 @@ def build_daemon_app(
             return JSONResponse({"context": "", "error": "recall_unavailable"})
         return JSONResponse({"context": context})
 
+    async def _capture_and_count(payload: dict[str, Any]) -> None:
+        # Runs after the 202 is sent. A failed write-back is counted, never fatal: the
+        # SessionEnd hook already has its response and the user's shell is unblocked.
+        try:
+            await capture(payload)
+        except Exception:  # noqa: BLE001 - degrade and count, never crash the loop
+            state["capture_errors"] += 1
+            return
+        state["captures"] += 1
+        state["last_capture_at"] = _now()
+
     async def capture_route(request: Request) -> JSONResponse:
         if not _authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -128,22 +143,30 @@ def build_daemon_app(
         if not session_id:
             return JSONResponse({"error": "session_id required"}, status_code=400)
         transcript = str(body.get("transcript", "")).strip()
+        transcript_path = str(body.get("transcript_path", "")).strip()
         raw_summary = body.get("summary")
         summary = raw_summary.strip() if isinstance(raw_summary, str) else None
-        # Nothing said, nothing to remember: a clean no-op keeps an empty session from
-        # writing a hollow episode every time it ends.
-        if not transcript and not summary:
+        cwd = str(body.get("cwd", "")).strip()
+        # Nothing to read and nothing said: a clean no-op so an empty session that ends
+        # never writes a hollow episode.
+        if not transcript and not transcript_path and not summary:
             return JSONResponse({"status": "empty", "session_id": session_id})
-        # Write-back failing must not surface as a hook error either: record it and tell
-        # the caller, but stay a 200 so the SessionEnd hook always exits clean.
-        try:
-            result = await capture(session_id, transcript, summary or None)
-        except Exception:  # noqa: BLE001 - a failed write-back is counted, never fatal
-            state["capture_errors"] += 1
-            return JSONResponse({"status": "error", "session_id": session_id})
-        state["captures"] += 1
-        state["last_capture_at"] = _now()
-        return JSONResponse(result)
+
+        payload = {
+            "session_id": session_id,
+            "transcript": transcript,
+            "transcript_path": transcript_path,
+            "summary": summary,
+            "cwd": cwd,
+        }
+        # Write-back runs the LLM extraction pipeline (seconds to a minute). Accept
+        # immediately and do the work in the background, so the SessionEnd hook never
+        # hangs the user's shell on extraction. Counters update when the task finishes.
+        return JSONResponse(
+            {"status": "accepted", "session_id": session_id},
+            status_code=202,
+            background=BackgroundTask(_capture_and_count, payload),
+        )
 
     return Starlette(
         routes=[

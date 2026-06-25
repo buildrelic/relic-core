@@ -20,8 +20,12 @@ import sys
 import urllib.request
 
 _DEFAULT_URL = "http://127.0.0.1:8788"
-# Cap how much of a long session we ship; keep the tail, where the decisions land.
-_MAX_TRANSCRIPT_CHARS = 200_000
+# UserPromptSubmit runs synchronously before the turn is sent, so a slow recall would
+# freeze the prompt. Keep it tight: a missed inject is cheap, a frozen prompt isn't.
+_INJECT_TIMEOUT = 2.0
+# Capture is accepted (202) immediately and extracted in the background, so a short
+# timeout is plenty even for a long session.
+_CAPTURE_TIMEOUT = 10.0
 
 
 def _post(path: str, payload: dict, timeout: float) -> dict:
@@ -41,7 +45,7 @@ def _inject(hook: dict) -> None:
     prompt = str(hook.get("prompt", "")).strip()
     if not prompt:
         return
-    result = _post("/v1/daemon/inject", {"prompt": prompt}, timeout=5.0)
+    result = _post("/v1/daemon/inject", {"prompt": prompt}, timeout=_INJECT_TIMEOUT)
     context = result.get("context", "")
     if context:
         # For UserPromptSubmit, the hook's stdout is injected into the model's context
@@ -53,16 +57,13 @@ def _capture(hook: dict) -> None:
     session_id = str(hook.get("session_id", "")).strip()
     if not session_id:
         return
-    transcript = ""
+    # Hand the daemon the transcript path; it reads and distills server-side, so the
+    # curation policy is tunable without reinstalling hooks and the payload stays small.
+    payload = {"session_id": session_id, "cwd": hook.get("cwd", "")}
     path = hook.get("transcript_path")
     if path and os.path.exists(path):
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            transcript = fh.read()[-_MAX_TRANSCRIPT_CHARS:]
-    _post(
-        "/v1/daemon/capture",
-        {"session_id": session_id, "transcript": transcript},
-        timeout=10.0,
-    )
+        payload["transcript_path"] = path
+    _post("/v1/daemon/capture", payload, timeout=_CAPTURE_TIMEOUT)
 
 
 def main() -> int:

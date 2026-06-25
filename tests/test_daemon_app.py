@@ -14,8 +14,8 @@ def _client(*, recall=None, capture=None, token=None):
     async def _recall(query, num_results):
         return f"ctx({query},{num_results})"
 
-    async def _capture(session_id, transcript, summary):
-        return {"status": "captured", "session_id": session_id, "loaded": 1}
+    async def _capture(payload):
+        return {"status": "captured", "session_id": payload["session_id"], "loaded": 1}
 
     return TestClient(
         build_daemon_app(recall=recall or _recall, capture=capture or _capture, token=token)
@@ -81,22 +81,41 @@ def test_inject_bad_json_is_400():
     assert resp.status_code == 400
 
 
-def test_capture_passes_fields_and_counts():
+def test_capture_accepts_and_writes_back_in_background():
     seen = {}
 
-    async def capture(session_id, transcript, summary):
-        seen.update(session_id=session_id, transcript=transcript, summary=summary)
-        return {"status": "captured", "session_id": session_id, "loaded": 2}
+    async def capture(payload):
+        seen.update(payload)
+        return {"status": "captured", "session_id": payload["session_id"], "loaded": 2}
 
     client = _client(capture=capture)
     resp = client.post(
         "/v1/daemon/capture",
         json={"session_id": "abc", "transcript": "did things", "summary": "a summary"},
     )
-    assert resp.status_code == 200
-    assert resp.json()["loaded"] == 2
-    assert seen == {"session_id": "abc", "transcript": "did things", "summary": "a summary"}
+    # accepted immediately so the SessionEnd hook never blocks on LLM extraction
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    # the background write-back ran: capture got the payload, the counter advanced
+    assert seen["session_id"] == "abc"
+    assert seen["transcript"] == "did things"
+    assert seen["summary"] == "a summary"
     assert client.get("/v1/daemon/status").json()["captures"] == 1
+
+
+def test_capture_accepts_a_transcript_path_only():
+    seen = {}
+
+    async def capture(payload):
+        seen.update(payload)
+        return {"status": "captured", "session_id": payload["session_id"], "loaded": 1}
+
+    client = _client(capture=capture)
+    resp = client.post(
+        "/v1/daemon/capture", json={"session_id": "s1", "transcript_path": "/tmp/x.jsonl"}
+    )
+    assert resp.status_code == 202
+    assert seen["transcript_path"] == "/tmp/x.jsonl"
 
 
 def test_recall_returns_context_without_bumping_loop_counters():
@@ -126,13 +145,13 @@ def test_inject_degrades_when_recall_fails():
 
 
 def test_capture_degrades_when_writeback_fails():
-    async def capture(session_id, transcript, summary):
+    async def capture(payload):
         raise RuntimeError("falkordb down")
 
     client = _client(capture=capture)
     resp = client.post("/v1/daemon/capture", json={"session_id": "a", "transcript": "t"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "error"
+    # accepted up front; the async write-back failure is counted, never surfaced
+    assert resp.status_code == 202
     assert client.get("/v1/daemon/status").json()["capture_errors"] == 1
 
 
@@ -144,11 +163,12 @@ def test_capture_requires_session_id():
 def test_capture_empty_session_is_noop():
     called = False
 
-    async def capture(session_id, transcript, summary):
+    async def capture(payload):
         nonlocal called
         called = True
         return {}
 
+    # no transcript, no transcript_path, no summary -> nothing to remember
     resp = _client(capture=capture).post("/v1/daemon/capture", json={"session_id": "abc"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "empty"

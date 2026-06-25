@@ -5,7 +5,9 @@ import-clean. Heavier work is imported inside each command as it lands in its
 phase.
 """
 
+from contextlib import suppress
 from datetime import UTC
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -695,12 +697,15 @@ def serve(
     asyncio.run(_serve(repo))
 
 
+@lru_cache(maxsize=512)
 def _repo_from_cwd(cwd: str) -> str | None:
-    """owner/name from a working dir's git origin, or None.
+    """owner/name (lowercased) from a working dir's git origin, or None.
 
     A session's cwd tells us which repo it belongs to; the origin remote maps to the
-    owner/name ingest scopes by. Best-effort: no dir, no git, no origin, or an
-    unparseable URL all return None and the caller falls back to the daemon default.
+    owner/name ingest scopes by. Lowercased because host routing is case-insensitive, so
+    the group is stable regardless of how the remote was typed. Best-effort: no dir, no
+    git, no origin, or an unparseable URL all return None and the caller falls back to
+    the daemon default. Cached, so the git shell-out runs at most once per distinct cwd.
     """
     import os
     import re
@@ -723,17 +728,16 @@ def _repo_from_cwd(cwd: str) -> str | None:
         return None
     # git@host:owner/name.git  or  https://host/owner/name(.git)
     m = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", url)
-    return f"{m.group(1)}/{m.group(2)}" if m else None
+    return f"{m.group(1)}/{m.group(2)}".lower() if m else None
 
 
-def _scope_for_cwd(
-    cwd: str, default_db: str, default_group: str | None
-) -> "tuple[str, str | None]":
-    """Resolve (engram database, recall group_id) for a session's working dir.
+def _scope_for_cwd(cwd: str, default_db: str) -> "tuple[str, str]":
+    """Resolve (engram database, group_id) for a session's working dir.
 
-    A cwd that maps to a repo scopes to that repo's group (both the database and the
-    group_id are the repo slug, matching how ingest writes); anything else falls back to
-    the daemon's boot default.
+    A cwd that maps to a repo scopes to that repo's slug for BOTH the database and the
+    group_id (matching how ingest writes). An unresolved cwd falls back to the daemon's
+    concrete default for both, so recall and capture always agree on a concrete group
+    and recall never reads the whole graph unfiltered.
     """
     from relic.ingest import repo_group_id
 
@@ -741,30 +745,49 @@ def _scope_for_cwd(
     if repo:
         slug = repo_group_id(repo)
         return slug, slug
-    return default_db, default_group
+    return default_db, default_db
 
 
 class _EngramPool:
     """Lazily builds and caches one engram per FalkorDB database (per repo).
 
     A session can touch any repo, so the daemon can't pin a single engram at boot. The
-    pool builds one on first use and reuses it, guarded by a lock so concurrent requests
-    for the same repo don't double-build. Because building is deferred, the daemon boots
-    even with FalkorDB down: the failure surfaces per-request and degrades there.
+    pool builds one on first use and reuses it. Building is deferred, so the daemon boots
+    even with FalkorDB down (the failure surfaces per-request and degrades there).
+
+    Each database gets its OWN build lock, so a slow cold-build for one repo never
+    serializes requests for another. Bounded by an LRU cap so a long-lived daemon that
+    visits many repos doesn't grow without limit.
     """
 
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: "Settings", max_size: int = 32) -> None:
         import asyncio
+        from collections import OrderedDict
 
         self._settings = settings
-        self._engrams: dict[str, Graphiti] = {}
-        self._lock = asyncio.Lock()
+        self._max = max_size
+        self._engrams = OrderedDict()  # database -> engram, in LRU order
+        self._locks = {}  # database -> its build lock
+        self._meta = asyncio.Lock()  # guards lazy per-database lock creation
+
+    async def _lock_for(self, database: str):
+        import asyncio
+
+        lock = self._locks.get(database)
+        if lock is None:
+            async with self._meta:
+                lock = self._locks.get(database)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._locks[database] = lock
+        return lock
 
     async def get(self, database: str) -> "Graphiti":
         eng = self._engrams.get(database)
         if eng is not None:
+            self._engrams.move_to_end(database)  # LRU touch
             return eng
-        async with self._lock:
+        async with await self._lock_for(database):
             eng = self._engrams.get(database)
             if eng is None:
                 from relic.graph import make_engram
@@ -777,12 +800,23 @@ class _EngramPool:
                     api_key=self._settings.openai_api_key,
                 )
                 self._engrams[database] = eng
+                self._engrams.move_to_end(database)
+                await self._evict_over_cap()
             return eng
+
+    async def _evict_over_cap(self) -> None:
+        while len(self._engrams) > self._max:
+            db, eng = self._engrams.popitem(last=False)  # least-recently-used
+            self._locks.pop(db, None)
+            with suppress(Exception):  # eviction close is best-effort
+                await eng.close()
 
     async def close_all(self) -> None:
         for eng in self._engrams.values():
-            await eng.close()
+            with suppress(Exception):  # shutdown close is best-effort
+                await eng.close()
         self._engrams.clear()
+        self._locks.clear()
 
 
 def _make_recall_fn(
@@ -925,14 +959,14 @@ async def _write_session_episode(
 
 
 def _make_pool_recall_fn(
-    pool: "_EngramPool", default_db: str, default_group: str | None
+    pool: "_EngramPool", default_db: str
 ) -> "Callable[[str, int, str], Awaitable[str]]":
     """Daemon recall: resolve the repo from the session's cwd, recall in that group."""
 
     async def recall_fn(query: str, num_results: int, cwd: str) -> str:
         from relic.graph import format_answer, recall
 
-        database, group_id = _scope_for_cwd(cwd, default_db, default_group)
+        database, group_id = _scope_for_cwd(cwd, default_db)
         engram = await pool.get(database)
         return format_answer(
             await recall(engram, query, group_id=group_id, num_results=num_results)
@@ -942,16 +976,14 @@ def _make_pool_recall_fn(
 
 
 def _make_pool_capture_fn(
-    pool: "_EngramPool", default_db: str, default_group: str | None
+    pool: "_EngramPool", default_db: str
 ) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
     """Daemon write-back: resolve the repo from the session's cwd, write to that group."""
 
     async def capture_fn(payload: dict[str, Any]) -> dict[str, Any]:
-        # write-back needs a concrete group, so an unresolved cwd falls back to the
-        # default database, never a None group.
-        database, _ = _scope_for_cwd(str(payload.get("cwd", "")), default_db, default_group)
+        database, group = _scope_for_cwd(str(payload.get("cwd", "")), default_db)
         engram = await pool.get(database)
-        return await _write_session_episode(engram, database, payload)
+        return await _write_session_episode(engram, group, payload)
 
     return capture_fn
 
@@ -1040,21 +1072,26 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
 
     log = get_logger("daemon")
     settings = get_settings()
-    repo = repo or settings.target_repo
+    repo = (repo or settings.target_repo or "").strip().lower() or None
     # The daemon scopes per session: each inject/capture resolves the repo from the
-    # session's cwd (git origin) and uses that repo's engram, falling back to this boot
-    # default when the cwd is not a known repo. Engrams are built lazily per repo by the
-    # pool, so the daemon boots even with FalkorDB down (recall/capture then error
-    # per-request, caught by the surface and shown as degraded in the app).
-    default_group = repo_group_id(repo) if repo else None
-    default_db = default_group or settings.falkordb_database
+    # session's cwd (git origin) and uses that repo's engram, falling back to this
+    # concrete default when the cwd is not a known repo. Engrams are built lazily per
+    # repo by the pool, so the daemon boots even with FalkorDB down (recall/capture then
+    # error per-request, caught by the surface and shown as degraded in the app).
+    default_db = repo_group_id(repo) if repo else settings.falkordb_database
     pool = _EngramPool(settings)
     app_ = build_daemon_app(
-        recall=_make_pool_recall_fn(pool, default_db, default_group),
-        capture=_make_pool_capture_fn(pool, default_db, default_group),
+        recall=_make_pool_recall_fn(pool, default_db),
+        capture=_make_pool_capture_fn(pool, default_db),
         # empty/blank falls through to None (no auth), never the literal empty string
         token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
     )
+    # Pre-warm the default engram so the common case (a session in the --repo repo) is
+    # hot on the first inject instead of paying the cold build inside the 2s hook.
+    try:
+        await pool.get(default_db)
+    except Exception as exc:  # noqa: BLE001 - best-effort; a down engram still boots degraded
+        log.warning("engram pre-warm failed, daemon degraded until it recovers: %s", exc)
     log.info("daemon on http://%s:%d, default scope %s, per-session by cwd", host, port, default_db)
     config = uvicorn.Config(app_, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)

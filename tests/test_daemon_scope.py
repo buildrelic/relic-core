@@ -19,6 +19,8 @@ def test_repo_from_cwd_parses_ssh_and_https(tmp_path):
         "ssh": ("git@github.com:buildrelic/relic-core.git", "buildrelic/relic-core"),
         "https_git": ("https://github.com/buildrelic/relic-core.git", "buildrelic/relic-core"),
         "https_bare": ("https://github.com/buildrelic/relic-core", "buildrelic/relic-core"),
+        # host routing is case-insensitive, so the slug is lowercased and stable
+        "mixed_case": ("https://github.com/BuildRelic/Relic-Core.git", "buildrelic/relic-core"),
     }
     for name, (url, expect) in cases.items():
         d = tmp_path / name
@@ -38,7 +40,8 @@ def test_scope_for_cwd_resolved_and_fallback(tmp_path):
     d.mkdir()
     _git_repo(d, "git@github.com:owner/name.git")
     # a resolved repo scopes both the engram database and the recall group to its slug
-    assert _scope_for_cwd(str(d), "default_db", "default_grp") == ("owner__name", "owner__name")
-    # an unresolved cwd falls back to the daemon's boot default (group may be None)
-    assert _scope_for_cwd("", "default_db", "default_grp") == ("default_db", "default_grp")
-    assert _scope_for_cwd("/no/such", "default_db", None) == ("default_db", None)
+    assert _scope_for_cwd(str(d), "default_db") == ("owner__name", "owner__name")
+    # an unresolved cwd fails closed to the daemon's concrete default for BOTH, so recall
+    # and capture agree on a group and recall never reads the whole graph unfiltered
+    assert _scope_for_cwd("", "default_db") == ("default_db", "default_db")
+    assert _scope_for_cwd("/no/such", "default_db") == ("default_db", "default_db")

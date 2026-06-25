@@ -188,6 +188,28 @@ def test_capture_empty_session_is_noop():
     assert not called
 
 
+def test_activity_feed_records_inject_and_capture():
+    client = _client()
+    client.post("/v1/daemon/inject", json={"prompt": "how do tokens work", "cwd": "/work/myrepo"})
+    client.post(
+        "/v1/daemon/capture",
+        json={"session_id": "sess-abcdef12", "transcript": "t", "cwd": "/work/myrepo"},
+    )
+    events = client.get("/v1/daemon/activity").json()["events"]
+    kinds = [e["kind"] for e in events]
+    assert "inject" in kinds and "capture" in kinds
+    inj = next(e for e in events if e["kind"] == "inject")
+    assert inj["repo"] == "myrepo"  # leaf dir, not the full path
+    assert inj["query"] == "how do tokens work"
+
+
+def test_activity_requires_auth_when_token_set():
+    client = _client(token="secret")
+    assert client.get("/v1/daemon/activity").status_code == 401
+    ok = client.get("/v1/daemon/activity", headers={"Authorization": "Bearer secret"})
+    assert ok.status_code == 200
+
+
 def test_empty_token_means_no_auth():
     # a blank token must not lock everyone out by requiring the literal "Bearer ".
     for blank in ("", "   ", None):

@@ -16,6 +16,7 @@ not a real auth boundary (anything on the machine can already reach localhost).
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -72,11 +73,24 @@ def build_daemon_app(
         "last_capture_at": None,
     }
 
+    # A small ring buffer of recent loop events (most recent first), so the desktop app
+    # can show the loop working. Local only, never persisted.
+    events: deque[dict[str, Any]] = deque(maxlen=50)
+
+    def _record(kind: str, **fields: Any) -> None:
+        events.appendleft({"kind": kind, "at": _now(), **fields})
+
     def _authorized(request: Request) -> bool:
         return token is None or request.headers.get("authorization") == f"Bearer {token}"
 
     async def status(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", **state})
+
+    async def activity(request: Request) -> JSONResponse:
+        # Events can carry prompt snippets, so gate it like the writes when a token is set.
+        if not _authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return JSONResponse({"events": list(events)})
 
     async def inject_route(request: Request) -> JSONResponse:
         if not _authorized(request):
@@ -101,6 +115,7 @@ def build_daemon_app(
             return JSONResponse({"context": ""})
         state["injects"] += 1
         state["last_inject_at"] = _now()
+        _record("inject", repo=_repo_label(cwd), query=prompt[:80])
         return JSONResponse({"context": context})
 
     async def recall_route(request: Request) -> JSONResponse:
@@ -135,6 +150,11 @@ def build_daemon_app(
             return
         state["captures"] += 1
         state["last_capture_at"] = _now()
+        _record(
+            "capture",
+            repo=_repo_label(str(payload.get("cwd", ""))),
+            session=str(payload.get("session_id", ""))[:8],
+        )
 
     async def capture_route(request: Request) -> JSONResponse:
         if not _authorized(request):
@@ -175,6 +195,7 @@ def build_daemon_app(
     return Starlette(
         routes=[
             Route("/v1/daemon/status", status, methods=["GET"]),
+            Route("/v1/daemon/activity", activity, methods=["GET"]),
             Route("/v1/daemon/inject", inject_route, methods=["POST"]),
             Route("/v1/daemon/recall", recall_route, methods=["POST"]),
             Route("/v1/daemon/capture", capture_route, methods=["POST"]),
@@ -184,6 +205,12 @@ def build_daemon_app(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _repo_label(cwd: str) -> str:
+    """A short label for a session's working dir: the leaf directory name."""
+    cwd = (cwd or "").rstrip("/")
+    return cwd.rsplit("/", 1)[-1] if cwd else ""
 
 
 def _clamp_results(raw: Any) -> int:

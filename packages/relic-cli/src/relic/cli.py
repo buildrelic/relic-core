@@ -934,20 +934,18 @@ _SERVER_TOKEN_ENV = "RELIC_SERVER_GITHUB_TOKEN"
 
 
 def _resolve_server_token() -> str | None:
-    """The server's own github token, resolved the normal way (env, then .env, then gh auth).
+    """The server's own github token from settings (its GITHUB_TOKEN env or .env value).
 
     Used to stash a fallback for a forwarded user token. A raw os.environ read would miss a
-    token that lives only in .env or comes from `gh auth token`, which is the common server
-    setup, so resolve it the same way the rest of the app does. Returns None when the server
-    has no token of its own: then there is simply nothing to fall back to.
+    token that lives only in .env, so read it through settings like the rest of the app.
+    Returns None when the server has no token of its own: then there is nothing to fall back
+    to. We deliberately do not shell out to `gh auth token` here. this runs on the ingest
+    trigger path, and a `gh` login is a local-dev convenience, not a server's fallback
+    identity.
     """
     from relic.config import get_settings
-    from relic.ingest import resolve_github_token
 
-    try:
-        return resolve_github_token(get_settings())
-    except RuntimeError:
-        return None
+    return get_settings().github_token or None
 
 
 def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
@@ -978,9 +976,12 @@ def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
         return {"status": "already_running", "repo": repo}
     if token:
         # GITHUB_TOKEN carries the user token (settings.github_token reads it); the
-        # server's own token rides along under a separate var as the fallback, resolved
-        # the normal way so it is found even when it lives only in .env or gh auth.
+        # server's own token rides along under a separate var as the fallback, read
+        # through settings so it is found even when it lives only in .env.
         env = {**os.environ, "GITHUB_TOKEN": token}
+        # drop any inherited value first so a stale RELIC_SERVER_GITHUB_TOKEN in the parent
+        # env can never ride into the child posing as the fallback identity.
+        env.pop(_SERVER_TOKEN_ENV, None)
         server_token = _resolve_server_token()
         if server_token and server_token != token:
             env[_SERVER_TOKEN_ENV] = server_token

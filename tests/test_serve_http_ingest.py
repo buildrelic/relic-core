@@ -103,6 +103,10 @@ def test_trigger_ingest_passes_token_via_child_env_not_argv(monkeypatch):
         return _FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    # keep this hermetic: the server-token fallback is covered in test_cli_token_fallback;
+    # here we only care that the user token rides in env, not argv. without this the call
+    # would read the runner's ambient .env / GITHUB_TOKEN.
+    monkeypatch.setattr(cli, "_resolve_server_token", lambda: None)
 
     cli._trigger_ingest("owner/repo", "gho_secret")
     assert "gho_secret" not in captured["args"]  # never on the command line

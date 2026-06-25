@@ -169,6 +169,56 @@ def _quiet_background_errors(log: "logging.Logger") -> None:
     asyncio.get_running_loop().set_exception_handler(_on_loop_error)
 
 
+async def _github_token_with_fallback(
+    token: str,
+    make_github: "Callable[[str], Any]",
+    log: "logging.Logger",
+) -> str:
+    """Probe a forwarded user token, falling back to the server token only if it is dead.
+
+    Format validation in the serve handler can't catch an expired or revoked token: it is
+    well-formed but github rejects it at use time with a 401. When a user token is forwarded
+    the parent stashes its own token in RELIC_SERVER_GITHUB_TOKEN, so here we do a cheap
+    authenticated call to probe the user token before the heavy fetch.
+
+    The probe is best-effort and only ever adds a fallback, it never fails a run that would
+    otherwise proceed. Only a definitive 401 (bad credentials) falls back to the server
+    token. A 403 is not a dead token (rate limit, sso, ip allow-list, missing scope), so we
+    keep the user token and let the real fetch surface it under the user's own identity
+    rather than silently re-running as the server. Any other probe error (5xx, network,
+    timeout) also keeps the user token.
+
+    Token values are never logged. With no server fallback stashed there is nothing to fall
+    back to, so the original token is returned and the real fetch surfaces any error.
+    """
+    import os
+
+    from githubkit.exception import RequestFailed
+
+    server_token = os.environ.get(_SERVER_TOKEN_ENV)
+    if not server_token or server_token == token:
+        # no forwarded user token in play (or it already is the server token): nothing to
+        # verify or fall back to. skip the extra round trip.
+        return token
+
+    try:
+        async with make_github(token) as gh:
+            await gh.rest.users.async_get_authenticated()
+    except RequestFailed as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 401:
+            log.warning("user github token rejected (401); falling back to the server token")
+            return server_token
+        # not a dead token: keep the user's identity and let the real fetch surface it.
+        return token
+    except Exception:
+        # the probe is best-effort. a transient error must not fail an ingest that would
+        # otherwise run, so keep the user token and let the real fetch try.
+        log.debug("user github token probe failed (non-auth); proceeding with the user token")
+        return token
+    return token
+
+
 async def _capture(
     repo: str,
     limit: int | None,
@@ -203,7 +253,7 @@ async def _capture(
 
     owner, name = repo.split("/", 1)
     fetch_start = time.monotonic()
-    token = resolve_github_token(settings)
+    token = await _github_token_with_fallback(resolve_github_token(settings), make_github, log)
     async with make_github(token) as gh:
         bundle = await fetch_repo(
             gh, owner, name, concurrency=settings.fetch_concurrency, limit=limit, months=months
@@ -876,6 +926,29 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
 # repo while one is in flight is a conflict, not a duplicate run.
 _INGEST_PROCS: dict[str, Any] = {}
 
+# When the parent forwards a user token in GITHUB_TOKEN, it stashes its own server
+# token here so the child can fall back to it if the user token is expired/revoked.
+# A separate var because the env GITHUB_TOKEN now holds the user token, shadowing
+# the server's .env value (env vars beat .env in pydantic-settings).
+_SERVER_TOKEN_ENV = "RELIC_SERVER_GITHUB_TOKEN"
+
+
+def _resolve_server_token() -> str | None:
+    """The server's own github token, resolved the normal way (env, then .env, then gh auth).
+
+    Used to stash a fallback for a forwarded user token. A raw os.environ read would miss a
+    token that lives only in .env or comes from `gh auth token`, which is the common server
+    setup, so resolve it the same way the rest of the app does. Returns None when the server
+    has no token of its own: then there is simply nothing to fall back to.
+    """
+    from relic.config import get_settings
+    from relic.ingest import resolve_github_token
+
+    try:
+        return resolve_github_token(get_settings())
+    except RuntimeError:
+        return None
+
 
 def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
     """Kick off a background ingest for ``repo`` and return its status.
@@ -891,6 +964,10 @@ def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
     so it does not leak to the process list. The child's settings.github_token
     picks it up; no token means the child inherits the server's own credentials
     (its GITHUB_TOKEN, else its `gh auth` login).
+
+    When a user token is forwarded, the server's own GITHUB_TOKEN is stashed in
+    RELIC_SERVER_GITHUB_TOKEN so the child can fall back to it if the user token is
+    expired or revoked (a runtime auth failure that format validation can't catch).
     """
     import os
     import subprocess
@@ -899,7 +976,16 @@ def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
     running = _INGEST_PROCS.get(repo)
     if running is not None and running.poll() is None:
         return {"status": "already_running", "repo": repo}
-    env = {**os.environ, "GITHUB_TOKEN": token} if token else None
+    if token:
+        # GITHUB_TOKEN carries the user token (settings.github_token reads it); the
+        # server's own token rides along under a separate var as the fallback, resolved
+        # the normal way so it is found even when it lives only in .env or gh auth.
+        env = {**os.environ, "GITHUB_TOKEN": token}
+        server_token = _resolve_server_token()
+        if server_token and server_token != token:
+            env[_SERVER_TOKEN_ENV] = server_token
+    else:
+        env = None
     proc = subprocess.Popen(  # noqa: S603
         [sys.executable, "-m", "relic", "ingest", "--repo", repo], env=env
     )

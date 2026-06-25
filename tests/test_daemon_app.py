@@ -11,7 +11,7 @@ from relic.serve import build_daemon_app
 
 
 def _client(*, recall=None, capture=None, token=None):
-    async def _recall(query, num_results):
+    async def _recall(query, num_results, cwd):
         return f"ctx({query},{num_results})"
 
     async def _capture(payload):
@@ -32,7 +32,7 @@ def test_status_reports_zeroed_counters():
 def test_inject_returns_recall_context_and_counts():
     seen = {}
 
-    async def recall(query, num_results):
+    async def recall(query, num_results, cwd):
         seen["query"], seen["n"] = query, num_results
         return "REMEMBERED"
 
@@ -51,7 +51,7 @@ def test_inject_returns_recall_context_and_counts():
 def test_inject_empty_prompt_is_noop():
     called = False
 
-    async def recall(query, num_results):
+    async def recall(query, num_results, cwd):
         nonlocal called
         called = True
         return "x"
@@ -65,7 +65,7 @@ def test_inject_empty_prompt_is_noop():
 def test_inject_clamps_num_results():
     seen = {}
 
-    async def recall(query, num_results):
+    async def recall(query, num_results, cwd):
         seen["n"] = num_results
         return ""
 
@@ -74,6 +74,19 @@ def test_inject_clamps_num_results():
     assert seen["n"] == 25  # bounded to _MAX_RESULTS
     client.post("/v1/daemon/inject", json={"prompt": "q", "num_results": "bad"})
     assert seen["n"] == 10  # falls back to the default on garbage
+
+
+def test_inject_forwards_cwd_to_recall():
+    seen = {}
+
+    async def recall(query, num_results, cwd):
+        seen["cwd"] = cwd
+        return ""
+
+    _client(recall=recall).post(
+        "/v1/daemon/inject", json={"prompt": "q", "cwd": "/work/some-repo"}
+    )
+    assert seen["cwd"] == "/work/some-repo"
 
 
 def test_inject_bad_json_is_400():
@@ -119,7 +132,7 @@ def test_capture_accepts_a_transcript_path_only():
 
 
 def test_recall_returns_context_without_bumping_loop_counters():
-    async def recall(query, num_results):
+    async def recall(query, num_results, cwd):
         return f"hit:{query}"
 
     client = _client(recall=recall)
@@ -131,7 +144,7 @@ def test_recall_returns_context_without_bumping_loop_counters():
 
 
 def test_inject_degrades_when_recall_fails():
-    async def recall(query, num_results):
+    async def recall(query, num_results, cwd):
         raise RuntimeError("engram down")
 
     client = _client(recall=recall)

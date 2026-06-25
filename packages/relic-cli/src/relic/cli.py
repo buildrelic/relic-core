@@ -695,14 +695,94 @@ def serve(
     asyncio.run(_serve(repo))
 
 
-async def _recall_unavailable(_query: str, _num_results: int) -> str:
-    """Degraded recall when the engram could not be reached at daemon boot."""
-    raise RuntimeError("engram unavailable")
+def _repo_from_cwd(cwd: str) -> str | None:
+    """owner/name from a working dir's git origin, or None.
+
+    A session's cwd tells us which repo it belongs to; the origin remote maps to the
+    owner/name ingest scopes by. Best-effort: no dir, no git, no origin, or an
+    unparseable URL all return None and the caller falls back to the daemon default.
+    """
+    import os
+    import re
+    import subprocess
+
+    cwd = (cwd or "").strip()
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv, cwd via -C, no shell
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    url = out.stdout.strip()
+    if out.returncode != 0 or not url:
+        return None
+    # git@host:owner/name.git  or  https://host/owner/name(.git)
+    m = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", url)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
-async def _capture_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:
-    """Degraded write-back when the engram could not be reached at daemon boot."""
-    raise RuntimeError("engram unavailable")
+def _scope_for_cwd(
+    cwd: str, default_db: str, default_group: str | None
+) -> "tuple[str, str | None]":
+    """Resolve (engram database, recall group_id) for a session's working dir.
+
+    A cwd that maps to a repo scopes to that repo's group (both the database and the
+    group_id are the repo slug, matching how ingest writes); anything else falls back to
+    the daemon's boot default.
+    """
+    from relic.ingest import repo_group_id
+
+    repo = _repo_from_cwd(cwd)
+    if repo:
+        slug = repo_group_id(repo)
+        return slug, slug
+    return default_db, default_group
+
+
+class _EngramPool:
+    """Lazily builds and caches one engram per FalkorDB database (per repo).
+
+    A session can touch any repo, so the daemon can't pin a single engram at boot. The
+    pool builds one on first use and reuses it, guarded by a lock so concurrent requests
+    for the same repo don't double-build. Because building is deferred, the daemon boots
+    even with FalkorDB down: the failure surfaces per-request and degrades there.
+    """
+
+    def __init__(self, settings: "Settings") -> None:
+        import asyncio
+
+        self._settings = settings
+        self._engrams: dict[str, Graphiti] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, database: str) -> "Graphiti":
+        eng = self._engrams.get(database)
+        if eng is not None:
+            return eng
+        async with self._lock:
+            eng = self._engrams.get(database)
+            if eng is None:
+                from relic.graph import make_engram
+
+                eng = make_engram(
+                    host=self._settings.falkordb_host,
+                    port=self._settings.falkordb_port,
+                    password=self._settings.falkordb_password,
+                    database=database,
+                    api_key=self._settings.openai_api_key,
+                )
+                self._engrams[database] = eng
+            return eng
+
+    async def close_all(self) -> None:
+        for eng in self._engrams.values():
+            await eng.close()
+        self._engrams.clear()
 
 
 def _make_recall_fn(
@@ -788,67 +868,90 @@ def _resolve_session_transcript(payload: dict[str, Any]) -> str:
     return _distill_claude_transcript(raw)
 
 
-def _make_capture_fn(
-    engram: "Graphiti", group_id: str
-) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
-    """Write a finished coding session into the engram as a Conversation episode.
+async def _write_session_episode(
+    engram: "Graphiti", group: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Write one finished session into ``group`` as a Conversation episode.
 
-    The session is the daemon's write-back half. The hook hands over a transcript_path
-    (and/or an inline transcript) plus an optional summary; the session is distilled to
-    clean prose and run through the same loader ingest uses, so existing extraction
-    turns it into typed facts with no new write path. Idempotent per session via the
-    group's checkpoint ledger: the episode name is the session id, so a repeated
-    SessionEnd (Claude Code can fire it more than once) is skipped, not re-extracted
-    into a fork.
+    The session is distilled to clean prose and run through the same loader ingest uses,
+    so existing extraction turns it into typed facts with no new write path. Idempotent
+    per session via the group's checkpoint ledger: the episode name is the session id,
+    so a repeated SessionEnd (Claude Code can fire it more than once) is skipped, not
+    re-extracted into a fork.
     """
+    from datetime import datetime
+
+    from relic.contracts import ConversationEpisodeBody, EpisodeSpec
+    from relic.graph import load_episodes
+    from relic.ingest import checkpoint_path, load_done, record_done
+
+    session_id = str(payload.get("session_id", "")).strip()
+    summary = payload.get("summary") or None
+    transcript = _resolve_session_transcript(payload)
+
+    ledger = checkpoint_path(group)
+    done = load_done(ledger)
+
+    body = ConversationEpisodeBody(
+        url=f"session://{session_id}",
+        medium="other",
+        title=f"Coding session {session_id[:8]}",
+        occurred_at=datetime.now(UTC).isoformat(),
+        transcript=transcript or None,
+        summary=summary,
+    )
+    spec = EpisodeSpec(
+        name=f"Session {session_id}",
+        body=body.model_dump_json(),
+        source_description="Claude Code session (relic daemon)",
+        reference_time=datetime.now(UTC),
+        group_id=group,
+    )
+    stats = await load_episodes(
+        engram,
+        [spec],
+        group_id=group,
+        skip=done,
+        on_loaded=lambda name: record_done(ledger, name),
+        progress=False,
+    )
+    return {
+        "status": "captured",
+        "session_id": session_id,
+        "loaded": stats.loaded,
+        "skipped": stats.skipped,
+        "failed": stats.failed,
+    }
+
+
+def _make_pool_recall_fn(
+    pool: "_EngramPool", default_db: str, default_group: str | None
+) -> "Callable[[str, int, str], Awaitable[str]]":
+    """Daemon recall: resolve the repo from the session's cwd, recall in that group."""
+
+    async def recall_fn(query: str, num_results: int, cwd: str) -> str:
+        from relic.graph import format_answer, recall
+
+        database, group_id = _scope_for_cwd(cwd, default_db, default_group)
+        engram = await pool.get(database)
+        return format_answer(
+            await recall(engram, query, group_id=group_id, num_results=num_results)
+        )
+
+    return recall_fn
+
+
+def _make_pool_capture_fn(
+    pool: "_EngramPool", default_db: str, default_group: str | None
+) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
+    """Daemon write-back: resolve the repo from the session's cwd, write to that group."""
 
     async def capture_fn(payload: dict[str, Any]) -> dict[str, Any]:
-        from datetime import datetime
-
-        from relic.contracts import ConversationEpisodeBody, EpisodeSpec
-        from relic.graph import load_episodes
-        from relic.ingest import checkpoint_path, load_done, record_done
-
-        session_id = str(payload.get("session_id", "")).strip()
-        summary = payload.get("summary") or None
-        transcript = _resolve_session_transcript(payload)
-
-        # Same dedup the ingest/load path uses: skip names already in the ledger, record
-        # each on success. Graphiti mints a fresh uuid per add_episode, so without this
-        # a repeated capture forks the graph.
-        ledger = checkpoint_path(group_id)
-        done = load_done(ledger)
-
-        body = ConversationEpisodeBody(
-            url=f"session://{session_id}",
-            medium="other",
-            title=f"Coding session {session_id[:8]}",
-            occurred_at=datetime.now(UTC).isoformat(),
-            transcript=transcript or None,
-            summary=summary,
-        )
-        spec = EpisodeSpec(
-            name=f"Session {session_id}",
-            body=body.model_dump_json(),
-            source_description="Claude Code session (relic daemon)",
-            reference_time=datetime.now(UTC),
-            group_id=group_id,
-        )
-        stats = await load_episodes(
-            engram,
-            [spec],
-            group_id=group_id,
-            skip=done,
-            on_loaded=lambda name: record_done(ledger, name),
-            progress=False,
-        )
-        return {
-            "status": "captured",
-            "session_id": session_id,
-            "loaded": stats.loaded,
-            "skipped": stats.skipped,
-            "failed": stats.failed,
-        }
+        # write-back needs a concrete group, so an unresolved cwd falls back to the
+        # default database, never a None group.
+        database, _ = _scope_for_cwd(str(payload.get("cwd", "")), default_db, default_group)
+        engram = await pool.get(database)
+        return await _write_session_episode(engram, database, payload)
 
     return capture_fn
 
@@ -916,8 +1019,9 @@ def daemon(
     A loopback HTTP surface the Claude Code hooks call every turn: POST
     /v1/daemon/inject reflects the engram onto the prompt, POST /v1/daemon/capture
     writes the finished session back, GET /v1/daemon/status reports liveness and loop
-    counters. Scoped to one repo's engram partition, like `relic serve`. Install the
-    hooks with `relic install-hooks`.
+    counters. Scoped per session: each call resolves the repo from the session's cwd
+    and uses that repo's engram, falling back to --repo (or TARGET_REPO) otherwise.
+    Install the hooks with `relic install-hooks`.
     """
     import asyncio
 
@@ -930,7 +1034,6 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
     import uvicorn
 
     from relic.config import get_settings
-    from relic.graph import make_engram
     from relic.ingest import repo_group_id
     from relic.obs import get_logger
     from relic.serve import build_daemon_app
@@ -938,45 +1041,27 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
     log = get_logger("daemon")
     settings = get_settings()
     repo = repo or settings.target_repo
-    # Recall scopes to the repo's group_id partition (None reads the default graph,
-    # mirroring `relic serve`); write-back needs a concrete group, so it falls back to
-    # the configured database name. The engram database follows the same fallback.
-    recall_group = repo_group_id(repo) if repo else None
-    write_group = recall_group or settings.falkordb_database
-    # Boot even when the engram is unreachable, the way `relic serve` keeps serving
-    # skills without recall. The hooks must always have a daemon to call; a down engram
-    # degrades to empty injects and counted write-back errors (visible in the app),
-    # never a daemon that won't start.
-    engram = None
-    try:
-        engram = make_engram(
-            host=settings.falkordb_host,
-            port=settings.falkordb_port,
-            password=settings.falkordb_password,
-            database=write_group,
-            api_key=settings.openai_api_key,
-        )
-        recall = _make_recall_fn(engram, recall_group)
-        capture = _make_capture_fn(engram, write_group)
-        log.info("daemon loop scoped to %s on http://%s:%d", write_group, host, port)
-    except Exception as exc:  # noqa: BLE001 - degrade rather than refuse to boot
-        log.warning("engram unavailable, daemon degraded (recall/capture will error): %s", exc)
-        recall = _recall_unavailable
-        capture = _capture_unavailable
-
+    # The daemon scopes per session: each inject/capture resolves the repo from the
+    # session's cwd (git origin) and uses that repo's engram, falling back to this boot
+    # default when the cwd is not a known repo. Engrams are built lazily per repo by the
+    # pool, so the daemon boots even with FalkorDB down (recall/capture then error
+    # per-request, caught by the surface and shown as degraded in the app).
+    default_group = repo_group_id(repo) if repo else None
+    default_db = default_group or settings.falkordb_database
+    pool = _EngramPool(settings)
     app_ = build_daemon_app(
-        recall=recall,
-        capture=capture,
+        recall=_make_pool_recall_fn(pool, default_db, default_group),
+        capture=_make_pool_capture_fn(pool, default_db, default_group),
         # empty/blank falls through to None (no auth), never the literal empty string
         token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
     )
+    log.info("daemon on http://%s:%d, default scope %s, per-session by cwd", host, port, default_db)
     config = uvicorn.Config(app_, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     try:
         await server.serve()
     finally:
-        if engram is not None:
-            await engram.close()
+        await pool.close_all()
 
 
 @app.command(name="install-hooks")

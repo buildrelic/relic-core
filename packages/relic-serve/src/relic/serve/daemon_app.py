@@ -26,7 +26,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from relic.contracts import RecallFn
+# (query, num_results, cwd) -> formatted cited answer. cwd lets the daemon scope recall
+# to the repo the session is in; the composition root resolves cwd -> engram.
+DaemonRecallFn = Callable[[str, int, str], Awaitable[str]]
 
 # (capture request dict) -> {"status": ..., "loaded": int, ...}
 # The request carries session_id plus the session content (a transcript_path the
@@ -42,7 +44,7 @@ _DEFAULT_RESULTS = 10
 
 def build_daemon_app(
     *,
-    recall: RecallFn,
+    recall: DaemonRecallFn,
     capture: CaptureFn,
     token: str | None = None,
 ) -> Starlette:
@@ -89,10 +91,11 @@ def build_daemon_app(
         if not prompt:
             return JSONResponse({"context": ""})
         num_results = _clamp_results(body.get("num_results"))
+        cwd = str(body.get("cwd", ""))  # scope recall to the repo the session is in
         # Recall failing (engram down, FalkorDB unreachable) must not break the user's
         # turn: degrade to "no context injected" and count it, never a 500 on a hot path.
         try:
-            context = await recall(prompt, num_results)
+            context = await recall(prompt, num_results, cwd)
         except Exception:  # noqa: BLE001 - any recall failure degrades, never breaks the turn
             state["inject_errors"] += 1
             return JSONResponse({"context": ""})
@@ -115,8 +118,9 @@ def build_daemon_app(
         if not query:
             return JSONResponse({"context": ""})
         num_results = _clamp_results(body.get("num_results"))
+        # Manual search has no session cwd: use the daemon's default scope (cwd="").
         try:
-            context = await recall(query, num_results)
+            context = await recall(query, num_results, "")
         except Exception:  # noqa: BLE001 - degrade to no result, never error the ui
             return JSONResponse({"context": "", "error": "recall_unavailable"})
         return JSONResponse({"context": context})

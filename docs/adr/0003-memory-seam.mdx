@@ -1,0 +1,124 @@
+---
+title: "Memory seam: a typed port over Graphiti"
+description: "Production graph code depends on MemoryReader/MemoryWriter interfaces and relic value types, not a raw Graphiti handle. One GraphitiMemory adapter holds the handle; eval tools keep a read-only escape hatch."
+icon: "plug"
+---
+
+<Info>
+**Status:** accepted (2026-06-26). Implements
+[REL-96](https://linear.app/buildrelic/issue/REL-96). Numbered 0003 to sit after
+0001 (the ontology) and 0002 (deterministic-first writes,
+[REL-99](https://linear.app/buildrelic/issue/REL-99)). **Supersedes** the earlier
+`0001-graph-port-seam` draft stranded on the unmerged PR #23.
+</Info>
+
+## Context
+
+Relic is a memory layer, but the code that stores and retrieves engineering history
+has **no interface of its own**. Roughly five production modules each hold a raw
+`Graphiti` handle and speak Graphiti's private language directly:
+
+- `queries.py` runs raw Cypher against `graphiti.driver.execute_query`, imports
+  `graphiti_core`, and reads `edge.fact` / `edge.episodes` / `node.labels` /
+  `node.attributes`.
+- `recall.py` calls `EpisodicNode.get_by_uuid` and reads the same edge shapes.
+- `load.py` imports `EpisodeType` / `RawEpisode` / `RateLimitError`.
+- `engram.py` carries two monkeypatches pinned to graphiti-core `0.29.x` internals.
+
+Two consequences, both from the deletion test:
+
+- **Locality.** A graphiti-core bump — a renamed attribute, a moved module, a changed
+  `search()` return shape — breaks all of them at once. No single place absorbs it.
+- **Test surface.** With no shared interface, each module invents its own fake
+  (`test_load.py::FakeGraphiti`, `test_recall.py::_FakeGraphiti`), and the
+  `reviewer_walk` Cypher fallback — the deterministic safety net — has no test.
+
+This is **not** about swapping graph databases: Graphiti already abstracts FalkorDB.
+The payoff is **locality** (one place owns Graphiti) and a **real test surface** (one
+fake, a testable fallback).
+
+## Decision
+
+Introduce a **Memory seam**. Production graph code depends on `MemoryReader` /
+`MemoryWriter` Protocols and relic value types; a single `GraphitiMemory` adapter
+holds the raw `Graphiti` privately and is the only file that imports `graphiti_core`
+or touches `.driver`.
+
+### Shape
+
+- **Primitive seam.** The seam exposes narrow primitives; `recall` and `reviewers_of`
+  stay thin modules *above* it (so their logic is unit-testable against the fake). The
+  one domain operation that must sit *behind* the seam is `reviewer_walk` — the Cypher
+  fallback — because it is the only operation that needs `.driver`. The adapter
+  therefore knows the `REVIEWED`/`AUTHORED` ontology; that is accepted.
+- **Value types cross the seam, never Graphiti objects.** `MemoryEdge` (relation,
+  fact, episode_uuids, and its two **resolved** `MemoryEntity` endpoints),
+  `MemoryEntity` (uuid, name, labels, a parsed `attributes` dict), `MemoryEpisode`
+  (uuid, name, content). Edges arrive with endpoints already resolved, so the
+  `get_by_uuid` lookups, the `"Person" in labels` check, and the attributes-JSON parse
+  all move *into* the adapter.
+- **Methods.** Reader: `search`, `get_episode`, `reviewer_walk`. Writer: `add_episode`,
+  `add_episode_bulk`, `build_indices`. `get_entity` is dropped — with resolved
+  endpoints no caller looks a node up by uuid.
+- **Two Protocols** (`MemoryReader` / `MemoryWriter`). Read paths annotate
+  `MemoryReader`, so a reader *cannot name* a write method — a compile-time guarantee
+  at zero cost. `GraphitiMemory` and the one `FakeMemory` implement both.
+- **Backoff in the adapter.** The rate-limit retry moves into `GraphitiMemory`'s write
+  methods; `load.py` keeps the load-loop (per-episode resilience, checkpointing,
+  `LoadStats`) and loses its last `graphiti_core` import.
+- **Modules.** `graph/memory.py` holds the value types, the Protocols, the adapter,
+  `open_memory(settings, repo)` (renamed from `make_engram`; the liveness probe folds
+  in), the two monkeypatches, and the provider selection. The ontology type dicts move
+  to `graph/schema.py` — they are relic's ontology, not Graphiti construction. "engram"
+  is retired. (Reconciles [REL-115](https://linear.app/buildrelic/issue/REL-115).)
+- **One `FakeMemory`** in `conftest` replaces the two ad-hoc fakes. It is not optional:
+  the refactor changes what the modules depend on, so the old Graphiti-shaped fakes
+  break and `FakeMemory` is their replacement — what keeps the suite green.
+
+### Eval carve-out
+
+`eval/graph_stats.py` (and `scorecard.py`) are **measurement tools whose job is to
+inspect storage structure** — entity counts by label, edge counts by relation, fork
+rate, anchor health. That is exactly what the seam hides from production, so they stay
+*out* of the typed-seam discipline. They reach the graph through an explicit,
+eval-only `execute_read(cypher) -> list[dict]` escape hatch on the adapter, so
+construction (patches, providers) stays centralized in `open_memory` and the raw
+handle never escapes. The "no `.driver` outside the adapter" rule is scoped to
+**production** modules (`recall`, `queries`, `load`, `cli`, `serve`).
+
+## Rejected alternatives
+
+- **Operation seam** (put `recall`/`reviewers_of` *behind* the seam). The adapter
+  swallows the whole graph subsystem and recall logic can no longer be unit-tested
+  apart from the adapter. Rejected for the primitive seam.
+- **A generic `query(cypher)` on the reader.** Re-leaks Cypher across the seam and
+  defeats its purpose. Rejected — eval gets a *named* `execute_read`, production does
+  not.
+- **One combined `Memory` interface.** Simpler, and genuinely close. Chose two
+  Protocols for the free compile-time read/write guarantee and because the writer half
+  will grow (REL-99's deterministic upserts). Revisit only if the split stops earning
+  its keep.
+- **A runtime read/write arg** instead of two Protocols. Dominated: it moves a free
+  compile-time guarantee to a runtime gate *and* adds gating code. Rejected.
+- **Bare-uuid edges** (callers resolve endpoints themselves). Keeps the `get_by_uuid`
+  leak above the seam. Rejected for resolved endpoints.
+- **`graph_stats` through the typed seam.** Would bloat `MemoryReader` with
+  introspection methods (`count_by_label`, …) no production caller needs. Rejected —
+  `graph_stats` stays an eval tool.
+- **Facade / 1:1 Graphiti passthrough.** A seam that mirrors Graphiti's methods and
+  returns Graphiti objects is shallow — it renames the dependency without concentrating
+  behaviour. Rejected for relic value types + resolved endpoints.
+
+## Consequences
+
+- A graphiti-core bump now touches **one file** — the adapter. The two monkeypatches
+  live there too, behind the seam.
+- One `FakeMemory` replaces two ad-hoc fakes; the `reviewer_walk` fallback becomes
+  testable for the first time.
+- Dropping Graphiti later stays a **decision** made from a working system, not a
+  rewrite — but that is a side benefit, not the motive.
+- The **writer half will grow**: REL-99's deterministic node/edge upserts (ADR-0002)
+  land behind `MemoryWriter`. If a one-sided adapter (a read replica) ever appears, or
+  the writer balloons, revisit whether the two-Protocol split should harden further.
+- No behaviour change to recall or load: this is a structural refactor, gated by the
+  existing tests passing against `FakeMemory`.

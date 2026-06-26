@@ -34,7 +34,10 @@
       },
       {
         "group": "Decisions",
-        "pages": ["adr/0001-engram-graph-ontology"]
+        "pages": [
+          "adr/0001-engram-graph-ontology",
+          "adr/0003-memory-seam"
+        ]
       },
       {
         "group": "Contributing",

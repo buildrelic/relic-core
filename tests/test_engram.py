@@ -11,7 +11,7 @@ full happy path against live services stays in the gated test_ingest_integration
 import pytest
 
 from relic.config import Settings
-from relic.graph.engram import _gemini_clients, make_engram
+from relic.graph.memory import _gemini_clients, make_engram
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides) -> None:
@@ -96,7 +96,7 @@ def test_make_engram_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPa
         captured["model"] = model
         raise RuntimeError("sentinel: stop before driver")
 
-    monkeypatch.setattr("relic.graph.engram._gemini_clients", _spy)
+    monkeypatch.setattr("relic.graph.memory._gemini_clients", _spy)
 
     with pytest.raises(RuntimeError, match="sentinel"):
         make_engram()
@@ -113,7 +113,7 @@ def test_prompt_json_patch_serializes_datetime() -> None:
     import importlib
     from datetime import UTC, datetime
 
-    from relic.graph.engram import _patch_prompt_json_datetime
+    from relic.graph.memory import _patch_prompt_json_datetime
 
     _patch_prompt_json_datetime()
 

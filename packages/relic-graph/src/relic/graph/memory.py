@@ -33,8 +33,14 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from graphiti_core import Graphiti
+    from graphiti_core.cross_encoder.client import CrossEncoderClient
+    from graphiti_core.embedder.client import EmbedderClient
+    from graphiti_core.llm_client.client import LLMClient
 
     from relic.contracts import EpisodeSpec
+
+    # The provider-client triple make_engram hands to Graphiti.
+    _ClientTriple = tuple[LLMClient, EmbedderClient, CrossEncoderClient]
 
 log = get_logger("memory")
 
@@ -386,12 +392,10 @@ def open_memory(
 ) -> GraphitiMemory:
     """Build the configured Graphiti and wrap it in the Memory adapter.
 
-    The construction (LLM provider selection + the FalkorDB driver + the 0.29.x
-    monkeypatches) currently lives in ``relic.graph.engram.make_engram``; this is the only
-    place outside the adapter that still touches it, and it folds in once engram retires.
+    The construction -- LLM provider selection + the FalkorDB driver + the 0.29.x
+    monkeypatches -- lives in this module (``make_engram``), the only place that imports
+    graphiti_core.
     """
-    from relic.graph.engram import make_engram
-
     return GraphitiMemory(
         make_engram(
             host=host,
@@ -402,3 +406,240 @@ def open_memory(
             max_coroutines=max_coroutines,
         )
     )
+
+
+# --- Graphiti construction: provider selection, the driver, the 0.29.x workarounds ----
+#
+# Everything below builds the raw ``Graphiti`` and patches graphiti-core. It used to live
+# in ``relic.graph.engram`` (now retired). graphiti_core is imported lazily inside the
+# functions so ``relic --help`` stays key-free and import-light.
+
+
+_falkordb_patched = False
+
+
+def _patch_falkordb_empty_query() -> None:
+    """Work around a graphiti-core <=0.29.1 bug on the FalkorDB fulltext builders.
+
+    When an extracted entity's name sanitizes to nothing (all punctuation or
+    stopwords, common in real history: version tags, file paths, single symbols),
+    the builders emit `(@group_id:"x") ()` with empty trailing parens. RediSearch
+    rejects that with a syntax error, aborting `add_episode`. Graphiti already
+    treats an empty string as "skip the fulltext search", so we make the builders
+    return '' when the text portion is empty. Remove this once upstream guards it.
+    """
+    global _falkordb_patched
+    if _falkordb_patched:
+        return
+
+    import re
+
+    from graphiti_core.driver import falkordb_driver
+    from graphiti_core.driver.falkordb.operations import search_ops
+
+    _empty_parens = re.compile(r"\(\s*\)\s*$")
+    _group_filter = re.compile(r"\(@group_id:[^)]+\)")
+
+    def _guard(fn):
+        def wrapper(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            if not isinstance(out, str):
+                return out
+            if _empty_parens.search(out):
+                return ""
+            # RediSearch treats - as a negation operator even inside quotes, so we must
+            # escape hyphens in group_ids with backslashes. We do this on the final query
+            # string to avoid failing upstream group_id string character validation.
+            return _group_filter.sub(lambda m: m.group(0).replace("-", "\\-"), out)
+
+        return wrapper
+
+    search_ops._build_falkor_fulltext_query = _guard(search_ops._build_falkor_fulltext_query)
+    falkordb_driver.FalkorDriver.build_fulltext_query = _guard(
+        falkordb_driver.FalkorDriver.build_fulltext_query
+    )
+    _falkordb_patched = True
+
+
+_prompt_json_patched = False
+
+# Prompt modules that import `to_prompt_json` by name (so they hold their own reference
+# and must be rebound individually). Sourced from graphiti-core 0.29.1.
+_PROMPT_JSON_MODULES = (
+    "extract_nodes",
+    "extract_edges",
+    "extract_nodes_and_edges",
+    "dedupe_nodes",
+    "summarize_nodes",
+    "eval",
+)
+
+
+def _patch_prompt_json_datetime() -> None:
+    """Make graphiti's prompt JSON serializer tolerate ``datetime`` values.
+
+    graphiti's ``to_prompt_json`` calls ``json.dumps`` without a ``default`` handler. The
+    bulk summary/dedup path feeds it node dicts that carry ``datetime`` fields (e.g.
+    ``created_at``, ``valid_at``), so an ``add_episode_bulk`` batch raises ``TypeError:
+    Object of type datetime is not JSON serializable`` and falls back to slow per-episode
+    loading. This shows up with the Gemini provider, which populates those timestamps
+    where OpenAI often leaves them null. The crash is at
+    ``extract_nodes.extract_summaries_batch`` -> ``to_prompt_json(context['entities'])``.
+
+    ``to_prompt_json`` is prompt-only (never a DB write), so ``default=str`` (ISO-ish text
+    for the LLM) is safe. It is imported by name into several prompt modules, so we rebind
+    it in each. Remove once upstream adds a default encoder.
+    """
+    global _prompt_json_patched
+    if _prompt_json_patched:
+        return
+
+    import importlib
+
+    from graphiti_core.prompts import prompt_helpers
+
+    def _safe_to_prompt_json(data, ensure_ascii=False, indent=None):  # type: ignore[no-untyped-def]
+        return json.dumps(data, ensure_ascii=ensure_ascii, indent=indent, default=str)
+
+    setattr(prompt_helpers, "to_prompt_json", _safe_to_prompt_json)  # noqa: B010
+    for module_name in _PROMPT_JSON_MODULES:
+        try:
+            module = importlib.import_module(f"graphiti_core.prompts.{module_name}")
+        except Exception:  # noqa: BLE001 - a renamed/removed module just means nothing to patch
+            continue
+        if getattr(module, "to_prompt_json", None) is not None:
+            setattr(module, "to_prompt_json", _safe_to_prompt_json)  # noqa: B010
+    _prompt_json_patched = True
+
+
+# LLM provider selection. Graphiti takes an llm_client, an embedder, and a cross_encoder.
+# "openai" (default) uses OpenAI for all three; "gemini" is hybrid -- Gemini Flash for the
+# LLM (its TPM ceiling is ~20x OpenAI's low tiers, the throughput win for a big backfill),
+# OpenAI for embeddings/reranking -- so it needs both keys. Switching the embedder would
+# change vector dimensions and break similarity search, so a provider switch is a
+# fresh-graph backfill (`relic ingest --fresh`).
+
+
+def _openai_embedder(api_key: str):  # noqa: ANN202 - graphiti embedder, kept local
+    """OpenAI embedder (text-embedding-3-small). Shared by both providers."""
+    from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
+
+    return OpenAIEmbedder(
+        OpenAIEmbedderConfig(api_key=api_key, embedding_model="text-embedding-3-small")
+    )
+
+
+def _openai_reranker(api_key: str):  # noqa: ANN202 - graphiti cross-encoder, kept local
+    """OpenAI cross-encoder reranker. Shared by both providers (recall path)."""
+    from graphiti_core.cross_encoder import OpenAIRerankerClient
+    from graphiti_core.llm_client import LLMConfig
+
+    return OpenAIRerankerClient(config=LLMConfig(api_key=api_key, model="gpt-4o-mini"))
+
+
+def _openai_clients(api_key: str) -> _ClientTriple:
+    """Build the (llm_client, embedder, cross_encoder) triple backed by OpenAI."""
+    from graphiti_core.llm_client import LLMConfig, OpenAIClient
+
+    llm_config = LLMConfig(api_key=api_key, model="gpt-4o-mini", small_model="gpt-4o-mini")
+    return OpenAIClient(config=llm_config), _openai_embedder(api_key), _openai_reranker(api_key)
+
+
+def _gemini_clients(gemini_key: str, openai_key: str, model: str) -> _ClientTriple:
+    """Build a hybrid triple: Gemini Flash for the LLM, OpenAI for embeddings + rerank.
+
+    Graphiti maps Gemini 429s to the same `RateLimitError` the adapter backoff retries on,
+    so the write-path retry works unchanged.
+    """
+    from graphiti_core.llm_client import LLMConfig
+    from graphiti_core.llm_client.gemini_client import GeminiClient
+
+    llm = GeminiClient(config=LLMConfig(api_key=gemini_key, model=model))
+    return llm, _openai_embedder(openai_key), _openai_reranker(openai_key)
+
+
+def make_engram(
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    password: str | None = None,
+    database: str | None = None,
+    api_key: str | None = None,
+    max_coroutines: int | None = None,
+) -> Graphiti:
+    """Build a raw Graphiti client on FalkorDB, using the configured LLM provider.
+
+    Connection params fall back to settings (FALKORDB_*) when unset. The provider is
+    selected by `GRAPHITI_LLM_PROVIDER` (default "openai"); "gemini" is hybrid and needs
+    both keys. Clients are built here, not at import, so `relic --help` stays key-free.
+    Prefer ``open_memory`` -- this returns the raw handle the adapter wraps.
+    """
+    import os
+
+    from graphiti_core import Graphiti
+    from graphiti_core.driver.falkordb_driver import FalkorDriver
+
+    from relic.config import get_settings
+
+    _patch_falkordb_empty_query()
+    _patch_prompt_json_datetime()
+
+    settings = get_settings()
+    provider = (settings.graphiti_llm_provider or "openai").strip().lower()
+    key = api_key or os.environ.get("OPENAI_API_KEY") or settings.openai_api_key
+    host = host if host is not None else settings.falkordb_host
+    port = port if port is not None else settings.falkordb_port
+    password = password if password is not None else settings.falkordb_password
+    database = database if database is not None else settings.falkordb_database
+
+    if provider == "openai":
+        if not key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is required for `relic ingest` and `relic query`. "
+                "Set it in .env or the environment."
+            )
+        llm_client, embedder, cross_encoder = _openai_clients(key)
+    elif provider == "gemini":
+        # Hybrid: Gemini for extraction, OpenAI for embeddings/reranking -- needs both.
+        if not settings.gemini_api_key or not key:
+            raise RuntimeError(
+                "GRAPHITI_LLM_PROVIDER=gemini needs GEMINI_API_KEY (extraction) and "
+                "OPENAI_API_KEY (embeddings). Set both in .env or the environment."
+            )
+        llm_client, embedder, cross_encoder = _gemini_clients(
+            settings.gemini_api_key, key, settings.gemini_model
+        )
+    else:
+        raise RuntimeError(
+            f"Unknown GRAPHITI_LLM_PROVIDER={provider!r}; expected 'openai' (the default) "
+            "or 'gemini'."
+        )
+
+    return Graphiti(
+        graph_driver=FalkorDriver(host=host, port=port, password=password, database=database),
+        llm_client=llm_client,
+        embedder=embedder,
+        cross_encoder=cross_encoder,
+        max_coroutines=max_coroutines,
+    )
+
+
+def falkordb_reachable(host: str, port: int, *, timeout: float = 0.5) -> bool:
+    """True if a TCP connection to ``host:port`` opens within ``timeout`` seconds.
+
+    A cheap liveness probe, no graph query. Callers use it to fail fast with a clear
+    message when FalkorDB is down, rather than letting the driver raise deep in a
+    constructor-scheduled background task.
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+async def ensure_indexes(graphiti: Graphiti) -> None:
+    """Build Graphiti's indices and constraints (idempotent). Prefer ``build_indices``."""
+    await graphiti.build_indices_and_constraints()

@@ -3,7 +3,7 @@
 Pure and unit-testable: no network, no LLM. These hold the record dataclasses the
 connectors populate, plus transforms into the JSON episodes the loader feeds to
 Graphiti. The episode JSON keys mirror the flat ``*Node`` attribute names in
-``relic.graph.engram`` so the extractor maps them onto the typed entities.
+``relic.graph.schema`` so the extractor maps them onto the typed entities.
 """
 
 from __future__ import annotations

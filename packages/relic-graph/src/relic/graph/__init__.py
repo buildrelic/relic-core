@@ -11,7 +11,6 @@ satisfying ``MemoryReader`` / ``MemoryWriter``); ``make_engram`` and ``falkordb_
 remain for construction and the liveness probe (ADR-0003).
 """
 
-from relic.graph.engram import ensure_indexes, falkordb_reachable, make_engram
 from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
 from relic.graph.memory import (
     GraphitiMemory,
@@ -20,6 +19,9 @@ from relic.graph.memory import (
     MemoryEpisode,
     MemoryReader,
     MemoryWriter,
+    ensure_indexes,
+    falkordb_reachable,
+    make_engram,
     open_memory,
 )
 from relic.graph.queries import ReviewerHit, reviewers_of

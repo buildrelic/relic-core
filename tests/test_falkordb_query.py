@@ -6,7 +6,7 @@ syntax error that aborts `add_episode`. `_patch_falkordb_empty_query` rewrites t
 to '' (graphiti's "skip fulltext search" sentinel). No live server needed.
 """
 
-from relic.graph.engram import _patch_falkordb_empty_query
+from relic.graph.memory import _patch_falkordb_empty_query
 
 
 def test_empty_text_yields_no_query_normal_text_survives() -> None:

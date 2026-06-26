@@ -45,7 +45,10 @@ def _inject(hook: dict) -> None:
     prompt = str(hook.get("prompt", "")).strip()
     if not prompt:
         return
-    result = _post("/v1/daemon/inject", {"prompt": prompt}, timeout=_INJECT_TIMEOUT)
+    # send cwd so recall scopes to the session's repo, the same way capture does;
+    # without it inject would always read the default scope and disagree with capture.
+    payload = {"prompt": prompt, "cwd": hook.get("cwd", "")}
+    result = _post("/v1/daemon/inject", payload, timeout=_INJECT_TIMEOUT)
     context = result.get("context", "")
     if context:
         # For UserPromptSubmit, the hook's stdout is injected into the model's context

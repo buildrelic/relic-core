@@ -342,7 +342,7 @@ async def _extract(
     from collections.abc import Callable
 
     from relic.graph import LoadStats, load_episodes, load_episodes_bulk, make_engram
-    from relic.ingest import checkpoint_path, clear, load_done, record_done
+    from relic.ingest import checkpoint_path, clear, compact, load_done, record_done
     from relic.obs import stderr_console
 
     ledger = checkpoint_path(group_id)
@@ -430,6 +430,9 @@ async def _extract(
             stats = await _run(None)
     finally:
         await engram.close()
+
+    # Supersession re-records a name per content change; keep the append-only ledger small.
+    compact(ledger)
 
     summary = (
         f"extracted {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "

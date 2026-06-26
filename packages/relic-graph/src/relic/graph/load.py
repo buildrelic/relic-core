@@ -148,24 +148,51 @@ async def _call_with_backoff(make_awaitable: Callable[[], Awaitable], *, label: 
     raise AssertionError(f"unreachable: AsyncRetrying for {label} returned no attempts")
 
 
-async def _remove_episode(graphiti: Graphiti, name: str, group_id: str) -> int:
-    """Delete the prior episode(s) for ``(name, group_id)`` so a re-add supersedes in place.
+async def _supersede_episode(graphiti: Graphiti, name: str, group_id: str) -> int:
+    """Remove the prior episode(s) for ``(name, group_id)`` so a re-add lands in place.
 
     Re-adding alone would fork: ``add_episode`` mints a fresh Episodic uuid per call, so the
-    stale node and the facts it originated would linger. ``graphiti.remove_episode(uuid)``
-    cascades dedupe-aware -- it drops the edges this episode first created and the entities
-    only it mentions, leaving facts other episodes corroborate. We resolve the uuid(s) by
-    name+group_id first, which also cleans up any pre-existing duplicates. Returns the count
-    removed.
+    stale node and its facts would linger. ``graphiti.remove_episode`` is the cascade, but on
+    its own it over-deletes: it drops every edge the removed episode *originated*
+    (``episodes[0]``), even a fact another episode also supports. So first prune the
+    superseded episode out of any edge more than one episode supports -- persisting *only*
+    ``e.episodes`` with a targeted update, never ``EntityEdge.save`` (which rewrites the
+    unloaded ``fact_embedding`` to NULL and would break vector recall of the rescued fact).
+    ``remove_episode`` then deletes only what this episode solely owned: edges it still
+    originates and entities only it mentions. The prune must be persisted *before*
+    ``remove_episode``, which re-reads ``episodes[0]`` from the graph. Resolving by
+    name+group_id also cleans up any pre-existing duplicate. Returns the count removed.
     """
-    query = "MATCH (e:Episodic {name: $name, group_id: $group_id}) RETURN e.uuid AS uuid"
-    records, _, _ = await graphiti.driver.execute_query(
-        query, name=name, group_id=group_id, routing_="r"
+    found, _, _ = await graphiti.driver.execute_query(
+        "MATCH (e:Episodic {name: $name, group_id: $group_id}) "
+        "RETURN e.uuid AS uuid, e.entity_edges AS edge_uuids",
+        name=name,
+        group_id=group_id,
+        routing_="r",
     )
-    uuids = [record["uuid"] for record in records]
-    for uuid in uuids:
+    for record in found:
+        uuid = record["uuid"]
+        edge_uuids = record.get("edge_uuids") or []
+        if edge_uuids:
+            edges, _, _ = await graphiti.driver.execute_query(
+                "MATCH (n:Entity)-[r:RELATES_TO]->(m:Entity) WHERE r.uuid IN $uuids "
+                "RETURN r.uuid AS uuid, r.episodes AS episodes",
+                uuids=edge_uuids,
+                routing_="r",
+            )
+            for edge in edges:
+                episodes = edge.get("episodes") or []
+                # Only rescue a corroborated fact; a sole-supporter edge is left for
+                # remove_episode to delete (its episodes[0] is still this episode).
+                if uuid in episodes and len(episodes) > 1:
+                    await graphiti.driver.execute_query(
+                        "MATCH (n:Entity)-[r:RELATES_TO {uuid: $uuid}]->(m:Entity) "
+                        "SET r.episodes = $episodes",
+                        uuid=edge["uuid"],
+                        episodes=[e for e in episodes if e != uuid],
+                    )
         await graphiti.remove_episode(uuid)
-    return len(uuids)
+    return len(found)
 
 
 async def _add_one(
@@ -191,7 +218,7 @@ async def _add_one(
 
     if remove_first:
         try:
-            removed = await _remove_episode(graphiti, spec.name, spec.group_id)
+            removed = await _supersede_episode(graphiti, spec.name, spec.group_id)
             if removed:
                 log.info("superseding %s: removed %d prior episode(s)", spec.name, removed)
         except Exception as exc:  # noqa: BLE001 - a failed removal must not abort; re-add anyway
@@ -388,7 +415,9 @@ async def load_episodes_bulk(
             if on_progress is not None:
                 on_progress(stats)
             if progress:
-                log.info("loaded %d/%d episodes", stats.loaded, total)
+                # superseded episodes landed in the pre-pass; include them so the heartbeat
+                # numerator reaches ``total``.
+                log.info("loaded %d/%d episodes", stats.loaded + stats.superseded, total)
 
     stats.duration_s = time.monotonic() - start
     return stats

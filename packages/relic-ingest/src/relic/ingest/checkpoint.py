@@ -63,6 +63,26 @@ def record_done(path: Path, name: str, token: str | None = None) -> None:
         fh.flush()
 
 
+def compact(path: Path) -> None:
+    """Rewrite the ledger to one line per name (newest token wins), bounding its growth.
+
+    Supersession re-records a name on every content change, so the append-only log grows
+    without bound on a long-lived repo. ``load_done`` already keeps the last line per name;
+    this rewrites the file to match. A no-op when the ledger is absent or already compact
+    (one line per name), so it is cheap to call after every run.
+    """
+    if not path.exists():
+        return
+    nonblank = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    done = load_done(path)
+    if len(nonblank) == len(done):
+        return  # already one line per name
+    lines = [
+        f"{name}\t{token}\n" if token is not None else f"{name}\n" for name, token in done.items()
+    ]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
 def clear(path: Path) -> None:
     """Delete the ledger so the next run reloads everything. Safe if absent."""
     path.unlink(missing_ok=True)

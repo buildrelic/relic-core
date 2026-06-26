@@ -331,30 +331,68 @@ async def test_rate_limit_gives_up_after_max_attempts_and_counts_failed(
 
 
 class _FakeDriver:
-    """Answers the (name, group_id) -> episodic uuid lookup _remove_episode runs."""
+    """Stands in for the FalkorDB driver, dispatching the three Cypher shapes the
+    supersession path issues: the (name, group_id) -> (uuid, entity_edges) lookup, the
+    edge-by-uuids read, and the targeted episodes prune.
+    """
 
     def __init__(self, gh: "SupersedeGraphiti") -> None:
         self._gh = gh
 
     async def execute_query(
-        self, _query: str, *, name: str = "", group_id: str = "", routing_: str = "r"
+        self,
+        query: str,
+        *,
+        name: str = "",
+        group_id: str = "",
+        uuids: list[str] | None = None,
+        uuid: str = "",
+        episodes: list[str] | None = None,
+        routing_: str = "w",
     ):
-        uuid = self._gh.episodes.get(name)
-        rows = [{"uuid": uuid}] if uuid is not None else []
-        return rows, None, None
+        gh = self._gh
+        if "e.entity_edges" in query:  # episodic lookup
+            ep_uuid = gh.episodes.get(name)
+            if ep_uuid is None:
+                return [], None, None
+            return [{"uuid": ep_uuid, "edge_uuids": gh.entity_edges.get(ep_uuid, [])}], None, None
+        if "WHERE r.uuid IN $uuids" in query:  # edge-by-uuids read
+            rows = [
+                {"uuid": u, "episodes": gh.edges[u]["episodes"]}
+                for u in (uuids or [])
+                if u in gh.edges
+            ]
+            return rows, None, None
+        if "SET r.episodes" in query:  # targeted prune (keep the corroborated fact)
+            gh.edges[uuid]["episodes"] = episodes or []
+            gh.pruned.append((uuid, episodes or []))
+            return [], None, None
+        return [], None, None
 
 
 class SupersedeGraphiti(FakeGraphiti):
     """FakeGraphiti plus the driver + remove_episode the supersession path exercises.
 
-    Models the episodic store as name -> uuid (the current node). ``seed`` pre-populates a
-    prior episode so a supersede has something to remove; remove_episode drops by uuid.
+    Models the episodic store as name -> uuid, each episode's ``entity_edges`` list, and the
+    edges (uuid -> episodes). ``seed`` pre-populates a prior episode; ``edges``/``entity_edges``
+    let a test exercise the shared-fact prune. ``remove_episode`` mirrors graphiti: it drops
+    edges it still originates (episodes[0] == uuid) and forgets the node.
     """
 
-    def __init__(self, seed: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        seed: dict[str, str] | None = None,
+        edges: dict[str, dict[str, list[str]]] | None = None,
+        entity_edges: dict[str, list[str]] | None = None,
+    ) -> None:
         super().__init__()
         self.episodes: dict[str, str] = dict(seed or {})  # name -> current uuid
+        self.edges: dict[str, dict[str, list[str]]] = (
+            edges or {}
+        )  # edge uuid -> {"episodes": [...]}
+        self.entity_edges: dict[str, list[str]] = entity_edges or {}  # episode uuid -> edge uuids
         self.removed: list[str] = []  # uuids passed to remove_episode, in order
+        self.pruned: list[tuple[str, list[str]]] = []  # (edge uuid, new episodes) updates issued
         self._counter = 0
         self.driver = _FakeDriver(self)
 
@@ -366,6 +404,12 @@ class SupersedeGraphiti(FakeGraphiti):
     async def remove_episode(self, uuid: str) -> None:
         self.removed.append(uuid)
         self.episodes = {n: u for n, u in self.episodes.items() if u != uuid}
+        # mirror graphiti: delete only edges this episode still originates (episodes[0] == uuid)
+        self.edges = {
+            eu: e
+            for eu, e in self.edges.items()
+            if not (e["episodes"] and e["episodes"][0] == uuid)
+        }
 
 
 async def test_changed_token_supersedes_prior_episode() -> None:
@@ -460,3 +504,30 @@ async def test_bulk_supersede_runs_serially_before_batches() -> None:
     # the superseded episode lands via the serial pre-pass (add_episode); the fresh one batches
     assert "Meeting x" in graphiti.added
     assert ("demo__repo", ["PR demo/repo#1"]) in graphiti.bulk_batches
+
+
+async def test_supersede_rescues_corroborated_facts_deletes_sole_owned() -> None:
+    # "A" originates two facts: "shared" is also supported by "B"; "solo" is A's alone.
+    graphiti = SupersedeGraphiti(
+        seed={"Meeting x": "A"},
+        edges={"shared": {"episodes": ["A", "B"]}, "solo": {"episodes": ["A"]}},
+        entity_edges={"A": ["shared", "solo"]},
+    )
+    spec = _spec("Meeting x", body='{"summary": "v2"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    # the corroborated fact survives, with A pruned out of its support list (B now originates)
+    assert graphiti.pruned == [("shared", ["B"])]
+    assert graphiti.edges["shared"]["episodes"] == ["B"]
+    # the fact only A supported is left unpruned, so remove_episode deletes it
+    assert "solo" not in graphiti.edges
+    assert graphiti.removed == ["A"]
+    assert graphiti.added == ["Meeting x"]

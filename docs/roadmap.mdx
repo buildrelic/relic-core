@@ -97,12 +97,25 @@ since both ride the portable `graphiti.search` API. See
 [Memory and recall](/memory-and-recall). The production move is now from
 self-hosted FalkorDB to a managed or hosted FalkorDB instance, not a backend swap.
 
+## The closed loop (now shipping)
+
+The **Relic daemon** ships a v1. It closes the loop the product is named for: a
+local background process (`relic daemon`) that Claude Code hooks call on every turn,
+recalling cited memory onto the prompt (`POST /v1/daemon/inject`) and writing the
+finished session back into the engram as a Conversation episode
+(`POST /v1/daemon/capture`, on the `SessionEnd` hook). `relic install-hooks` wires
+the hooks; the desktop app (`relic-desktop`) supervises the daemon and exposes manual
+recall. The loop is verified end-to-end against FalkorDB: inject returns real cited
+PRs, capture lands a session episode, and recall surfaces it. The daemon reuses the
+existing seams whole — `RecallFn` for inject, `load_episodes` for write-back — so it
+added no new write path.
+
 ## Explicitly not building yet
 
-From the plan, deferred until the core loop works: the Relic daemon, Local Engram,
-and Sync Client; the radioactive-graph partition; multi-tenancy, tenant and org
-management, and scope enforcement; the tiered cost model; Slack, Notion, Drive,
-and Granola connectors; the generalized confidence-scored detector and learning
-loop; and the full org ontology beyond the engineering subset (the `org.py` types
-exist but no connector populates them). Each is straightforward to add after the
-loop works, and none changes whether it works.
+From the plan, still deferred: the Local Engram and Sync Client; the
+radioactive-graph partition; multi-tenancy, tenant and org management, and scope
+enforcement; the tiered cost model; Slack, Notion, Drive, and Granola connectors; the
+generalized confidence-scored detector and learning loop; and the full org ontology
+beyond the engineering subset (the `org.py` types exist but no connector populates
+them). Each is straightforward to add now that the loop works, and none changes
+whether it works.

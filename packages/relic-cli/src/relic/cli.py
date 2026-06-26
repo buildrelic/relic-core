@@ -5,7 +5,9 @@ import-clean. Heavier work is imported inside each command as it lands in its
 phase.
 """
 
+from contextlib import suppress
 from datetime import UTC
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -695,6 +697,128 @@ def serve(
     asyncio.run(_serve(repo))
 
 
+@lru_cache(maxsize=512)
+def _repo_from_cwd(cwd: str) -> str | None:
+    """owner/name (lowercased) from a working dir's git origin, or None.
+
+    A session's cwd tells us which repo it belongs to; the origin remote maps to the
+    owner/name ingest scopes by. Lowercased because host routing is case-insensitive, so
+    the group is stable regardless of how the remote was typed. Best-effort: no dir, no
+    git, no origin, or an unparseable URL all return None and the caller falls back to
+    the daemon default. Cached, so the git shell-out runs at most once per distinct cwd.
+    """
+    import os
+    import re
+    import subprocess
+
+    cwd = (cwd or "").strip()
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv, cwd via -C, no shell
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    url = out.stdout.strip()
+    if out.returncode != 0 or not url:
+        return None
+    # git@host:owner/name.git  or  https://host/owner/name(.git)
+    m = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", url)
+    return f"{m.group(1)}/{m.group(2)}".lower() if m else None
+
+
+def _scope_for_cwd(cwd: str, default_db: str) -> "tuple[str, str]":
+    """Resolve (engram database, group_id) for a session's working dir.
+
+    A cwd that maps to a repo scopes to that repo's slug for BOTH the database and the
+    group_id (matching how ingest writes). An unresolved cwd falls back to the daemon's
+    concrete default for both, so recall and capture always agree on a concrete group
+    and recall never reads the whole graph unfiltered.
+    """
+    from relic.ingest import repo_group_id
+
+    repo = _repo_from_cwd(cwd)
+    if repo:
+        slug = repo_group_id(repo)
+        return slug, slug
+    return default_db, default_db
+
+
+class _EngramPool:
+    """Lazily builds and caches one engram per FalkorDB database (per repo).
+
+    A session can touch any repo, so the daemon can't pin a single engram at boot. The
+    pool builds one on first use and reuses it. Building is deferred, so the daemon boots
+    even with FalkorDB down (the failure surfaces per-request and degrades there).
+
+    Each database gets its OWN build lock, so a slow cold-build for one repo never
+    serializes requests for another. Bounded by an LRU cap so a long-lived daemon that
+    visits many repos doesn't grow without limit.
+    """
+
+    def __init__(self, settings: "Settings", max_size: int = 32) -> None:
+        import asyncio
+        from collections import OrderedDict
+
+        self._settings = settings
+        self._max = max_size
+        self._engrams = OrderedDict()  # database -> engram, in LRU order
+        self._locks = {}  # database -> its build lock
+        self._meta = asyncio.Lock()  # guards lazy per-database lock creation
+
+    async def _lock_for(self, database: str):
+        import asyncio
+
+        lock = self._locks.get(database)
+        if lock is None:
+            async with self._meta:
+                lock = self._locks.get(database)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._locks[database] = lock
+        return lock
+
+    async def get(self, database: str) -> "Graphiti":
+        eng = self._engrams.get(database)
+        if eng is not None:
+            self._engrams.move_to_end(database)  # LRU touch
+            return eng
+        async with await self._lock_for(database):
+            eng = self._engrams.get(database)
+            if eng is None:
+                from relic.graph import make_engram
+
+                eng = make_engram(
+                    host=self._settings.falkordb_host,
+                    port=self._settings.falkordb_port,
+                    password=self._settings.falkordb_password,
+                    database=database,
+                    api_key=self._settings.openai_api_key,
+                )
+                self._engrams[database] = eng
+                self._engrams.move_to_end(database)
+                await self._evict_over_cap()
+            return eng
+
+    async def _evict_over_cap(self) -> None:
+        while len(self._engrams) > self._max:
+            db, eng = self._engrams.popitem(last=False)  # least-recently-used
+            self._locks.pop(db, None)
+            with suppress(Exception):  # eviction close is best-effort
+                await eng.close()
+
+    async def close_all(self) -> None:
+        for eng in self._engrams.values():
+            with suppress(Exception):  # shutdown close is best-effort
+                await eng.close()
+        self._engrams.clear()
+        self._locks.clear()
+
+
 def _make_recall_fn(
     engram: "Graphiti", group_id: str | None
 ) -> "Callable[[str, int], Awaitable[str]]":
@@ -706,6 +830,162 @@ def _make_recall_fn(
         )
 
     return recall_fn
+
+
+# A coding session is captured as one Conversation episode. Clip to the most recent
+# chars, where the decisions land: 200k would be a single huge add_episode call.
+_MAX_SESSION_CHARS = 24_000
+
+
+def _distill_claude_transcript(raw: str) -> str:
+    """Turn a Claude Code transcript (JSONL) into clean User/Assistant prose.
+
+    Keeps real user prompts and assistant text; drops thinking, tool calls, tool
+    results, and the bookkeeping line types, so extraction sees a conversation rather
+    than tool-call noise (the engram ontology has no Decision/ActionItem types yet, so
+    clean prose is what gives it a chance). Falls back to the raw text when the input
+    is not the expected JSONL (an inline transcript). Clipped to the recent tail.
+    """
+    import json
+
+    turns: list[str] = []
+    parsed_any = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        parsed_any = True
+        if obj.get("type") not in ("user", "assistant"):
+            continue
+        msg = obj.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = "\n".join(
+                b["text"]
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            ).strip()
+        else:
+            text = ""
+        if text:
+            who = "User" if msg.get("role") == "user" else "Assistant"
+            turns.append(f"{who}: {text}")
+    distilled = "\n\n".join(turns) if parsed_any else raw
+    return distilled[-_MAX_SESSION_CHARS:]
+
+
+def _resolve_session_transcript(payload: dict[str, Any]) -> str:
+    """Read and distill the session text from a capture payload.
+
+    Prefer the transcript file the hook points at, so the size/curation policy lives
+    server-side (tunable without reinstalling hooks) and the HTTP payload stays small;
+    fall back to an inline transcript.
+    """
+    import os
+
+    raw = ""
+    path = str(payload.get("transcript_path", "")).strip()
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+        except OSError:
+            raw = ""
+    if not raw:
+        raw = str(payload.get("transcript", ""))
+    return _distill_claude_transcript(raw)
+
+
+async def _write_session_episode(
+    engram: "Graphiti", group: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Write one finished session into ``group`` as a Conversation episode.
+
+    The session is distilled to clean prose and run through the same loader ingest uses,
+    so existing extraction turns it into typed facts with no new write path. Idempotent
+    per session via the group's checkpoint ledger: the episode name is the session id,
+    so a repeated SessionEnd (Claude Code can fire it more than once) is skipped, not
+    re-extracted into a fork.
+    """
+    from datetime import datetime
+
+    from relic.contracts import ConversationEpisodeBody, EpisodeSpec
+    from relic.graph import load_episodes
+    from relic.ingest import checkpoint_path, load_done, record_done
+
+    session_id = str(payload.get("session_id", "")).strip()
+    summary = payload.get("summary") or None
+    transcript = _resolve_session_transcript(payload)
+
+    ledger = checkpoint_path(group)
+    done = load_done(ledger)
+
+    body = ConversationEpisodeBody(
+        url=f"session://{session_id}",
+        medium="other",
+        title=f"Coding session {session_id[:8]}",
+        occurred_at=datetime.now(UTC).isoformat(),
+        transcript=transcript or None,
+        summary=summary,
+    )
+    spec = EpisodeSpec(
+        name=f"Session {session_id}",
+        body=body.model_dump_json(),
+        source_description="Claude Code session (relic daemon)",
+        reference_time=datetime.now(UTC),
+        group_id=group,
+    )
+    stats = await load_episodes(
+        engram,
+        [spec],
+        group_id=group,
+        skip=done,
+        on_loaded=lambda name: record_done(ledger, name),
+        progress=False,
+    )
+    return {
+        "status": "captured",
+        "session_id": session_id,
+        "loaded": stats.loaded,
+        "skipped": stats.skipped,
+        "failed": stats.failed,
+    }
+
+
+def _make_pool_recall_fn(
+    pool: "_EngramPool", default_db: str
+) -> "Callable[[str, int, str], Awaitable[str]]":
+    """Daemon recall: resolve the repo from the session's cwd, recall in that group."""
+
+    async def recall_fn(query: str, num_results: int, cwd: str) -> str:
+        from relic.graph import format_answer, recall
+
+        database, group_id = _scope_for_cwd(cwd, default_db)
+        engram = await pool.get(database)
+        return format_answer(
+            await recall(engram, query, group_id=group_id, num_results=num_results)
+        )
+
+    return recall_fn
+
+
+def _make_pool_capture_fn(
+    pool: "_EngramPool", default_db: str
+) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
+    """Daemon write-back: resolve the repo from the session's cwd, write to that group."""
+
+    async def capture_fn(payload: dict[str, Any]) -> dict[str, Any]:
+        database, group = _scope_for_cwd(str(payload.get("cwd", "")), default_db)
+        engram = await pool.get(database)
+        return await _write_session_episode(engram, group, payload)
+
+    return capture_fn
 
 
 async def _serve(repo: str | None = None) -> None:
@@ -749,6 +1029,160 @@ async def _serve(repo: str | None = None) -> None:
         conn.close()
         if engram is not None:
             await engram.close()
+
+
+@app.command()
+def daemon(
+    repo: Annotated[
+        str | None,
+        typer.Option(help="owner/name to scope the loop to; defaults to TARGET_REPO"),
+    ] = None,
+    host: Annotated[str, typer.Option(help="bind host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="bind port")] = 8788,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            help="require Authorization: Bearer <token>; defaults to $RELIC_DAEMON_TOKEN"
+        ),
+    ] = None,
+) -> None:
+    """Run the closed-loop daemon: recall on inject, write-back on capture.
+
+    A loopback HTTP surface the Claude Code hooks call every turn: POST
+    /v1/daemon/inject reflects the engram onto the prompt, POST /v1/daemon/capture
+    writes the finished session back, GET /v1/daemon/status reports liveness and loop
+    counters. Scoped per session: each call resolves the repo from the session's cwd
+    and uses that repo's engram, falling back to --repo (or TARGET_REPO) otherwise.
+    Install the hooks with `relic install-hooks`.
+    """
+    import asyncio
+
+    asyncio.run(_daemon(repo, host, port, token))
+
+
+async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> None:
+    import os
+
+    import uvicorn
+
+    from relic.config import get_settings
+    from relic.ingest import repo_group_id
+    from relic.obs import get_logger
+    from relic.serve import build_daemon_app
+
+    log = get_logger("daemon")
+    settings = get_settings()
+    repo = (repo or settings.target_repo or "").strip().lower() or None
+    # The daemon scopes per session: each inject/capture resolves the repo from the
+    # session's cwd (git origin) and uses that repo's engram, falling back to this
+    # concrete default when the cwd is not a known repo. Engrams are built lazily per
+    # repo by the pool, so the daemon boots even with FalkorDB down (recall/capture then
+    # error per-request, caught by the surface and shown as degraded in the app).
+    default_db = repo_group_id(repo) if repo else settings.falkordb_database
+    pool = _EngramPool(settings)
+    app_ = build_daemon_app(
+        recall=_make_pool_recall_fn(pool, default_db),
+        capture=_make_pool_capture_fn(pool, default_db),
+        # empty/blank falls through to None (no auth), never the literal empty string
+        token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
+    )
+    # Pre-warm the default engram so the common case (a session in the --repo repo) is
+    # hot on the first inject instead of paying the cold build inside the 2s hook.
+    try:
+        await pool.get(default_db)
+    except Exception as exc:  # noqa: BLE001 - best-effort; a down engram still boots degraded
+        log.warning("engram pre-warm failed, daemon degraded until it recovers: %s", exc)
+    log.info("daemon on http://%s:%d, default scope %s, per-session by cwd", host, port, default_db)
+    config = uvicorn.Config(app_, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    finally:
+        await pool.close_all()
+
+
+@app.command(name="install-hooks")
+def install_hooks(
+    settings_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--settings", help="Claude Code settings.json (default: ~/.claude/settings.json)"
+        ),
+    ] = None,
+    token: Annotated[
+        str | None,
+        typer.Option(help="daemon token to bake into the hook env; default $RELIC_DAEMON_TOKEN"),
+    ] = None,
+) -> None:
+    """Wire the Relic daemon into Claude Code: inject on prompt, capture on session end.
+
+    Merges two command hooks into your Claude Code settings.json — UserPromptSubmit ->
+    inject, SessionEnd -> capture — both pointing at the stdlib shim. Idempotent:
+    re-running does not duplicate entries. Backs up an existing file to <name>.bak
+    first. If the daemon runs with a token, it is baked into the hook command's env so
+    the hooks can authenticate (loopback-only, so the plaintext is acceptable). After
+    this, start the loop with `relic daemon --repo owner/name`.
+    """
+    import json
+    import os
+    import sys
+
+    path = settings_path or Path.home() / ".claude" / "settings.json"
+    shim = Path(__file__).resolve().parent / "hooks" / "relic_hook.py"
+    # One source of truth for the token: whatever the daemon will use, the hook gets
+    # too. Baked into the command env so a --token daemon still authenticates.
+    hook_token = token or os.environ.get("RELIC_DAEMON_TOKEN") or None
+
+    settings: dict[str, Any] = {}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            err_console.print(f"[red]could not parse {path}: {exc}[/]")
+            raise typer.Exit(code=1) from exc
+        path.with_suffix(path.suffix + ".bak").write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+
+    env_prefix = f"RELIC_DAEMON_TOKEN={hook_token} " if hook_token else ""
+    hooks = settings.setdefault("hooks", {})
+    added: list[str] = []
+    for event, mode in (("UserPromptSubmit", "inject"), ("SessionEnd", "capture")):
+        command = f'{env_prefix}{sys.executable} "{shim}" {mode}'
+        # Match on the shim+mode tail, not the whole command, so a re-run after the venv
+        # python path or token changes refreshes the existing hook in place instead of
+        # doubling it.
+        if _ensure_hook(hooks, event, command, marker=f'"{shim}" {mode}'):
+            added.append(event)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    if added:
+        console.print(f"[green]installed[/] Relic hooks: {', '.join(added)}")
+    else:
+        console.print("Relic hooks already installed; nothing to change.")
+    console.print(f"settings: {path}")
+    console.print("start the loop with [bold]relic daemon --repo owner/name[/].")
+
+
+def _ensure_hook(hooks: dict[str, Any], event: str, command: str, *, marker: str) -> bool:
+    """Add or refresh our command hook for ``event``. Returns True if anything changed.
+
+    An existing entry matching ``marker`` (our shim+mode) is refreshed in place when the
+    full command differs (interpreter path or baked token changed), so re-running never
+    leaves a stale duplicate. Mirrors Claude Code's hook shape:
+    ``hooks[event] = [{"hooks": [{"type": "command", "command": ...}]}]``.
+    """
+    groups = hooks.setdefault(event, [])
+    for group in groups:
+        for entry in group.get("hooks", []):
+            if entry.get("type") == "command" and marker in str(entry.get("command", "")):
+                if entry.get("command") == command:
+                    return False  # already exactly right
+                entry["command"] = command  # refresh a stale interpreter / token
+                return True
+    groups.append({"hooks": [{"type": "command", "command": command}]})
+    return True
 
 
 # Run-history ledger: ingest/load append a record here as they complete;

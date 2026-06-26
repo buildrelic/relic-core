@@ -111,6 +111,28 @@ reports what is configured.
   </Step>
 </Steps>
 
+## Turn on the closed loop
+
+`relic serve` is pull-based: an agent recalls when it chooses to. The **daemon** is
+the active loop — it injects recalled context on every prompt and writes each finished
+session back into the engram, with no change to how you work.
+
+```bash
+# wire the Claude Code hooks (UserPromptSubmit -> inject, SessionEnd -> capture)
+uv run relic install-hooks
+
+# run the loop; --repo is the fallback scope when a session's repo can't be resolved
+uv run relic daemon --repo owner/name
+```
+
+The daemon listens on `127.0.0.1:8788` (`/v1/daemon/status`, `inject`, `recall`,
+`capture`). It scopes **per session**: each inject/capture resolves the repo from the
+session's working directory (its git origin) and uses that repo's engram, so one
+daemon serves every repo you work in. It is best-effort by design: if the engram is
+down it boots degraded and the hooks never break a turn. Non-engineers can run and
+watch the loop from the [relic-desktop](https://github.com/buildrelic/relic-desktop)
+tray app instead of the CLI.
+
 ## Next steps
 
 <CardGroup cols={2}>

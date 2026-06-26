@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from graphiti_core import Graphiti
+    from relic.graph.memory import MemoryReader
 
 
 @dataclass(slots=True)
@@ -46,7 +46,7 @@ class RecallAnswer:
 
 
 async def recall(
-    graphiti: Graphiti,
+    memory: MemoryReader,
     query: str,
     *,
     group_id: str | None = None,
@@ -55,42 +55,39 @@ async def recall(
     """Return facts matching ``query`` with their source episodes. Never raises."""
     group_ids = [group_id] if group_id else None
     try:
-        edges = await graphiti.search(query, group_ids=group_ids, num_results=num_results)
-    except Exception:  # noqa: BLE001 - search may fail if the FalkorDB backend is unavailable
+        edges = await memory.search(query, group_ids=group_ids, num_results=num_results)
+    except Exception:  # noqa: BLE001 - search may fail if the memory backend is unavailable
         return RecallAnswer(query=query)
 
     facts: list[RecalledFact] = []
     for edge in edges:
-        text = str(getattr(edge, "fact", "") or "").strip()
+        text = edge.fact.strip()
         if not text:
             continue
-        episodes = getattr(edge, "episodes", None) or []
         facts.append(
             RecalledFact(
                 fact=text,
-                relation=str(getattr(edge, "name", "") or ""),
-                sources=await _resolve_sources(graphiti, episodes),
+                relation=edge.relation,
+                sources=await _resolve_sources(memory, edge.episode_uuids),
             )
         )
     return RecallAnswer(query=query, facts=facts)
 
 
-async def _resolve_sources(graphiti: Graphiti, episode_uuids: list[Any]) -> list[Source]:
+async def _resolve_sources(memory: MemoryReader, episode_uuids: list[Any]) -> list[Source]:
     """Resolve episode uuids to sources (episode name plus source URL), best-effort.
 
-    Falls back to the uuid string when a lookup fails, so provenance degrades
+    Falls back to the uuid string when the episode is unknown, so provenance degrades
     rather than disappears. Order is preserved and duplicate labels are dropped.
     """
-    from graphiti_core.nodes import EpisodicNode
-
     sources: list[Source] = []
     seen: set[str] = set()
     for uuid in episode_uuids:
         key = str(uuid)
-        try:
-            episode = await EpisodicNode.get_by_uuid(graphiti.driver, key)
+        episode = await memory.get_episode(key)
+        if episode is not None:
             source = Source(label=episode.name or key, url=_extract_url(episode.content))
-        except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
+        else:
             source = Source(label=key)
         if source.label not in seen:
             seen.add(source.label)

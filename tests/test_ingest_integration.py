@@ -39,7 +39,7 @@ pytestmark = [
 
 async def test_load_and_query() -> None:
     from relic.contracts import EpisodeSpec
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.load import load_episodes
     from relic.graph.queries import reviewers_of
 
@@ -71,12 +71,12 @@ async def test_load_and_query() -> None:
         )
     ]
     # Isolate this test in its own FalkorDB database, dropped on the way out.
-    engram = make_engram(database="relic_test")
+    engram = open_memory(database="relic_test")
     try:
         stats = await load_episodes(engram, episodes, group_id="demo__repo", progress=False)
         hits = await reviewers_of(engram, "auth", group_id="demo__repo")
     finally:
-        await engram.driver.execute_query("MATCH (n) DETACH DELETE n")
+        await engram.execute_read("MATCH (n) DETACH DELETE n")  # eval-only escape hatch
         await engram.close()
 
     assert stats.episodes == 1

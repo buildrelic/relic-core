@@ -108,6 +108,8 @@ class MemoryWriter(Protocol):
 
     async def build_indices(self) -> None: ...
 
+    async def supersede_episode(self, name: str, group_id: str) -> int: ...
+
 
 # --- Helpers ------------------------------------------------------------------
 
@@ -288,6 +290,55 @@ class GraphitiMemory:
 
     async def build_indices(self) -> None:
         await self._graphiti.build_indices_and_constraints()
+
+    async def supersede_episode(self, name: str, group_id: str) -> int:
+        """Remove the prior episode(s) for ``(name, group_id)`` so a re-add lands in place.
+
+        Re-adding alone would fork: ``add_episode`` mints a fresh Episodic uuid per call, so
+        the stale node and its facts would linger. ``remove_episode`` is the cascade, but on
+        its own it over-deletes: it drops every edge the removed episode *originated*
+        (``episodes[0]``), even a fact another episode also supports. So first prune the
+        superseded episode out of any edge more than one episode supports -- persisting *only*
+        ``e.episodes`` with a targeted update, never ``EntityEdge.save`` (which rewrites the
+        unloaded ``fact_embedding`` to NULL and would break vector recall of the rescued
+        fact). ``remove_episode`` then deletes only what this episode solely owned: edges it
+        still originates and entities only it mentions. The prune must be persisted *before*
+        ``remove_episode``, which re-reads ``episodes[0]`` from the graph. Resolving by
+        name+group_id also cleans up any pre-existing duplicate. Returns the count removed.
+
+        Touches ``.driver`` and ``remove_episode`` directly: that is exactly why supersession
+        lives behind the seam, so the load loop never sees a raw Graphiti handle.
+        """
+        found, _, _ = await self._graphiti.driver.execute_query(
+            "MATCH (e:Episodic {name: $name, group_id: $group_id}) "
+            "RETURN e.uuid AS uuid, e.entity_edges AS edge_uuids",
+            name=name,
+            group_id=group_id,
+            routing_="r",
+        )
+        for record in found:
+            uuid = record["uuid"]
+            edge_uuids = record.get("edge_uuids") or []
+            if edge_uuids:
+                edges, _, _ = await self._graphiti.driver.execute_query(
+                    "MATCH (n:Entity)-[r:RELATES_TO]->(m:Entity) WHERE r.uuid IN $uuids "
+                    "RETURN r.uuid AS uuid, r.episodes AS episodes",
+                    uuids=edge_uuids,
+                    routing_="r",
+                )
+                for edge in edges:
+                    episodes = edge.get("episodes") or []
+                    # Only rescue a corroborated fact; a sole-supporter edge is left for
+                    # remove_episode to delete (its episodes[0] is still this episode).
+                    if uuid in episodes and len(episodes) > 1:
+                        await self._graphiti.driver.execute_query(
+                            "MATCH (n:Entity)-[r:RELATES_TO {uuid: $uuid}]->(m:Entity) "
+                            "SET r.episodes = $episodes",
+                            uuid=edge["uuid"],
+                            episodes=[e for e in episodes if e != uuid],
+                        )
+            await self._graphiti.remove_episode(uuid)
+        return len(found)
 
     async def _with_backoff(self, make_awaitable: Callable[[], Awaitable], *, label: str) -> object:
         """Await a graphiti write, retrying OpenAI/Gemini rate limits with exponential backoff.

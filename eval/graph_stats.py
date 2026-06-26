@@ -5,8 +5,9 @@ land, so this measures the proxies that predict it. Run it on a real repo's grap
 before and after an ingestion change and diff the numbers, so a change is shown to
 lift extraction quality rather than assumed to.
 
-It is read-only: it opens the repo's FalkorDB graph and runs Cypher counts, never a
-write. It needs FalkorDB up and the repo already ingested.
+It is read-only: it opens the repo's graph through the Memory seam's eval-only
+``execute_read`` escape hatch (ADR-0003) and runs Cypher counts, never a write. It needs
+FalkorDB up and the repo already ingested.
 
     uv run python eval/graph_stats.py --repo owner/name [--area src/auth] [--json out.json]
 
@@ -28,30 +29,31 @@ import argparse
 import asyncio
 import json
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, LiteralString
 
-from relic.graph import make_engram
+from relic.graph import open_memory
 from relic.graph.recall import _extract_url
 from relic.ingest import repo_group_id
 
 if TYPE_CHECKING:
-    from graphiti_core import Graphiti
+    from relic.graph import GraphitiMemory
 
 
-async def _query(graphiti: Graphiti, cypher: str, **params: Any) -> list[dict[str, Any]]:
-    """Run a read-only Cypher query, returning rows as dicts. Empty on any failure."""
+async def _query(
+    memory: GraphitiMemory, cypher: LiteralString, **params: Any
+) -> list[dict[str, Any]]:
+    """Run a read-only Cypher query via the seam's eval escape hatch. Empty on any failure."""
     try:
-        records, _, _ = await graphiti.driver.execute_query(cypher, **params)
+        return await memory.execute_read(cypher, **params)
     except Exception as exc:  # noqa: BLE001 - a schema/label mismatch is a zero result, not a crash
         print(f"  (query failed: {type(exc).__name__}: {exc})", file=sys.stderr)
         return []
-    return [dict(r) for r in records]
 
 
-async def structure(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
+async def structure(memory: GraphitiMemory, group_id: str) -> dict[str, Any]:
     """Entity-type counts, edge-relation counts, and the episode total."""
     entities = await _query(
-        graphiti,
+        memory,
         """
         MATCH (n:Entity) WHERE n.group_id = $g
         UNWIND labels(n) AS label
@@ -61,7 +63,7 @@ async def structure(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
         g=group_id,
     )
     edges = await _query(
-        graphiti,
+        memory,
         """
         MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.group_id = $g
         RETURN r.name AS key, count(*) AS n ORDER BY n DESC
@@ -69,7 +71,7 @@ async def structure(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
         g=group_id,
     )
     episodes = await _query(
-        graphiti,
+        memory,
         "MATCH (e:Episodic) WHERE e.group_id = $g RETURN count(*) AS n",
         g=group_id,
     )
@@ -80,7 +82,7 @@ async def structure(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
     }
 
 
-async def dedup_forking(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
+async def dedup_forking(memory: GraphitiMemory, group_id: str) -> dict[str, Any]:
     """Person nodes whose normalized name appears more than once: support-splitting forks.
 
     A forked person splits AUTHORED/REVIEWED support across duplicates, so a real
@@ -88,7 +90,7 @@ async def dedup_forking(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
     change is a regression even if raw counts look better.
     """
     rows = await _query(
-        graphiti,
+        memory,
         """
         MATCH (p:Entity) WHERE p.group_id = $g AND 'Person' IN labels(p)
         WITH toLower(trim(p.name)) AS norm, count(*) AS n
@@ -98,7 +100,7 @@ async def dedup_forking(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
         g=group_id,
     )
     total_people = await _query(
-        graphiti,
+        memory,
         "MATCH (p:Entity) WHERE p.group_id = $g AND 'Person' IN labels(p) RETURN count(*) AS n",
         g=group_id,
     )
@@ -111,14 +113,14 @@ async def dedup_forking(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
     }
 
 
-async def citation_integrity(graphiti: Graphiti, group_id: str) -> dict[str, Any]:
+async def citation_integrity(memory: GraphitiMemory, group_id: str) -> dict[str, Any]:
     """Share of PR/issue episodes whose body still yields a citation URL (invariant I3).
 
     This must stay at or near 1.0. A drop means a body-schema change moved the
     pull_request.url / issue.url key and silently broke every skill citation.
     """
     rows = await _query(
-        graphiti,
+        memory,
         "MATCH (e:Episodic) WHERE e.group_id = $g RETURN e.content AS content",
         g=group_id,
     )
@@ -131,7 +133,7 @@ async def citation_integrity(graphiti: Graphiti, group_id: str) -> dict[str, Any
     }
 
 
-async def routing_probe(graphiti: Graphiti, group_id: str, area: str) -> dict[str, Any]:
+async def routing_probe(memory: GraphitiMemory, group_id: str, area: str) -> dict[str, Any]:
     """People who reviewed/authored work touching ``area``, ranked by support.
 
     The closest proxy for review-routing skill quality: it is the shape of query the
@@ -140,7 +142,7 @@ async def routing_probe(graphiti: Graphiti, group_id: str, area: str) -> dict[st
     structure land. Deduped, countable results here mean a routing skill is mineable.
     """
     rows = await _query(
-        graphiti,
+        memory,
         """
         MATCH (person:Entity)-[rel:RELATES_TO]->(work:Entity)
         WHERE rel.group_id = $g AND rel.name IN ['REVIEWED', 'AUTHORED']
@@ -166,20 +168,20 @@ async def routing_probe(graphiti: Graphiti, group_id: str, area: str) -> dict[st
 
 async def run(repo: str, area: str | None) -> dict[str, Any]:
     group_id = repo_group_id(repo)
-    graphiti = make_engram(database=group_id)
+    memory = open_memory(database=group_id)
     try:
         report: dict[str, Any] = {
             "repo": repo,
             "group_id": group_id,
-            "structure": await structure(graphiti, group_id),
-            "dedup_forking": await dedup_forking(graphiti, group_id),
-            "citation_integrity": await citation_integrity(graphiti, group_id),
+            "structure": await structure(memory, group_id),
+            "dedup_forking": await dedup_forking(memory, group_id),
+            "citation_integrity": await citation_integrity(memory, group_id),
         }
         if area:
-            report["routing_probe"] = await routing_probe(graphiti, group_id, area)
+            report["routing_probe"] = await routing_probe(memory, group_id, area)
         return report
     finally:
-        await graphiti.close()
+        await memory.close()
 
 
 def main() -> None:

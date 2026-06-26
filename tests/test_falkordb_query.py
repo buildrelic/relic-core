@@ -1,4 +1,4 @@
-"""Regression test for the FalkorDB empty-fulltext-query shim in engram.
+"""Regression test for the FalkorDB empty-fulltext-query shim in the memory adapter.
 
 graphiti-core <=0.29.1 builds `(@group_id:"x") ()` when a search term sanitizes to
 nothing (punctuation or stopwords), and RediSearch rejects the empty parens with a

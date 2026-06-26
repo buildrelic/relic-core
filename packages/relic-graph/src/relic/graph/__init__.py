@@ -7,8 +7,9 @@ injected ``RecallFn`` (see ``relic.contracts``), so the serve subsystem never im
 graph at all.
 
 Production callers go through the Memory seam (``open_memory`` -> ``GraphitiMemory``,
-satisfying ``MemoryReader`` / ``MemoryWriter``); ``make_engram`` and ``falkordb_reachable``
-remain for construction and the liveness probe (ADR-0003).
+satisfying ``MemoryReader`` / ``MemoryWriter``); ``falkordb_reachable`` remains for the
+liveness probe (ADR-0003). Raw Graphiti construction stays private to ``memory`` (the
+retired ``make_engram`` is now ``_build_graphiti``, reachable only via ``open_memory``).
 """
 
 from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
@@ -21,7 +22,6 @@ from relic.graph.memory import (
     MemoryWriter,
     ensure_indexes,
     falkordb_reachable,
-    make_engram,
     open_memory,
 )
 from relic.graph.queries import ReviewerHit, reviewers_of
@@ -44,7 +44,6 @@ __all__ = [
     "format_answer",
     "load_episodes",
     "load_episodes_bulk",
-    "make_engram",
     "open_memory",
     "recall",
     "reviewers_of",

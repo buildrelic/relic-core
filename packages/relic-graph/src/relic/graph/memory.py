@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from relic.contracts import EpisodeSpec
 
-    # The provider-client triple make_engram hands to Graphiti.
+    # The provider-client triple _build_graphiti hands to Graphiti.
     _ClientTriple = tuple[LLMClient, EmbedderClient, CrossEncoderClient]
 
 log = get_logger("memory")
@@ -393,11 +393,11 @@ def open_memory(
     """Build the configured Graphiti and wrap it in the Memory adapter.
 
     The construction -- LLM provider selection + the FalkorDB driver + the 0.29.x
-    monkeypatches -- lives in this module (``make_engram``), the only place that imports
+    monkeypatches -- lives in this module (``_build_graphiti``), the only place that imports
     graphiti_core.
     """
     return GraphitiMemory(
-        make_engram(
+        _build_graphiti(
             host=host,
             port=port,
             password=password,
@@ -411,8 +411,8 @@ def open_memory(
 # --- Graphiti construction: provider selection, the driver, the 0.29.x workarounds ----
 #
 # Everything below builds the raw ``Graphiti`` and patches graphiti-core. It used to live
-# in ``relic.graph.engram`` (now retired). graphiti_core is imported lazily inside the
-# functions so ``relic --help`` stays key-free and import-light.
+# in ``relic.graph.engram`` (now retired, folded behind ``open_memory``). graphiti_core is
+# imported lazily inside the functions so ``relic --help`` stays key-free and import-light.
 
 
 _falkordb_patched = False
@@ -558,7 +558,7 @@ def _gemini_clients(gemini_key: str, openai_key: str, model: str) -> _ClientTrip
     return llm, _openai_embedder(openai_key), _openai_reranker(openai_key)
 
 
-def make_engram(
+def _build_graphiti(
     *,
     host: str | None = None,
     port: int | None = None,
@@ -572,7 +572,7 @@ def make_engram(
     Connection params fall back to settings (FALKORDB_*) when unset. The provider is
     selected by `GRAPHITI_LLM_PROVIDER` (default "openai"); "gemini" is hybrid and needs
     both keys. Clients are built here, not at import, so `relic --help` stays key-free.
-    Prefer ``open_memory`` -- this returns the raw handle the adapter wraps.
+    Private: callers go through ``open_memory``, which wraps this raw handle in the seam.
     """
     import os
 

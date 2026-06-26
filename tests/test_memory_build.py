@@ -1,27 +1,28 @@
-"""make_engram provider dispatch + the Gemini hybrid client builder.
+"""open_memory provider dispatch + the Gemini hybrid client builder.
 
-make_engram resolves GRAPHITI_LLM_PROVIDER and the API keys, then dispatches to a
-client-builder, all *before* it constructs the FalkorDriver or any network client. So
-the dispatch's failure modes -- a missing key, an unknown provider -- are exercisable
-here without OpenAI, Gemini, or FalkorDB. The Gemini *success* build is covered by
-calling `_gemini_clients` directly (it only constructs client objects, no network); the
-full happy path against live services stays in the gated test_ingest_integration.
+open_memory (via the private _build_graphiti) resolves GRAPHITI_LLM_PROVIDER and the API
+keys, then dispatches to a client-builder, all *before* it constructs the FalkorDriver or
+any network client. So the dispatch's failure modes -- a missing key, an unknown provider
+-- are exercisable here without OpenAI, Gemini, or FalkorDB. The Gemini *success* build is
+covered by calling `_gemini_clients` directly (it only constructs client objects, no
+network); the full happy path against live services stays in the gated
+test_ingest_integration.
 """
 
 import pytest
 
 from relic.config import Settings
-from relic.graph.memory import _gemini_clients, make_engram
+from relic.graph.memory import _gemini_clients, open_memory
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides) -> None:
     """Pin get_settings() to a constructed Settings and neutralize any ambient OpenAI key.
 
     We set OPENAI_API_KEY to blank rather than deleting it: graphiti_core calls
-    load_dotenv() at import (which make_engram triggers), and that would otherwise
+    load_dotenv() at import (which open_memory triggers), and that would otherwise
     re-inject a developer's real .env key into os.environ. load_dotenv uses
     override=False, so a value already present wins -- and blank sanitizes to None in
-    Settings and reads falsy in make_engram's os.environ lookup.
+    Settings and reads falsy in the os.environ lookup inside _build_graphiti.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "")
     settings = Settings(**overrides)
@@ -33,7 +34,7 @@ def test_openai_provider_without_key_raises(monkeypatch: pytest.MonkeyPatch) -> 
     _use_settings(monkeypatch, graphiti_llm_provider="openai", openai_api_key=None)
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY is required"):
-        make_engram()
+        open_memory()
 
 
 def test_gemini_without_gemini_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,7 +44,7 @@ def test_gemini_without_gemini_key_raises(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     with pytest.raises(RuntimeError, match="needs GEMINI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
 def test_gemini_without_openai_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,14 +54,14 @@ def test_gemini_without_openai_key_raises(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
 def test_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _use_settings(monkeypatch, graphiti_llm_provider="llama", openai_api_key="sk-test")
 
     with pytest.raises(RuntimeError, match="Unknown GRAPHITI_LLM_PROVIDER"):
-        make_engram()
+        open_memory()
 
 
 def test_provider_value_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,11 +76,11 @@ def test_provider_value_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
-def test_make_engram_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    # make_engram should forward settings.gemini_model to the client builder. We capture
+def test_open_memory_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    # open_memory should forward settings.gemini_model to the client builder. We capture
     # the builder's args and stop before FalkorDriver construction with a sentinel.
     _use_settings(
         monkeypatch,
@@ -99,7 +100,7 @@ def test_make_engram_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("relic.graph.memory._gemini_clients", _spy)
 
     with pytest.raises(RuntimeError, match="sentinel"):
-        make_engram()
+        open_memory()
     assert captured == {
         "gemini_key": "g-test",
         "openai_key": "sk-test",

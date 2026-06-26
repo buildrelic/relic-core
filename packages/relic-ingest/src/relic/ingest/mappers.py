@@ -17,6 +17,7 @@ from relic.contracts import EpisodeSpec
 from relic.contracts.episode_body import (
     CoAuthor,
     CommitEntry,
+    ConversationEpisodeBody,
     DiffStats,
     FileEntry,
     IssueEpisodeBody,
@@ -133,6 +134,28 @@ class RepoBundle:
     issues: list[IssueRec] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class MeetingRec:
+    """A normalized Granola meeting: notes + transcript + attendees, ready to map.
+
+    Source-agnostic shape the connector populates. ``url`` is the permalink recall
+    cites, ``owner_email`` is the per-user scope key (meetings have no repo), and
+    ``summary``/``transcript`` are the conversation prose the extractor mines.
+    """
+
+    id: str
+    title: str | None
+    url: str
+    owner_email: str | None
+    participants: list[str] = field(default_factory=list)
+    summary: str | None = None
+    transcript: str | None = None
+    occurred_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
 # --- Pure transforms ---------------------------------------------------------
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -141,6 +164,17 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 def repo_group_id(full_name: str) -> str:
     """Slugify owner/name to a Graphiti-legal group_id (matches ^[A-Za-z0-9_-]+$)."""
     return re.sub(r"[^A-Za-z0-9_-]", "_", full_name.replace("/", "__"))
+
+
+def granola_group_id(owner_email: str | None) -> str:
+    """Per-owner Granola scope key, e.g. ``granola__zidan_tryrelic_io``.
+
+    Meetings have no repo, so the graph partition is the note owner's identity — a
+    real key from the payload, not a faked repo (the seam ``issue_to_episode`` papers
+    over for Linear). Reuses ``repo_group_id``'s slugify so the result is
+    Graphiti-legal; a missing owner falls back to a single stable bucket.
+    """
+    return repo_group_id(f"granola/{owner_email or 'unknown'}")
 
 
 def _parse_aware(value: str) -> datetime:
@@ -163,6 +197,11 @@ _MAX_COMMITS_PER_PR = 20
 _MAX_BODY_CHARS = 16000
 # States that carry a decision; preferred over plain COMMENTED when capping reviews.
 _DECIDED_STATES = {"APPROVED", "CHANGES_REQUESTED"}
+# Meeting bodies: the AI summary is the mined signal (give it a generous cap); the
+# transcript is the bulky evidence and is trimmed to whatever budget remains after
+# assembly. Both stay under the shared _MAX_BODY_CHARS ceiling via _fit_conversation_budget.
+_MAX_SUMMARY_CHARS = 4000
+_MAX_TRANSCRIPT_CHARS = 14000
 
 _FENCE_RE = re.compile(r"`{3,}")
 _ZWSP = chr(0x200B)  # zero-width space, woven between backticks to break a fence run
@@ -447,4 +486,61 @@ def issue_to_episode(issue: IssueRec, repo: RepoBundle) -> EpisodeSpec:
         source_description=f"{issue.source} issue",
         reference_time=_parse_aware(ref) if ref else _EPOCH,
         group_id=repo_group_id(repo.full_name),
+    )
+
+
+def _fit_conversation_budget(body: ConversationEpisodeBody) -> ConversationEpisodeBody:
+    """Trim an assembled conversation body to the token-proxy ceiling, deterministically.
+
+    The transcript is by far the largest field and the lowest signal-per-character (the
+    summary, decisions, and action items are what the extractor mines), so it is shed
+    first: halve it until the serialized body fits, then drop it entirely once it is too
+    small to matter. The summary is already capped, so a transcript-less body is bounded.
+    """
+    while len(body.model_dump_json()) > _MAX_BODY_CHARS and body.transcript:
+        if len(body.transcript) <= 500:
+            body.transcript = None
+            break
+        body.transcript = body.transcript[: len(body.transcript) // 2] + "..."
+    return body
+
+
+def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
+    """Map a Granola meeting to a Conversation episode (``medium="meeting"``).
+
+    Rides the existing conversation path rather than inventing a Meeting type: the
+    permalink lands in ``url`` (the anchor recall cites), attendees become
+    ``participants``, and the AI summary + transcript are the prose the extractor
+    mines. Every free-text field is fence-defused and clipped, and the assembled body
+    is trimmed to the per-episode token budget. The scope (``group_id``) is per
+    note-owner — a real identity, so it takes no faked ``RepoBundle``.
+    """
+    n_people = len(meeting.participants)
+    context = "meeting"
+    if n_people:
+        context += f", {n_people} participant{'s' if n_people != 1 else ''}"
+    body = ConversationEpisodeBody(
+        context=context,
+        url=meeting.url,
+        medium="meeting",
+        title=_defuse_fences(meeting.title) if meeting.title else None,
+        occurred_at=meeting.occurred_at,
+        participants=[PersonRef(login=name) for name in meeting.participants],
+        transcript=_clip(meeting.transcript, _MAX_TRANSCRIPT_CHARS),
+        summary=_clip(meeting.summary, _MAX_SUMMARY_CHARS),
+    )
+    # Anchor to when the meeting happened, falling back to when the note was created,
+    # then the epoch if even that is missing.
+    ref = meeting.occurred_at or meeting.created_at
+    return EpisodeSpec(
+        # The stable note id is the dedup key, so a re-presented meeting is skipped, not
+        # re-extracted. Deliberately NO updated_at folded in: a version in the name forks
+        # the graph (Graphiti mints a fresh Episodic uuid per add) instead of updating in
+        # place. Re-ingesting an edited note (regenerated summary, late edits) needs
+        # episode supersession at the loader/checkpoint layer, not a mapper rename.
+        name=f"Meeting {meeting.id}",
+        body=_fit_conversation_budget(body).model_dump_json(),
+        source_description="granola meeting",
+        reference_time=_parse_aware(ref) if ref else _EPOCH,
+        group_id=granola_group_id(meeting.owner_email),
     )

@@ -1,0 +1,54 @@
+{
+  "id": "not_teamsync01a2b3",
+  "object": "note",
+  "title": "Relic weekly sync",
+  "owner": {
+    "name": "Zidan Kazi",
+    "email": "zidan@tryrelic.io"
+  },
+  "created_at": "2026-06-22T15:00:11Z",
+  "updated_at": "2026-06-22T15:48:02Z",
+  "web_url": "https://notes.granola.ai/d/7f3c9a12-4b6e-4d2a-9c1f-2a8e5b6d3c40",
+  "calendar_event": {
+    "event_title": "Relic weekly sync",
+    "invitees": [
+      { "email": "zidan@tryrelic.io" },
+      { "email": "paris@tryrelic.io" },
+      { "email": "abhinav@tryrelic.io" }
+    ],
+    "organiser": "zidan@tryrelic.io",
+    "calendar_event_id": "evt_weeklysync22jun",
+    "scheduled_start_time": "2026-06-22T15:00:00Z",
+    "scheduled_end_time": "2026-06-22T15:30:00Z"
+  },
+  "attendees": [
+    { "name": "Zidan Kazi", "email": "zidan@tryrelic.io" },
+    { "name": "Paris Phan", "email": "paris@tryrelic.io" },
+    { "name": "Abhinav", "email": "abhinav@tryrelic.io" }
+  ],
+  "folder_membership": [
+    { "id": "fol_relicteam0001a", "object": "folder", "name": "Relic", "parent_folder_id": null }
+  ],
+  "summary_text": "Agreed to ship the Granola connector behind GRANOLA_API_KEY and scope meetings per note-owner. Paris owns relic-ingest review. Abhinav to keep the ontology work (REL-94) decoupled.",
+  "summary_markdown": "## Decisions\n- Ship the **Granola connector** behind `GRANOLA_API_KEY`, scoped per note-owner.\n- Meetings ride the existing Conversation path (`medium=\"meeting\"`).\n\n## Action items\n- Paris: review the relic-ingest diff.\n- Abhinav: keep typed Meeting extraction (REL-94) decoupled from this.",
+  "transcript": [
+    {
+      "speaker": { "source": "microphone", "diarization_label": "Zidan" },
+      "text": "Let's land the Granola connector this week. I want it gated the same way Linear is.",
+      "start_time": "2026-06-22T15:01:04Z",
+      "end_time": "2026-06-22T15:01:12Z"
+    },
+    {
+      "speaker": { "source": "speaker", "diarization_label": "Paris" },
+      "text": "Sounds good. Keep it in relic-ingest and I'll review the diff against the existing mappers.",
+      "start_time": "2026-06-22T15:01:13Z",
+      "end_time": "2026-06-22T15:01:21Z"
+    },
+    {
+      "speaker": { "source": "speaker", "diarization_label": "Abhinav" },
+      "text": "As long as it doesn't touch the ontology. Typed meeting extraction is REL-94, separate workstream.",
+      "start_time": "2026-06-22T15:01:22Z",
+      "end_time": "2026-06-22T15:01:30Z"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "id": "not_designrev0001x",
+  "object": "note",
+  "title": "Recall scoping design review",
+  "owner": {
+    "name": "Paris Phan",
+    "email": "paris@tryrelic.io"
+  },
+  "created_at": "2026-06-24T18:00:09Z",
+  "updated_at": "2026-06-24T18:52:40Z",
+  "web_url": "https://notes.granola.ai/d/1d2e3f40-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+  "calendar_event": {
+    "event_title": "Recall scoping design review",
+    "invitees": [
+      { "email": "paris@tryrelic.io" },
+      { "email": "zidan@tryrelic.io" }
+    ],
+    "organiser": "paris@tryrelic.io",
+    "calendar_event_id": "evt_designrev24jun",
+    "scheduled_start_time": "2026-06-24T18:00:00Z",
+    "scheduled_end_time": "2026-06-24T18:45:00Z"
+  },
+  "attendees": [
+    { "name": "Paris Phan", "email": "paris@tryrelic.io" },
+    { "name": "Zidan Kazi", "email": "zidan@tryrelic.io" }
+  ],
+  "folder_membership": [
+    { "id": "fol_relicteam0001a", "object": "folder", "name": "Relic", "parent_folder_id": null }
+  ],
+  "summary_text": "Reviewed per-session recall scoping. Decided the inject hook must pass cwd so recall scopes per session like capture does. Open question: caching the per-repo lock.",
+  "summary_markdown": "## Decisions\n- The inject hook **must send cwd** so recall scopes per-session, mirroring capture.\n\n## Open questions\n- Whether to cache the per-repo lock or resolve it on every recall.",
+  "transcript": [
+    {
+      "speaker": { "source": "microphone", "diarization_label": "Paris" },
+      "text": "Recall is hitting the empty default graph instead of the per-repo group. We need the inject hook to send cwd.",
+      "start_time": "2026-06-24T18:02:01Z",
+      "end_time": "2026-06-24T18:02:10Z"
+    },
+    {
+      "speaker": { "source": "speaker", "diarization_label": "Zidan" },
+      "text": "Right, capture already scopes per session by cwd. Inject should match it exactly so the two halves agree.",
+      "start_time": "2026-06-24T18:02:11Z",
+      "end_time": "2026-06-24T18:02:20Z"
+    },
+    {
+      "speaker": { "source": "microphone", "diarization_label": "Paris" },
+      "text": "Let's also decide whether the per-repo lock should be cached or resolved fresh each recall.",
+      "start_time": "2026-06-24T18:02:21Z",
+      "end_time": "2026-06-24T18:02:29Z"
+    }
+  ]
+}

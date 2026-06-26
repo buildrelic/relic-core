@@ -242,10 +242,13 @@ async def _capture(
         RepoBundle,
         dump_raw,
         fetch_issues,
+        fetch_meetings,
         fetch_repo,
+        granola_enabled,
         issue_to_episode,
         linear_enabled,
         make_github,
+        meeting_to_episode,
         pr_to_episode,
         repo_group_id,
         resolve_github_token,
@@ -292,6 +295,18 @@ async def _capture(
         log.info("fetched %d Linear issues", len(linear_issues))
     else:
         log.info("Linear skipped (LINEAR_API_KEY not set)")
+
+    if granola_enabled(settings) and settings.granola_api_key:
+        meetings = await fetch_meetings(settings.granola_api_key, months=months, limit=limit)
+        for meeting in meetings:
+            dump_raw(meeting.raw, source="granola", ident=_safe_ident(meeting.id))
+            raw_count += 1
+        # Meetings carry their own per-owner group_id (granola__<email>); like Linear they
+        # spool under this capture key but land in their own partition at load time.
+        episodes += [meeting_to_episode(meeting) for meeting in meetings]
+        log.info("fetched %d Granola meetings", len(meetings))
+    else:
+        log.info("Granola skipped (GRANOLA_API_KEY not set)")
 
     log.debug("wrote %d raw payloads under data/raw", raw_count)
     # Canonical load order, so the combined ingest feeds the order-sensitive loader the
@@ -1041,9 +1056,7 @@ def daemon(
     port: Annotated[int, typer.Option(help="bind port")] = 8788,
     token: Annotated[
         str | None,
-        typer.Option(
-            help="require Authorization: Bearer <token>; defaults to $RELIC_DAEMON_TOKEN"
-        ),
+        typer.Option(help="require Authorization: Bearer <token>; defaults to $RELIC_DAEMON_TOKEN"),
     ] = None,
 ) -> None:
     """Run the closed-loop daemon: recall on inject, write-back on capture.

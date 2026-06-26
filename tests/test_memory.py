@@ -208,7 +208,9 @@ class _SupersedeGraphiti:
         self.episodes = {n: u for n, u in self.episodes.items() if u != uuid}
         # mirror graphiti: delete only edges this episode still originates (episodes[0] == uuid)
         self.edges = {
-            eu: e for eu, e in self.edges.items() if not (e["episodes"] and e["episodes"][0] == uuid)
+            eu: e
+            for eu, e in self.edges.items()
+            if not (e["episodes"] and e["episodes"][0] == uuid)
         }
 
 

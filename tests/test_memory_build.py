@@ -1,27 +1,28 @@
-"""make_engram provider dispatch + the Gemini hybrid client builder.
+"""open_memory provider dispatch + the Gemini hybrid client builder.
 
-make_engram resolves GRAPHITI_LLM_PROVIDER and the API keys, then dispatches to a
-client-builder, all *before* it constructs the FalkorDriver or any network client. So
-the dispatch's failure modes -- a missing key, an unknown provider -- are exercisable
-here without OpenAI, Gemini, or FalkorDB. The Gemini *success* build is covered by
-calling `_gemini_clients` directly (it only constructs client objects, no network); the
-full happy path against live services stays in the gated test_ingest_integration.
+open_memory (via the private _build_graphiti) resolves GRAPHITI_LLM_PROVIDER and the API
+keys, then dispatches to a client-builder, all *before* it constructs the FalkorDriver or
+any network client. So the dispatch's failure modes -- a missing key, an unknown provider
+-- are exercisable here without OpenAI, Gemini, or FalkorDB. The Gemini *success* build is
+covered by calling `_gemini_clients` directly (it only constructs client objects, no
+network); the full happy path against live services stays in the gated
+test_ingest_integration.
 """
 
 import pytest
 
 from relic.config import Settings
-from relic.graph.engram import _gemini_clients, make_engram
+from relic.graph.memory import _gemini_clients, open_memory
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides) -> None:
     """Pin get_settings() to a constructed Settings and neutralize any ambient OpenAI key.
 
     We set OPENAI_API_KEY to blank rather than deleting it: graphiti_core calls
-    load_dotenv() at import (which make_engram triggers), and that would otherwise
+    load_dotenv() at import (which open_memory triggers), and that would otherwise
     re-inject a developer's real .env key into os.environ. load_dotenv uses
     override=False, so a value already present wins -- and blank sanitizes to None in
-    Settings and reads falsy in make_engram's os.environ lookup.
+    Settings and reads falsy in the os.environ lookup inside _build_graphiti.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "")
     settings = Settings(**overrides)
@@ -33,7 +34,7 @@ def test_openai_provider_without_key_raises(monkeypatch: pytest.MonkeyPatch) -> 
     _use_settings(monkeypatch, graphiti_llm_provider="openai", openai_api_key=None)
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY is required"):
-        make_engram()
+        open_memory()
 
 
 def test_gemini_without_gemini_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,7 +44,7 @@ def test_gemini_without_gemini_key_raises(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     with pytest.raises(RuntimeError, match="needs GEMINI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
 def test_gemini_without_openai_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,14 +54,14 @@ def test_gemini_without_openai_key_raises(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
 def test_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _use_settings(monkeypatch, graphiti_llm_provider="llama", openai_api_key="sk-test")
 
     with pytest.raises(RuntimeError, match="Unknown GRAPHITI_LLM_PROVIDER"):
-        make_engram()
+        open_memory()
 
 
 def test_provider_value_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,11 +76,11 @@ def test_provider_value_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        make_engram()
+        open_memory()
 
 
-def test_make_engram_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    # make_engram should forward settings.gemini_model to the client builder. We capture
+def test_open_memory_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    # open_memory should forward settings.gemini_model to the client builder. We capture
     # the builder's args and stop before FalkorDriver construction with a sentinel.
     _use_settings(
         monkeypatch,
@@ -96,10 +97,10 @@ def test_make_engram_passes_configured_gemini_model(monkeypatch: pytest.MonkeyPa
         captured["model"] = model
         raise RuntimeError("sentinel: stop before driver")
 
-    monkeypatch.setattr("relic.graph.engram._gemini_clients", _spy)
+    monkeypatch.setattr("relic.graph.memory._gemini_clients", _spy)
 
     with pytest.raises(RuntimeError, match="sentinel"):
-        make_engram()
+        open_memory()
     assert captured == {
         "gemini_key": "g-test",
         "openai_key": "sk-test",
@@ -113,7 +114,7 @@ def test_prompt_json_patch_serializes_datetime() -> None:
     import importlib
     from datetime import UTC, datetime
 
-    from relic.graph.engram import _patch_prompt_json_datetime
+    from relic.graph.memory import _patch_prompt_json_datetime
 
     _patch_prompt_json_datetime()
 
@@ -144,7 +145,7 @@ def test_gemini_clients_builds_hybrid_triple() -> None:
 
 def test_ontology_registers_the_rel93_in_scope_types() -> None:
     # engram registers exactly the REL-93 types the captured PR/issue bodies feed.
-    from relic.graph.engram import EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPES, ENTITY_TYPES
 
     assert set(ENTITY_TYPES) == {"Person", "Repo", "PullRequest", "Issue", "Label", "File"}
     assert set(EDGE_TYPES) == {
@@ -162,7 +163,7 @@ def test_ontology_registers_the_rel93_in_scope_types() -> None:
 
 def test_ontology_omits_removed_and_unfed_types() -> None:
     # Guard the ADR's "register only what a captured body feeds" calls against regression.
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     assert "Review" not in ENTITY_TYPES  # Review is the REVIEWED edge, not a node
     assert "Procedure" not in ENTITY_TYPES  # detector/compiler is a separate track
@@ -174,7 +175,7 @@ def test_ontology_omits_removed_and_unfed_types() -> None:
 
 def test_edge_type_map_is_closed_over_registered_types() -> None:
     # Every (source, target) label and every relation in the map must be registered.
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     for (src, tgt), relations in EDGE_TYPE_MAP.items():
         assert src in ENTITY_TYPES, f"unregistered source label: {src}"
@@ -188,6 +189,6 @@ def test_entity_types_avoid_graphiti_reserved_names() -> None:
     # Graphiti's EntityNode fields and be rejected by validate_entity_types.
     from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
 
-    from relic.graph.engram import ENTITY_TYPES
+    from relic.graph.schema import ENTITY_TYPES
 
     assert validate_entity_types(ENTITY_TYPES) is True

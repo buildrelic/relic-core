@@ -39,7 +39,7 @@ pytestmark = [
 
 async def test_load_and_query() -> None:
     from relic.contracts import EpisodeSpec
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.load import load_episodes
     from relic.graph.queries import reviewers_of
 
@@ -71,12 +71,12 @@ async def test_load_and_query() -> None:
         )
     ]
     # Isolate this test in its own FalkorDB database, dropped on the way out.
-    engram = make_engram(database="relic_test")
+    engram = open_memory(database="relic_test")
     try:
         stats = await load_episodes(engram, episodes, group_id="demo__repo", progress=False)
         hits = await reviewers_of(engram, "auth", group_id="demo__repo")
     finally:
-        await engram.driver.execute_query("MATCH (n) DETACH DELETE n")
+        await engram.execute_read("MATCH (n) DETACH DELETE n")  # eval-only escape hatch
         await engram.close()
 
     assert stats.episodes == 1
@@ -87,7 +87,7 @@ async def test_supersede_refreshes_episode_in_place() -> None:
     # REL-118: re-presenting an edited episode (changed token) supersedes the prior one --
     # refreshed in place against real FalkorDB, not forked into a second Episodic node.
     from relic.contracts import EpisodeSpec
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.load import _content_token, load_episodes
 
     def _pr_spec(title: str) -> EpisodeSpec:
@@ -111,7 +111,7 @@ async def test_supersede_refreshes_episode_in_place() -> None:
             group_id="demo__repo",
         )
 
-    engram = make_engram(database="relic_test")
+    engram = open_memory(database="relic_test")
     try:
         v1 = _pr_spec("add auth login")
         s1 = await load_episodes(engram, [v1], group_id="demo__repo", progress=False)
@@ -124,14 +124,13 @@ async def test_supersede_refreshes_episode_in_place() -> None:
             skip={"PR demo/repo#7": _content_token(v1)},
             progress=False,
         )
-        rows, _, _ = await engram.driver.execute_query(
+        rows = await engram.execute_read(  # eval-only escape hatch
             "MATCH (e:Episodic {name: $name, group_id: $g}) RETURN e.content AS content",
             name="PR demo/repo#7",
             g="demo__repo",
-            routing_="r",
         )
     finally:
-        await engram.driver.execute_query("MATCH (n) DETACH DELETE n")
+        await engram.execute_read("MATCH (n) DETACH DELETE n")  # eval-only escape hatch
         await engram.close()
 
     assert s1.loaded == 1

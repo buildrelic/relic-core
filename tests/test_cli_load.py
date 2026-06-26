@@ -50,7 +50,7 @@ def _spec(name: str, *, day: int = 1) -> EpisodeSpec:
 
 def _patch_graph(monkeypatch: pytest.MonkeyPatch, *, stats: LoadStats) -> None:
     monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: True)
-    monkeypatch.setattr("relic.graph.make_engram", lambda *a, **k: _FakeEngram())
+    monkeypatch.setattr("relic.graph.open_memory", lambda *a, **k: _FakeEngram())
 
     async def _load(*_a, **_k):
         return stats
@@ -82,7 +82,7 @@ def test_empty_spool_warns_and_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path
     def _no_engram(*_a, **_k):
         raise AssertionError("no engram should be built when the spool is empty")
 
-    monkeypatch.setattr("relic.graph.make_engram", _no_engram)
+    monkeypatch.setattr("relic.graph.open_memory", _no_engram)
 
     result = runner.invoke(app, ["load", "--repo", "demo/repo"])
     assert result.exit_code == 0  # empty spool is a no-op, not a failure
@@ -130,7 +130,7 @@ def test_load_limit_slices_to_n_pending(monkeypatch: pytest.MonkeyPatch, tmp_pat
     )
     stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
     monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: True)
-    monkeypatch.setattr("relic.graph.make_engram", lambda *a, **k: _FakeEngram())
+    monkeypatch.setattr("relic.graph.open_memory", lambda *a, **k: _FakeEngram())
     seen: list[int] = []
 
     async def _load(_engram, episodes, **_k):
@@ -218,7 +218,7 @@ def test_combined_and_split_feed_loader_the_same_order(
 
     monkeypatch.setattr("relic.ingest.fetch_repo", _fetch_repo)
     monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: True)
-    monkeypatch.setattr("relic.graph.make_engram", lambda *a, **k: _FakeEngram())
+    monkeypatch.setattr("relic.graph.open_memory", lambda *a, **k: _FakeEngram())
 
     stats = LoadStats(group_id="demo__repo", attempted=3, loaded=3, failed=0, duration_s=0.1)
     runs: list[list[str]] = []
@@ -261,7 +261,7 @@ def test_ingest_no_load_captures_without_touching_the_graph(
         raise AssertionError("--no-load must not build an engram")
 
     monkeypatch.setattr("relic.graph.falkordb_reachable", _no_probe)
-    monkeypatch.setattr("relic.graph.make_engram", _no_engram)
+    monkeypatch.setattr("relic.graph.open_memory", _no_engram)
 
     result = runner.invoke(app, ["ingest", "--repo", "demo/repo", "--no-load"])
     assert result.exit_code == 0

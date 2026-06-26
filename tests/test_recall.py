@@ -1,5 +1,7 @@
 from mcp.types import TextContent
 
+from conftest import FakeMemory
+from relic.graph.memory import MemoryEdge, MemoryEntity, MemoryEpisode
 from relic.graph.recall import (
     RecallAnswer,
     RecalledFact,
@@ -12,23 +14,12 @@ from relic.graph.recall import (
 from relic.registry.store import connect
 
 
-class _FakeEdge:
-    def __init__(self, fact: str, name: str, episodes: list[str]) -> None:
-        self.fact = fact
-        self.name = name
-        self.episodes = episodes
-
-
-class _FakeGraphiti:
-    def __init__(self, edges: list[_FakeEdge], *, raises: bool = False) -> None:
-        self._edges = edges
-        self._raises = raises
-        self.driver = None
-
-    async def search(self, query: str, *, group_ids=None, num_results: int = 10):
-        if self._raises:
-            raise RuntimeError("FTS unavailable")
-        return self._edges
+def _edge(fact: str, relation: str, episodes: list[str]) -> MemoryEdge:
+    person = MemoryEntity(uuid="p", name="paris", labels=["Person"], attributes={})
+    work = MemoryEntity(uuid="w", name="PR#1", labels=["PullRequest"], attributes={})
+    return MemoryEdge(
+        relation=relation, fact=fact, source=person, target=work, episode_uuids=episodes
+    )
 
 
 def test_format_answer_empty() -> None:
@@ -62,32 +53,31 @@ def test_format_answer_with_sources() -> None:
 
 
 async def test_recall_maps_edges_and_drops_blank_facts(monkeypatch) -> None:
-    # Fetch the submodule object via sys.modules: `relic.graph` re-exports the
-    # `recall` function, which shadows the same-named submodule on attribute access
-    # (including `import ... as`, which uses getattr), so a string target cannot
-    # traverse it. import_module returns the real module to patch its internal.
+    # Fetch the submodule object via sys.modules: `relic.graph` re-exports the `recall`
+    # function, which shadows the same-named submodule on attribute access, so a string
+    # target cannot traverse it. import_module returns the real module to patch its internal.
     import importlib
 
     recall_module = importlib.import_module("relic.graph.recall")
 
-    async def fake_resolve(_graphiti, episodes):
+    async def fake_resolve(_memory, episodes):
         return [Source(label=f"episode:{e}") for e in episodes]
 
     monkeypatch.setattr(recall_module, "_resolve_sources", fake_resolve)
-    graphiti = _FakeGraphiti(
-        [
-            _FakeEdge("paris reviews auth PRs", "REVIEWED", ["ep1"]),
-            _FakeEdge("   ", "BLANK", ["ep2"]),
+    memory = FakeMemory(
+        edges=[
+            _edge("paris reviews auth PRs", "REVIEWED", ["ep1"]),
+            _edge("   ", "BLANK", ["ep2"]),
         ]
     )
-    answer = await recall(graphiti, "auth reviewers")  # type: ignore[arg-type]
+    answer = await recall(memory, "auth reviewers")
     assert len(answer.facts) == 1
     assert answer.facts[0].fact == "paris reviews auth PRs"
     assert answer.facts[0].sources == [Source(label="episode:ep1")]
 
 
 async def test_recall_never_raises_on_search_failure() -> None:
-    answer = await recall(_FakeGraphiti([], raises=True), "anything")  # type: ignore[arg-type]
+    answer = await recall(FakeMemory(search_raises=True), "anything")
     assert answer.is_empty
 
 
@@ -99,18 +89,17 @@ def test_extract_url_prefers_pr_then_issue() -> None:
     assert _extract_url(None) is None
 
 
-async def test_resolve_sources_adds_name_and_url(monkeypatch) -> None:
-    from graphiti_core.nodes import EpisodicNode
-
-    class _Episode:
-        name = "PR buildrelic/relic-core#12"
-        content = '{"pull_request": {"url": "https://github.com/buildrelic/relic-core/pull/12"}}'
-
-    async def fake_get(_driver, _uuid):
-        return _Episode()
-
-    monkeypatch.setattr(EpisodicNode, "get_by_uuid", fake_get)
-    sources = await _resolve_sources(_FakeGraphiti([]), ["ep1"])  # type: ignore[arg-type]
+async def test_resolve_sources_adds_name_and_url() -> None:
+    memory = FakeMemory(
+        episodes={
+            "ep1": MemoryEpisode(
+                uuid="ep1",
+                name="PR buildrelic/relic-core#12",
+                content='{"pull_request": {"url": "https://github.com/buildrelic/relic-core/pull/12"}}',
+            )
+        }
+    )
+    sources = await _resolve_sources(memory, ["ep1"])
     assert sources == [
         Source(
             label="PR buildrelic/relic-core#12",

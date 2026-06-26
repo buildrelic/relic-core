@@ -18,11 +18,9 @@ if TYPE_CHECKING:
     import logging
     from collections.abc import Awaitable, Callable
 
-    from graphiti_core import Graphiti
-
     from relic.config import Settings
     from relic.contracts import EpisodeSpec
-    from relic.graph import LoadStats
+    from relic.graph import GraphitiMemory, LoadStats
 
 app = typer.Typer(
     name="relic",
@@ -341,7 +339,7 @@ async def _extract(
     import logging
     from collections.abc import Callable
 
-    from relic.graph import LoadStats, load_episodes, load_episodes_bulk, make_engram
+    from relic.graph import LoadStats, load_episodes, load_episodes_bulk, open_memory
     from relic.ingest import checkpoint_path, clear, compact, load_done, record_done
     from relic.obs import stderr_console
 
@@ -359,7 +357,7 @@ async def _extract(
     else:
         to_load, skip = episodes, done
 
-    engram = make_engram(
+    engram = open_memory(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
         password=settings.falkordb_password,
@@ -803,7 +801,7 @@ class _EngramPool:
                     self._locks[database] = lock
         return lock
 
-    async def get(self, database: str) -> "Graphiti":
+    async def get(self, database: str) -> "GraphitiMemory":
         eng = self._engrams.get(database)
         if eng is not None:
             self._engrams.move_to_end(database)  # LRU touch
@@ -811,9 +809,9 @@ class _EngramPool:
         async with await self._lock_for(database):
             eng = self._engrams.get(database)
             if eng is None:
-                from relic.graph import make_engram
+                from relic.graph import open_memory
 
-                eng = make_engram(
+                eng = open_memory(
                     host=self._settings.falkordb_host,
                     port=self._settings.falkordb_port,
                     password=self._settings.falkordb_password,
@@ -841,7 +839,7 @@ class _EngramPool:
 
 
 def _make_recall_fn(
-    engram: "Graphiti", group_id: str | None
+    engram: "GraphitiMemory", group_id: str | None
 ) -> "Callable[[str, int], Awaitable[str]]":
     async def recall_fn(query: str, num_results: int = 10) -> str:
         from relic.graph import format_answer, recall
@@ -924,7 +922,7 @@ def _resolve_session_transcript(payload: dict[str, Any]) -> str:
 
 
 async def _write_session_episode(
-    engram: "Graphiti", group: str, payload: dict[str, Any]
+    engram: "GraphitiMemory", group: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """Write one finished session into ``group`` as a Conversation episode.
 
@@ -1027,9 +1025,9 @@ async def _serve(repo: str | None = None) -> None:
     engram = None
     recall_fn = None
     try:
-        from relic.graph import make_engram
+        from relic.graph import open_memory
 
-        engram = make_engram(
+        engram = open_memory(
             host=settings.falkordb_host,
             port=settings.falkordb_port,
             password=settings.falkordb_password,
@@ -1602,13 +1600,13 @@ def recall_command(
 
 async def _recall(query: str, repo: str | None, num_results: int) -> None:
     from relic.config import get_settings
-    from relic.graph import format_answer, make_engram, recall
+    from relic.graph import format_answer, open_memory, recall
     from relic.ingest import repo_group_id
 
     settings = get_settings()
     repo = repo or settings.target_repo
     group_id = repo_group_id(repo) if repo else None
-    engram = make_engram(
+    engram = open_memory(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
         password=settings.falkordb_password,
@@ -1642,7 +1640,7 @@ async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
     import json
 
     from relic.config import get_settings
-    from relic.graph import make_engram, recall
+    from relic.graph import open_memory, recall
     from relic.ingest import repo_group_id
     from relic.scorecard import load_gold, score_case, summarize, to_payload
 
@@ -1653,7 +1651,7 @@ async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
         raise typer.Exit(code=1) from exc
     settings = get_settings()
     group_id = repo_group_id(gold.repo)
-    engram = make_engram(
+    engram = open_memory(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
         password=settings.falkordb_password,
@@ -1696,7 +1694,7 @@ def query(
 
 async def _query(text: str, repo: str | None) -> None:
     from relic.config import get_settings
-    from relic.graph import make_engram, reviewers_of
+    from relic.graph import open_memory, reviewers_of
     from relic.ingest import repo_group_id
 
     settings = get_settings()
@@ -1705,7 +1703,7 @@ async def _query(text: str, repo: str | None) -> None:
     # which only holds ungrouped data.
     repo = repo or settings.target_repo
     group_id = repo_group_id(repo) if repo else None
-    engram = make_engram(
+    engram = open_memory(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
         password=settings.falkordb_password,

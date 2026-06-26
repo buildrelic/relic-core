@@ -15,7 +15,7 @@ Two hard invariants the shape must keep, both load-bearing downstream:
   re-ingest and fork the whole graph.
 
 The keys mirror the flat ``*Node`` attribute names the extractor expects (see
-``relic.graph.engram`` and ``docs/data-model.mdx``), so values map onto typed
+``relic.graph.schema`` and ``docs/data-model.mdx``), so values map onto typed
 entities. Fields the connectors do not populate yet (CI checks, Linear cycle and
 state history) are declared optional and default empty, so the schema is the full
 target while capture catches up wave by wave.

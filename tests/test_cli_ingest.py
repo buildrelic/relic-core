@@ -74,7 +74,7 @@ def _patch_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path, *, stats: LoadS
     monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: True)
     monkeypatch.setattr("relic.ingest.resolve_github_token", lambda *a, **k: "tok")
     monkeypatch.setattr("relic.ingest.make_github", lambda *a, **k: _FakeGH())
-    monkeypatch.setattr("relic.graph.make_engram", lambda *a, **k: _FakeEngram())
+    monkeypatch.setattr("relic.graph.open_memory", lambda *a, **k: _FakeEngram())
 
     async def _fetch_repo(*_a, **_k):
         return _bundle()

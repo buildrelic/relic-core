@@ -214,7 +214,7 @@ async def _add_one(
     """
     from graphiti_core.nodes import EpisodeType
 
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     if remove_first:
         try:
@@ -355,7 +355,8 @@ async def load_episodes_bulk(
     from graphiti_core.nodes import EpisodeType
     from graphiti_core.utils.bulk_utils import RawEpisode
 
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, ensure_indexes
+    from relic.graph.engram import ensure_indexes
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     skip_map = _as_skip_map(skip)
     stats = LoadStats(group_id=group_id, attempted=len(episodes))

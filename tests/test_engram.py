@@ -144,7 +144,7 @@ def test_gemini_clients_builds_hybrid_triple() -> None:
 
 def test_ontology_registers_the_rel93_in_scope_types() -> None:
     # engram registers exactly the REL-93 types the captured PR/issue bodies feed.
-    from relic.graph.engram import EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPES, ENTITY_TYPES
 
     assert set(ENTITY_TYPES) == {"Person", "Repo", "PullRequest", "Issue", "Label", "File"}
     assert set(EDGE_TYPES) == {
@@ -162,7 +162,7 @@ def test_ontology_registers_the_rel93_in_scope_types() -> None:
 
 def test_ontology_omits_removed_and_unfed_types() -> None:
     # Guard the ADR's "register only what a captured body feeds" calls against regression.
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     assert "Review" not in ENTITY_TYPES  # Review is the REVIEWED edge, not a node
     assert "Procedure" not in ENTITY_TYPES  # detector/compiler is a separate track
@@ -174,7 +174,7 @@ def test_ontology_omits_removed_and_unfed_types() -> None:
 
 def test_edge_type_map_is_closed_over_registered_types() -> None:
     # Every (source, target) label and every relation in the map must be registered.
-    from relic.graph.engram import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+    from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
     for (src, tgt), relations in EDGE_TYPE_MAP.items():
         assert src in ENTITY_TYPES, f"unregistered source label: {src}"
@@ -188,6 +188,6 @@ def test_entity_types_avoid_graphiti_reserved_names() -> None:
     # Graphiti's EntityNode fields and be rejected by validate_entity_types.
     from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
 
-    from relic.graph.engram import ENTITY_TYPES
+    from relic.graph.schema import ENTITY_TYPES
 
     assert validate_entity_types(ENTITY_TYPES) is True

@@ -355,7 +355,7 @@ async def _extract(
     # resume count.
     if limit is not None:
         to_load = [spec for spec in episodes if spec.name not in done][:limit]
-        skip: set[str] = set()
+        skip: dict[str, str | None] = {}
     else:
         to_load, skip = episodes, done
 
@@ -375,7 +375,7 @@ async def _extract(
         common = {
             "group_id": group_id,
             "skip": skip,
-            "on_loaded": lambda name: record_done(ledger, name),
+            "on_loaded": lambda name, token: record_done(ledger, name, token),
             "on_progress": on_progress,
             "progress": on_progress is None,
         }
@@ -418,8 +418,11 @@ async def _extract(
                 def _on_progress(s: LoadStats) -> None:
                     bar.update(
                         task,
-                        completed=s.loaded + s.skipped + s.failed,
-                        counts=f"[green]{s.loaded}✓[/] [yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]",
+                        completed=s.loaded + s.superseded + s.skipped + s.failed,
+                        counts=(
+                            f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
+                            f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]"
+                        ),
                     )
 
                 stats = await _run(_on_progress)
@@ -430,7 +433,7 @@ async def _extract(
 
     summary = (
         f"extracted {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
-        f"({stats.skipped} skipped, {stats.failed} failed)"
+        f"({stats.superseded} refreshed, {stats.skipped} skipped, {stats.failed} failed)"
     )
     if stats.failed:
         log.warning(summary)
@@ -961,7 +964,7 @@ async def _write_session_episode(
         [spec],
         group_id=group,
         skip=done,
-        on_loaded=lambda name: record_done(ledger, name),
+        on_loaded=lambda name, token: record_done(ledger, name, token),
         progress=False,
     )
     return {

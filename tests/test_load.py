@@ -13,16 +13,16 @@ from graphiti_core.llm_client.errors import RateLimitError
 from tenacity import wait_none
 
 from relic.contracts import EpisodeSpec
-from relic.graph.load import load_episodes, load_episodes_bulk
+from relic.graph.load import _content_token, load_episodes, load_episodes_bulk
 
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
 
 
-def _spec(name: str, group_id: str = "demo__repo") -> EpisodeSpec:
+def _spec(name: str, group_id: str = "demo__repo", body: str = "{}") -> EpisodeSpec:
     return EpisodeSpec(
         name=name,
-        body="{}",
+        body=body,
         source_description="test",
         reference_time=datetime(2025, 1, 1, tzinfo=UTC),
         group_id=group_id,
@@ -182,7 +182,7 @@ async def test_on_loaded_fires_only_for_successes() -> None:
         specs,
         group_id="demo__repo",
         skip={"PR demo/repo#1"},
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -205,7 +205,7 @@ async def test_bulk_groups_by_group_id_and_checkpoints_all() -> None:
         cast("Graphiti", graphiti),
         specs,
         group_id="demo__repo",
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -245,7 +245,7 @@ async def test_bulk_failed_batch_falls_back_to_per_episode() -> None:
         specs,
         group_id="demo__repo",
         batch_size=10,
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -325,3 +325,138 @@ async def test_rate_limit_gives_up_after_max_attempts_and_counts_failed(
     assert stats.failed == 1
     assert graphiti.attempts["PR demo/repo#1"] == 3  # capped at _RETRY_ATTEMPTS
     assert "RateLimitError" in stats.failures[0][1]
+
+
+# --- supersession (REL-118): a changed body re-extracts in place ---------------
+
+
+class _FakeDriver:
+    """Answers the (name, group_id) -> episodic uuid lookup _remove_episode runs."""
+
+    def __init__(self, gh: "SupersedeGraphiti") -> None:
+        self._gh = gh
+
+    async def execute_query(
+        self, _query: str, *, name: str = "", group_id: str = "", routing_: str = "r"
+    ):
+        uuid = self._gh.episodes.get(name)
+        rows = [{"uuid": uuid}] if uuid is not None else []
+        return rows, None, None
+
+
+class SupersedeGraphiti(FakeGraphiti):
+    """FakeGraphiti plus the driver + remove_episode the supersession path exercises.
+
+    Models the episodic store as name -> uuid (the current node). ``seed`` pre-populates a
+    prior episode so a supersede has something to remove; remove_episode drops by uuid.
+    """
+
+    def __init__(self, seed: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self.episodes: dict[str, str] = dict(seed or {})  # name -> current uuid
+        self.removed: list[str] = []  # uuids passed to remove_episode, in order
+        self._counter = 0
+        self.driver = _FakeDriver(self)
+
+    async def add_episode(self, *, name: str, **kwargs) -> None:
+        await super().add_episode(name=name, **kwargs)  # records to self.added (may raise)
+        self._counter += 1
+        self.episodes[name] = f"uuid-{name}-{self._counter}"
+
+    async def remove_episode(self, uuid: str) -> None:
+        self.removed.append(uuid)
+        self.episodes = {n: u for n, u in self.episodes.items() if u != uuid}
+
+
+async def test_changed_token_supersedes_prior_episode() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v2 edited"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},  # differs from the new body's hash -> supersede
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    assert stats.loaded == 0
+    assert stats.skipped == 0
+    assert graphiti.removed == ["uuid-old"]  # prior episode removed first
+    assert graphiti.added == ["Meeting x"]  # then the fresh body re-added
+
+
+async def test_unchanged_token_skips_without_removal() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v1"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": _content_token(spec)},  # token matches -> skip, no work
+        progress=False,
+    )
+
+    assert stats.skipped == 1
+    assert stats.superseded == 0
+    assert graphiti.removed == []
+    assert graphiti.added == []
+
+
+async def test_legacy_none_token_never_supersedes() -> None:
+    # An upgraded ledger carries name-only (token None) entries; they must skip forever,
+    # never re-extract, so upgrading does not force a mass re-ingest.
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v2 edited"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": None},
+        progress=False,
+    )
+
+    assert stats.skipped == 1
+    assert stats.superseded == 0
+    assert graphiti.removed == []
+
+
+async def test_on_loaded_records_content_token() -> None:
+    graphiti = FakeGraphiti()
+    spec = _spec("PR demo/repo#1", body='{"x": 1}')
+    recorded: list[tuple[str, str | None]] = []
+
+    await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        on_loaded=lambda name, token: recorded.append((name, token)),
+        progress=False,
+    )
+
+    assert recorded == [("PR demo/repo#1", _content_token(spec))]
+
+
+async def test_bulk_supersede_runs_serially_before_batches() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    changed = _spec("Meeting x", body='{"summary": "v2"}')
+    fresh = _spec("PR demo/repo#1")
+
+    stats = await load_episodes_bulk(
+        cast("Graphiti", graphiti),
+        [changed, fresh],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},
+        batch_size=10,
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    assert stats.loaded == 1
+    assert graphiti.removed == ["uuid-old"]
+    # the superseded episode lands via the serial pre-pass (add_episode); the fresh one batches
+    assert "Meeting x" in graphiti.added
+    assert ("demo__repo", ["PR demo/repo#1"]) in graphiti.bulk_batches

@@ -13,16 +13,16 @@ from graphiti_core.llm_client.errors import RateLimitError
 from tenacity import wait_none
 
 from relic.contracts import EpisodeSpec
-from relic.graph.load import load_episodes, load_episodes_bulk
+from relic.graph.load import _content_token, load_episodes, load_episodes_bulk
 
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
 
 
-def _spec(name: str, group_id: str = "demo__repo") -> EpisodeSpec:
+def _spec(name: str, group_id: str = "demo__repo", body: str = "{}") -> EpisodeSpec:
     return EpisodeSpec(
         name=name,
-        body="{}",
+        body=body,
         source_description="test",
         reference_time=datetime(2025, 1, 1, tzinfo=UTC),
         group_id=group_id,
@@ -182,7 +182,7 @@ async def test_on_loaded_fires_only_for_successes() -> None:
         specs,
         group_id="demo__repo",
         skip={"PR demo/repo#1"},
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -205,7 +205,7 @@ async def test_bulk_groups_by_group_id_and_checkpoints_all() -> None:
         cast("Graphiti", graphiti),
         specs,
         group_id="demo__repo",
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -245,7 +245,7 @@ async def test_bulk_failed_batch_falls_back_to_per_episode() -> None:
         specs,
         group_id="demo__repo",
         batch_size=10,
-        on_loaded=recorded.append,
+        on_loaded=lambda name, _token: recorded.append(name),
         progress=False,
     )
 
@@ -325,3 +325,209 @@ async def test_rate_limit_gives_up_after_max_attempts_and_counts_failed(
     assert stats.failed == 1
     assert graphiti.attempts["PR demo/repo#1"] == 3  # capped at _RETRY_ATTEMPTS
     assert "RateLimitError" in stats.failures[0][1]
+
+
+# --- supersession (REL-118): a changed body re-extracts in place ---------------
+
+
+class _FakeDriver:
+    """Stands in for the FalkorDB driver, dispatching the three Cypher shapes the
+    supersession path issues: the (name, group_id) -> (uuid, entity_edges) lookup, the
+    edge-by-uuids read, and the targeted episodes prune.
+    """
+
+    def __init__(self, gh: "SupersedeGraphiti") -> None:
+        self._gh = gh
+
+    async def execute_query(
+        self,
+        query: str,
+        *,
+        name: str = "",
+        group_id: str = "",
+        uuids: list[str] | None = None,
+        uuid: str = "",
+        episodes: list[str] | None = None,
+        routing_: str = "w",
+    ):
+        gh = self._gh
+        if "e.entity_edges" in query:  # episodic lookup
+            ep_uuid = gh.episodes.get(name)
+            if ep_uuid is None:
+                return [], None, None
+            return [{"uuid": ep_uuid, "edge_uuids": gh.entity_edges.get(ep_uuid, [])}], None, None
+        if "WHERE r.uuid IN $uuids" in query:  # edge-by-uuids read
+            rows = [
+                {"uuid": u, "episodes": gh.edges[u]["episodes"]}
+                for u in (uuids or [])
+                if u in gh.edges
+            ]
+            return rows, None, None
+        if "SET r.episodes" in query:  # targeted prune (keep the corroborated fact)
+            gh.edges[uuid]["episodes"] = episodes or []
+            gh.pruned.append((uuid, episodes or []))
+            return [], None, None
+        return [], None, None
+
+
+class SupersedeGraphiti(FakeGraphiti):
+    """FakeGraphiti plus the driver + remove_episode the supersession path exercises.
+
+    Models the episodic store as name -> uuid, each episode's ``entity_edges`` list, and the
+    edges (uuid -> episodes). ``seed`` pre-populates a prior episode; ``edges``/``entity_edges``
+    let a test exercise the shared-fact prune. ``remove_episode`` mirrors graphiti: it drops
+    edges it still originates (episodes[0] == uuid) and forgets the node.
+    """
+
+    def __init__(
+        self,
+        seed: dict[str, str] | None = None,
+        edges: dict[str, dict[str, list[str]]] | None = None,
+        entity_edges: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.episodes: dict[str, str] = dict(seed or {})  # name -> current uuid
+        self.edges: dict[str, dict[str, list[str]]] = (
+            edges or {}
+        )  # edge uuid -> {"episodes": [...]}
+        self.entity_edges: dict[str, list[str]] = entity_edges or {}  # episode uuid -> edge uuids
+        self.removed: list[str] = []  # uuids passed to remove_episode, in order
+        self.pruned: list[tuple[str, list[str]]] = []  # (edge uuid, new episodes) updates issued
+        self._counter = 0
+        self.driver = _FakeDriver(self)
+
+    async def add_episode(self, *, name: str, **kwargs) -> None:
+        await super().add_episode(name=name, **kwargs)  # records to self.added (may raise)
+        self._counter += 1
+        self.episodes[name] = f"uuid-{name}-{self._counter}"
+
+    async def remove_episode(self, uuid: str) -> None:
+        self.removed.append(uuid)
+        self.episodes = {n: u for n, u in self.episodes.items() if u != uuid}
+        # mirror graphiti: delete only edges this episode still originates (episodes[0] == uuid)
+        self.edges = {
+            eu: e
+            for eu, e in self.edges.items()
+            if not (e["episodes"] and e["episodes"][0] == uuid)
+        }
+
+
+async def test_changed_token_supersedes_prior_episode() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v2 edited"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},  # differs from the new body's hash -> supersede
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    assert stats.loaded == 0
+    assert stats.skipped == 0
+    assert graphiti.removed == ["uuid-old"]  # prior episode removed first
+    assert graphiti.added == ["Meeting x"]  # then the fresh body re-added
+
+
+async def test_unchanged_token_skips_without_removal() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v1"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": _content_token(spec)},  # token matches -> skip, no work
+        progress=False,
+    )
+
+    assert stats.skipped == 1
+    assert stats.superseded == 0
+    assert graphiti.removed == []
+    assert graphiti.added == []
+
+
+async def test_legacy_none_token_never_supersedes() -> None:
+    # An upgraded ledger carries name-only (token None) entries; they must skip forever,
+    # never re-extract, so upgrading does not force a mass re-ingest.
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    spec = _spec("Meeting x", body='{"summary": "v2 edited"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": None},
+        progress=False,
+    )
+
+    assert stats.skipped == 1
+    assert stats.superseded == 0
+    assert graphiti.removed == []
+
+
+async def test_on_loaded_records_content_token() -> None:
+    graphiti = FakeGraphiti()
+    spec = _spec("PR demo/repo#1", body='{"x": 1}')
+    recorded: list[tuple[str, str | None]] = []
+
+    await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        on_loaded=lambda name, token: recorded.append((name, token)),
+        progress=False,
+    )
+
+    assert recorded == [("PR demo/repo#1", _content_token(spec))]
+
+
+async def test_bulk_supersede_runs_serially_before_batches() -> None:
+    graphiti = SupersedeGraphiti(seed={"Meeting x": "uuid-old"})
+    changed = _spec("Meeting x", body='{"summary": "v2"}')
+    fresh = _spec("PR demo/repo#1")
+
+    stats = await load_episodes_bulk(
+        cast("Graphiti", graphiti),
+        [changed, fresh],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},
+        batch_size=10,
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    assert stats.loaded == 1
+    assert graphiti.removed == ["uuid-old"]
+    # the superseded episode lands via the serial pre-pass (add_episode); the fresh one batches
+    assert "Meeting x" in graphiti.added
+    assert ("demo__repo", ["PR demo/repo#1"]) in graphiti.bulk_batches
+
+
+async def test_supersede_rescues_corroborated_facts_deletes_sole_owned() -> None:
+    # "A" originates two facts: "shared" is also supported by "B"; "solo" is A's alone.
+    graphiti = SupersedeGraphiti(
+        seed={"Meeting x": "A"},
+        edges={"shared": {"episodes": ["A", "B"]}, "solo": {"episodes": ["A"]}},
+        entity_edges={"A": ["shared", "solo"]},
+    )
+    spec = _spec("Meeting x", body='{"summary": "v2"}')
+
+    stats = await load_episodes(
+        cast("Graphiti", graphiti),
+        [spec],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},
+        progress=False,
+    )
+
+    assert stats.superseded == 1
+    # the corroborated fact survives, with A pruned out of its support list (B now originates)
+    assert graphiti.pruned == [("shared", ["B"])]
+    assert graphiti.edges["shared"]["episodes"] == ["B"]
+    # the fact only A supported is left unpruned, so remove_episode deletes it
+    assert "solo" not in graphiti.edges
+    assert graphiti.removed == ["A"]
+    assert graphiti.added == ["Meeting x"]

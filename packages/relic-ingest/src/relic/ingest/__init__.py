@@ -6,7 +6,7 @@ episode contract ``EpisodeSpec`` is not here: it lives in ``relic.contracts``, s
 graph consumes it without importing ingest.
 """
 
-from relic.ingest.checkpoint import checkpoint_path, clear, load_done, record_done
+from relic.ingest.checkpoint import checkpoint_path, clear, compact, load_done, record_done
 from relic.ingest.github import fetch_repo, make_github, resolve_github_token
 from relic.ingest.granola import fetch_meetings, granola_enabled
 from relic.ingest.linear import fetch_issues, linear_enabled
@@ -43,6 +43,7 @@ __all__ = [
     "checkpoint_path",
     "clear",
     "clear_spool",
+    "compact",
     "dump_raw",
     "fetch_issues",
     "fetch_meetings",

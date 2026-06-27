@@ -36,6 +36,7 @@
         "group": "Decisions",
         "pages": [
           "adr/0001-engram-graph-ontology",
+          "adr/0002-deterministic-first-structured-writes",
           "adr/0003-memory-seam"
         ]
       },

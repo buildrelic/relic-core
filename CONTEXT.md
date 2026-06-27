@@ -39,6 +39,18 @@ A bounded back-and-forth thread segment of a few turns, not a whole transcript.
 From Slack.
 _Avoid_: chat, thread, message log, meeting, transcript.
 
+## Subject
+
+**Subject**:
+The central artifact entity an episode is extracted from — the Pull request or Issue every
+other entity in that episode's body relates to (its author, reviewers, files, labels,
+linked issues, repo). One Subject per episode. It is what edges hang off; distinct from a
+Repo (which is the *target* of `IN_REPO`, not the episode's Subject — hence Repo, not the
+Subject, keeps the "anchor node" wording). The LLM extractor materializes the Subject node
+unreliably, so relic writes it — and the structural edges the extractor drops —
+deterministically from the body, behind the Memory seam.
+_Avoid_: anchor (reserved for Repo), root, head, principal.
+
 ## Entities
 
 **Person**:

@@ -146,7 +146,6 @@ _SUBJECT_EDGES: dict[str, tuple[str, tuple[str, ...]]] = {
     "REVIEWED": ("target", ("PullRequest",)),
     "REQUESTED_REVIEW": ("target", ("PullRequest",)),
     "TOUCHES_PATH": ("source", ("PullRequest",)),
-    "HAS_LABEL": ("source", ("PullRequest", "Issue")),
     "CLOSES": ("source", ("PullRequest",)),
     "ASSIGNED_TO": ("source", ("Issue",)),
     "PARENT_OF": ("source", ("Issue",)),
@@ -177,7 +176,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
     - **anchoring**  per body-derived edge, the share whose Subject endpoint is the expected
       type (``on_subject``) vs collapsed onto ``Repo`` (``on_repo``) vs elsewhere.
     - **coverage**  edges that *should* exist from the body (files -> TOUCHES_PATH,
-      linked_issues -> CLOSES, labels -> HAS_LABEL) vs how many actually landed.
+      linked_issues -> CLOSES) vs how many actually landed.
     """
     episodes = await _query(
         memory,
@@ -199,7 +198,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
     }
 
     by_type: dict[str, dict[str, int]] = {}
-    expected: dict[str, int] = {"TOUCHES_PATH": 0, "CLOSES": 0, "HAS_LABEL": 0}
+    expected: dict[str, int] = {"TOUCHES_PATH": 0, "CLOSES": 0}
     for ep in episodes:
         body = _safe_json(ep.get("content"))
         source_type = body.get("source_type", "?") if body else "?"
@@ -211,9 +210,6 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
         if body:
             expected["TOUCHES_PATH"] += len(body.get("files") or [])
             expected["CLOSES"] += len(body.get("linked_issues") or [])
-            for section in (body.get("pull_request"), body.get("issue")):
-                if isinstance(section, dict):
-                    expected["HAS_LABEL"] += len(section.get("labels") or [])
 
     presence = {
         st: {
@@ -276,7 +272,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
             "actual_edges": actual.get(rel, 0),
             "coverage": (round(actual.get(rel, 0) / expected[rel], 3) if expected[rel] else None),
         }
-        for rel in ("TOUCHES_PATH", "HAS_LABEL", "CLOSES")
+        for rel in ("TOUCHES_PATH", "CLOSES")
     }
 
     return {"subject_presence": presence, "edge_anchoring": anchoring, "coverage": coverage}

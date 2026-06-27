@@ -108,11 +108,6 @@ class IssueNode(BaseModel):
     cycle: str | None = Field(None, description="Cycle/sprint name (Linear)")
 
 
-class LabelNode(BaseModel):
-    """A label/tag on a PR or issue. The label text is the node `name`, so there are
-    no custom attributes."""
-
-
 class FileNode(BaseModel):
     """A repository-relative file path touched by a PR. The path is the node `name`,
     so there are no custom attributes."""
@@ -148,10 +143,6 @@ class TouchesPath(BaseModel):
     deletions: int | None = Field(None, description="Lines deleted in this file")
 
 
-class HasLabel(BaseModel):
-    """A pull request or issue carries a label."""
-
-
 class InRepo(BaseModel):
     """A pull request belongs to a repository."""
 
@@ -175,7 +166,6 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Repo": RepoNode,
     "PullRequest": PullRequestNode,
     "Issue": IssueNode,
-    "Label": LabelNode,
     "File": FileNode,
 }
 
@@ -184,7 +174,6 @@ EDGE_TYPES: dict[str, type[BaseModel]] = {
     "REVIEWED": Reviewed,
     "REQUESTED_REVIEW": RequestedReview,
     "TOUCHES_PATH": TouchesPath,
-    "HAS_LABEL": HasLabel,
     "IN_REPO": InRepo,
     "ASSIGNED_TO": AssignedTo,
     "PARENT_OF": ParentOf,
@@ -192,13 +181,11 @@ EDGE_TYPES: dict[str, type[BaseModel]] = {
 }
 
 # Keys are (source_label, target_label) using ENTITY_TYPES keys. A coarse edge is
-# discriminated by its signature (HAS_LABEL fans to PR and Issue; ASSIGNED_TO is
-# Issue -> Person here, the same move REVIEWED makes on PR).
+# discriminated by its signature (ASSIGNED_TO is Issue -> Person here, the same move
+# REVIEWED makes on PR).
 EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ("Person", "PullRequest"): ["AUTHORED", "REVIEWED", "REQUESTED_REVIEW"],
     ("PullRequest", "File"): ["TOUCHES_PATH"],
-    ("PullRequest", "Label"): ["HAS_LABEL"],
-    ("Issue", "Label"): ["HAS_LABEL"],
     ("PullRequest", "Repo"): ["IN_REPO"],
     ("Issue", "Person"): ["ASSIGNED_TO"],
     ("Issue", "Issue"): ["PARENT_OF"],

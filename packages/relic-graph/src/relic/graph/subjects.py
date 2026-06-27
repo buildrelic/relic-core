@@ -7,8 +7,8 @@ in 3 ingests; when it is missing its edges collapse onto ``Repo`` or vanish. The
 holds this data exactly, so we write it ourselves (ADR-0002). Scope is the *dropped*
 edges -- ``IN_REPO``, ``CLOSES`` (+ the linked ``Issue``), ``REQUESTED_REVIEW`` -- which
 are additive (the LLM almost never makes them), so they do not duplicate the extractor's
-output. The edges the LLM does make (``AUTHORED``/``REVIEWED``/``HAS_LABEL``/
-``TOUCHES_PATH``) are left to it and measured for residual drift before being touched.
+output. The edges the LLM does make (``AUTHORED``/``REVIEWED``/``TOUCHES_PATH``) are left
+to it and measured for residual drift before being touched.
 
 This module is pure: it returns a ``SubjectPlan`` of plain values. ``relic.graph.memory``
 turns that into Graphiti ``EntityNode`` / ``EntityEdge`` writes. Keeping it Graphiti-free

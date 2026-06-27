@@ -60,11 +60,6 @@ per-source handles (`github_login`, `slack_id`, `linear_id`, `email`) first and
 name similarity second.
 _Avoid_: user, account, member, contributor, author (as a type).
 
-**Label**:
-A tag applied to artifacts from a reused vocabulary. A node, so the same label
-connects every artifact it tags (`HAS_LABEL`).
-_Avoid_: tag, topic, category.
-
 **File**:
 A repository-relative path touched by a pull request. A node, so ownership ("who
 changes path X") is traversable (`TOUCHES_PATH`).

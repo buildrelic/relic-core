@@ -3,8 +3,8 @@
 These pin the ontology dicts the extractor is handed per ``add_episode`` -- no live
 FalkorDB, no LLM. They guard the structural rules graphiti enforces (no reserved field
 names, flat scalars) and the internal consistency of the three dicts, so a typo in an
-edge name or a node label fails here, not silently at extraction time. The Session
-artifact type (docs/adr/0001, the Session amendment) is checked explicitly.
+edge name or a node label fails here, not silently at extraction time. The AgentSession
+artifact type (docs/adr/0001, the AgentSession amendment) is checked explicitly.
 """
 
 from pydantic import BaseModel
@@ -31,7 +31,7 @@ def test_session_artifact_type_is_registered() -> None:
 
 
 def test_session_edge_map_links_work_to_artifacts() -> None:
-    # AUTHORED is reused for Person -> Session; TOUCHED/REFERENCES are the deterministic
+    # AUTHORED is reused for Person -> AgentSession; TOUCHED/REFERENCES are the deterministic
     # links to what the session worked on.
     assert EDGE_TYPE_MAP[("Person", "AgentSession")] == ["AUTHORED"]
     assert EDGE_TYPE_MAP[("AgentSession", "File")] == ["TOUCHED"]

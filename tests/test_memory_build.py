@@ -145,7 +145,7 @@ def test_gemini_clients_builds_hybrid_triple() -> None:
 
 def test_ontology_registers_the_rel93_in_scope_types() -> None:
     # Registers exactly the types the captured bodies feed: the REL-93 PR/issue types
-    # plus the Session artifact type (docs/adr/0001, the Session amendment).
+    # plus the AgentSession artifact type (docs/adr/0001, the AgentSession amendment).
     from relic.graph.schema import EDGE_TYPES, ENTITY_TYPES
 
     assert set(ENTITY_TYPES) == {

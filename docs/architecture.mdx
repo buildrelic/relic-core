@@ -197,7 +197,7 @@ It builds the engram, injects a `RecallFn` and a capture function into a loopbac
 surface ([`daemon_app.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/daemon_app.py),
 `build_daemon_app`), and closes the loop: Claude Code hooks call `inject` to recall
 context onto each prompt and `capture` to write the finished session back as a
-Session episode (see the Session amendment in
+AgentSession episode (see the AgentSession amendment in
 [ADR-0001](/adr/0001-engram-graph-ontology)) through the same `load_episodes` ingest uses. Serve still carries
 no graph dependency — the daemon's surface, like the MCP server's, takes recall by
 injection.

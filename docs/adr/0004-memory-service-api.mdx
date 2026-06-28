@@ -65,9 +65,9 @@ be hosting-ready.
    worker, and eval tools. A seam op is promoted to an endpoint only when a concrete
    external consumer appears.
 
-6. **Session capture is a write job.** A captured coding session lands via
+6. **AgentSession capture is a write job.** A captured coding session lands via
    `POST /v1/capture → 202 {job_id}`, backed by the `add_episode` seam method, as the
-   new `Session` artifact type. The ontology for `Session` (node + `TOUCHED`/
+   new `AgentSession` artifact type. The ontology for `AgentSession` (node + `TOUCHED`/
    `REFERENCES`/`RECORDS` edges, with deterministic structural links) is recorded in
    the [ADR-0001 amendment](/adr/0001-engram-graph-ontology).
 

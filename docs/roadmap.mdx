@@ -102,7 +102,8 @@ self-hosted FalkorDB to a managed or hosted FalkorDB instance, not a backend swa
 The **Relic daemon** ships a v1. It closes the loop the product is named for: a
 local background process (`relic daemon`) that Claude Code hooks call on every turn,
 recalling cited memory onto the prompt (`POST /v1/daemon/inject`) and writing the
-finished session back into the engram as a Conversation episode
+finished session back into the engram as a Session episode (the new artifact type,
+see the Session amendment in [ADR-0001](/adr/0001-engram-graph-ontology))
 (`POST /v1/daemon/capture`, on the `SessionEnd` hook). `relic install-hooks` wires
 the hooks; the desktop app (`relic-desktop`) supervises the daemon and exposes manual
 recall. The loop is verified end-to-end against FalkorDB: inject returns real cited

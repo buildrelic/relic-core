@@ -110,8 +110,8 @@ carries the MCP transport.
 Built: capture, memory, recall, the SQLite registry and skill lifecycle,
 emit/catalog reconciliation, the MCP server, the recall scorecard, and doctor. The
 test suite is 29 files. 28 run offline against throwaway SQLite and in-memory
-fakes. One live integration test is skip-gated on `OPENAI_API_KEY` and a reachable
-FalkorDB.
+fakes. Live integration tests are skip-gated on `OPENAI_API_KEY` or `RELIC_LIVE_TESTS=1`
+and a reachable FalkorDB.
 
 Pending: `resolve` (Phase 3, person identity across GitHub and Linear) and
 `compile` (Phase 4, procedure detection and grounded `SkillIR` generation). Until

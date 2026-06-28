@@ -12,7 +12,7 @@ and a reachable FalkorDB, so a normal ``just check`` skips them:
     RELIC_LIVE_TESTS=1 uv run pytest tests/test_graph_operations.py
 
 The corpus is seeded once per module (the expensive LLM step); each operation then
-queries the shared graph with its own short-lived engram connection. The engram's
+queries the shared graph with its own short-lived memory connection. The memory's
 database is set equal to the capture's ``group_id`` so episodes and search share one
 FalkorDB database (Graphiti routes episodes to a database named after the group_id;
 matching them avoids querying an empty default database).
@@ -96,24 +96,24 @@ def seeded_graph() -> Iterator[str]:
     """Seed the known corpus into FalkorDB once, yield the group_id, then wipe it.
 
     Synchronous so the one-time LLM-heavy load runs in its own event loop, decoupled
-    from each test's own loop. Tests open their own engram to query the shared graph.
+    from each test's own loop. Tests open their own memory to query the shared graph.
     """
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.load import load_episodes
 
     async def _seed() -> None:
-        engram = make_engram(database=GROUP_ID)
+        memory = open_memory(database=GROUP_ID)
         try:
-            await load_episodes(engram, [_pr_episode()], group_id=GROUP_ID, progress=False)
+            await load_episodes(memory, [_pr_episode()], group_id=GROUP_ID, progress=False)
         finally:
-            await engram.close()
+            await memory.close()
 
     async def _wipe() -> None:
-        engram = make_engram(database=GROUP_ID)
+        memory = open_memory(database=GROUP_ID)
         try:
-            await engram.driver.execute_query("MATCH (n) DETACH DELETE n")
+            await memory.execute_read("MATCH (n) DETACH DELETE n")
         finally:
-            await engram.close()
+            await memory.close()
 
     asyncio.run(_seed())
     try:
@@ -133,28 +133,28 @@ def _load_graph_stats():
 
 
 async def test_reviewers_of_surfaces_a_known_person(seeded_graph: str) -> None:
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.queries import reviewers_of
 
-    engram = make_engram(database=GROUP_ID)
+    memory = open_memory(database=GROUP_ID)
     try:
-        hits = await reviewers_of(engram, "auth login", group_id=GROUP_ID)
+        hits = await reviewers_of(memory, "auth login", group_id=GROUP_ID)
     finally:
-        await engram.close()
+        await memory.close()
 
     names = {hit.name.lower() for hit in hits}
     assert names & {"alice", "bob"}, f"expected alice/bob among reviewers, got {names}"
 
 
 async def test_recall_cites_the_source_pr(seeded_graph: str) -> None:
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
     from relic.graph.recall import recall
 
-    engram = make_engram(database=GROUP_ID)
+    memory = open_memory(database=GROUP_ID)
     try:
-        answer = await recall(engram, "auth login", group_id=GROUP_ID)
+        answer = await recall(memory, "auth login", group_id=GROUP_ID)
     finally:
-        await engram.close()
+        await memory.close()
 
     assert not answer.is_empty, "recall returned no facts for the seeded PR"
     urls = {src.url for fact in answer.facts for src in fact.sources}
@@ -162,15 +162,15 @@ async def test_recall_cites_the_source_pr(seeded_graph: str) -> None:
 
 
 async def test_graph_stats_reports_the_landed_structure(seeded_graph: str) -> None:
-    from relic.graph.engram import make_engram
+    from relic.graph import open_memory
 
     graph_stats = _load_graph_stats()
 
-    engram = make_engram(database=GROUP_ID)
+    memory = open_memory(database=GROUP_ID)
     try:
-        structure = await graph_stats.structure(engram, GROUP_ID)
+        structure = await graph_stats.structure(memory, GROUP_ID)
     finally:
-        await engram.close()
+        await memory.close()
 
     assert structure["episode_count"] >= 1, structure
     assert structure["entities_by_type"], "no typed entities landed"

@@ -144,15 +144,26 @@ def test_gemini_clients_builds_hybrid_triple() -> None:
 
 
 def test_ontology_registers_the_rel93_in_scope_types() -> None:
-    # engram registers exactly the REL-93 types the captured PR/issue bodies feed.
+    # Registers exactly the types the captured bodies feed: the REL-93 PR/issue types
+    # plus the Session artifact type (docs/adr/0001, the Session amendment).
     from relic.graph.schema import EDGE_TYPES, ENTITY_TYPES
 
-    assert set(ENTITY_TYPES) == {"Person", "Repo", "PullRequest", "Issue", "Label", "File"}
+    assert set(ENTITY_TYPES) == {
+        "Person",
+        "Repo",
+        "PullRequest",
+        "Issue",
+        "Label",
+        "File",
+        "Session",
+    }
     assert set(EDGE_TYPES) == {
         "AUTHORED",
         "REVIEWED",
         "REQUESTED_REVIEW",
         "TOUCHES_PATH",
+        "TOUCHED",
+        "REFERENCES",
         "HAS_LABEL",
         "IN_REPO",
         "ASSIGNED_TO",

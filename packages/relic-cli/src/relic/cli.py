@@ -851,8 +851,9 @@ def _make_recall_fn(
     return recall_fn
 
 
-# A coding session is captured as one Conversation episode. Clip to the most recent
-# chars, where the decisions land: 200k would be a single huge add_episode call.
+# A coding session is captured as one Session episode (docs/adr/0001, the Session
+# amendment). Clip to the recent chars, where the decisions land: 200k would be a
+# single huge add_episode call.
 _MAX_SESSION_CHARS = 24_000
 
 
@@ -924,17 +925,21 @@ def _resolve_session_transcript(payload: dict[str, Any]) -> str:
 async def _write_session_episode(
     engram: "GraphitiMemory", group: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Write one finished session into ``group`` as a Conversation episode.
+    """Write one finished session into ``group`` as a Session episode.
 
     The session is distilled to clean prose and run through the same loader ingest uses,
     so existing extraction turns it into typed facts with no new write path. Idempotent
     per session via the group's checkpoint ledger: the episode name is the session id,
     so a repeated SessionEnd (Claude Code can fire it more than once) is skipped, not
     re-extracted into a fork.
+
+    The deterministic ``files_touched`` / ``references`` links (docs/adr/0001 Session
+    amendment) stay empty until the capture hook enriches the payload with git metadata;
+    a transcript-only capture still lands.
     """
     from datetime import datetime
 
-    from relic.contracts import ConversationEpisodeBody, EpisodeSpec
+    from relic.contracts import EpisodeSpec, SessionEpisodeBody
     from relic.graph import load_episodes
     from relic.ingest import checkpoint_path, load_done, record_done
 
@@ -945,11 +950,12 @@ async def _write_session_episode(
     ledger = checkpoint_path(group)
     done = load_done(ledger)
 
-    body = ConversationEpisodeBody(
+    body = SessionEpisodeBody(
         url=f"session://{session_id}",
-        medium="other",
         title=f"Coding session {session_id[:8]}",
-        occurred_at=datetime.now(UTC).isoformat(),
+        agent="claude-code",
+        cwd=str(payload.get("cwd", "")).strip() or None,
+        ended_at=datetime.now(UTC).isoformat(),
         transcript=transcript or None,
         summary=summary,
     )

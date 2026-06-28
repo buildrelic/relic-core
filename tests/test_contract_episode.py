@@ -30,6 +30,7 @@ from relic.contracts.episode_body import (
     PrEpisodeBody,
     ReleaseEpisodeBody,
     RepoRef,
+    SessionEpisodeBody,
 )
 from relic.graph.recall import _extract_url
 from relic.ingest.mappers import (
@@ -208,6 +209,7 @@ _SOURCE_BODIES: list[BaseModel] = [
     DocEpisodeBody(url="https://github.com/o/r/blob/main/docs/adr/0001.md", title="Use FalkorDB"),
     DiscussionEpisodeBody(url="https://github.com/o/r/discussions/7", title="RFC: routing"),
     ConversationEpisodeBody(url="https://slack.com/archives/C/p1"),
+    SessionEpisodeBody(url="session://abc123", title="Coding session abc123"),
 ]
 
 _ALL_BODY_MODELS = [
@@ -220,6 +222,7 @@ _ALL_BODY_MODELS = [
     DocEpisodeBody,
     DiscussionEpisodeBody,
     ConversationEpisodeBody,
+    SessionEpisodeBody,
 ]
 
 

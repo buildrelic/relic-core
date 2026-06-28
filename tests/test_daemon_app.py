@@ -83,9 +83,7 @@ def test_inject_forwards_cwd_to_recall():
         seen["cwd"] = cwd
         return ""
 
-    _client(recall=recall).post(
-        "/v1/daemon/inject", json={"prompt": "q", "cwd": "/work/some-repo"}
-    )
+    _client(recall=recall).post("/v1/daemon/inject", json={"prompt": "q", "cwd": "/work/some-repo"})
     assert seen["cwd"] == "/work/some-repo"
 
 
@@ -224,9 +222,7 @@ def test_token_guards_writes_not_status():
     # writes need the bearer
     assert client.post("/v1/daemon/inject", json={"prompt": "q"}).status_code == 401
     assert (
-        client.post(
-            "/v1/daemon/capture", json={"session_id": "a", "transcript": "t"}
-        ).status_code
+        client.post("/v1/daemon/capture", json={"session_id": "a", "transcript": "t"}).status_code
         == 401
     )
     ok = client.post(

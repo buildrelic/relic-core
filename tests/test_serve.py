@@ -70,9 +70,7 @@ async def test_search_skills_filters_by_text_and_scope(
     assert "auth-routing" not in _text(by_scope)
 
 
-async def test_skills_exposed_as_resources(
-    tmp_path, make_skill: Callable[..., SkillIR]
-) -> None:
+async def test_skills_exposed_as_resources(tmp_path, make_skill: Callable[..., SkillIR]) -> None:
     conn = connect(tmp_path / "registry.db")
     upsert_skill(conn, make_skill("draft-skill", status="draft"))
     upsert_skill(conn, make_skill("verified-skill", status="verified"))

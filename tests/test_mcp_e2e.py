@@ -22,9 +22,7 @@ def _text(block) -> str:
     return getattr(block, "text", "") or ""
 
 
-async def test_inmemory_client_full_protocol(
-    tmp_path, make_skill: Callable[..., SkillIR]
-) -> None:
+async def test_inmemory_client_full_protocol(tmp_path, make_skill: Callable[..., SkillIR]) -> None:
     conn = connect(tmp_path / "registry.db")
     upsert_skill(conn, make_skill("verified-skill", status="verified"))
     upsert_skill(conn, make_skill("draft-skill", status="draft"))
@@ -74,9 +72,7 @@ async def test_real_serve_subprocess_speaks_mcp(
     env = {**os.environ, "REGISTRY_DB_PATH": str(db)}
     env.pop("OPENAI_API_KEY", None)
 
-    transport = StdioTransport(
-        command=sys.executable, args=["-c", cmd], env=env, cwd=str(tmp_path)
-    )
+    transport = StdioTransport(command=sys.executable, args=["-c", cmd], env=env, cwd=str(tmp_path))
     async with Client(transport, init_timeout=30) as client:
         await client.ping()
         tools = {t.name for t in await client.list_tools()}

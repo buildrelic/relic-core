@@ -10,7 +10,7 @@ glossary, not a spec: definitions only, no implementation detail.
 A **source** is a connector. An **artifact type** is the shape a source's records
 collapse onto in the graph. Several sources can map to one artifact type.
 
-The engram ontology covers five planned-essential sources mapping to four artifact
+The engram ontology covers six planned-essential sources mapping to five artifact
 types:
 
 | Source | Artifact type |
@@ -19,6 +19,7 @@ types:
 | GitHub, Linear | Issue |
 | Notion, Granola | Document |
 | Slack | Conversation |
+| Claude Code (coding sessions) | AgentSession |
 
 **Pull request**:
 A proposed, reviewable code change with its reviews, touched files, and outcome.
@@ -36,8 +37,17 @@ _Avoid_: doc (as the type name), page, article, wiki, meeting note.
 
 **Conversation**:
 A bounded back-and-forth thread segment of a few turns, not a whole transcript.
-From Slack.
-_Avoid_: chat, thread, message log, meeting, transcript.
+From Slack. A coding agent's work-session is an AgentSession, not a Conversation.
+_Avoid_: chat, thread, message log, meeting, transcript, session.
+
+**AgentSession**:
+An agent work-session: a distilled, clipped transcript of a coding agent (Claude
+Code) doing work in a repo, captured back into the engram as the write half of
+context-as-a-service. Unlike a Conversation (human discourse), an AgentSession *did
+work*: it links to the pull requests, files, and issues it touched
+(`TOUCHED`/`REFERENCES`) and is a prime source of `Decision` and `Action item`
+nodes. From Claude Code (other coding agents later).
+_Avoid_: conversation, transcript (the raw form), chat, session log.
 
 ## Entities
 

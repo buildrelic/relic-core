@@ -246,3 +246,50 @@ This record is the input to REL-94. The extraction change in `engram.py` builds 
 `ENTITY_TYPES`, `EDGE_TYPES`, and `EDGE_TYPE_MAP` from the tables above, with no
 further modeling. The glossary of terms lives in
 [`CONTEXT.md`](https://github.com/buildrelic/relic-core/blob/main/CONTEXT.md).
+
+## Amendment (2026-06-28): the AgentSession artifact type
+
+A fifth artifact type, **AgentSession**, captures a coding agent's work-session (Claude
+Code) back into the engram — the write half of "context as a service" (see
+[ADR-0004](/adr/0004-memory-service-api)). It is distinct from a `Conversation`
+(human discourse, from Slack): an AgentSession *did work*, so its value is the links to
+what shipped, not the discussion.
+
+**Source row** (extends the connector-to-provides map):
+
+| Connector | source_type | Status | Provides |
+| -- | -- | -- | -- |
+| Claude Code (coding sessions) | session | planned | distilled transcript, agent, repo/cwd, timestamps, and — from git metadata — files touched, PR/issue opened |
+
+**Node type:**
+
+| Node | Custom scalar attributes |
+| -- | -- |
+| AgentSession | title, agent, started_at, ended_at, repo, cwd, url |
+
+**Edges.** The structural links are **deterministic**, written from the session's
+git-metadata (changed files, commits, the PR it opened), not inferred from the
+transcript. Only `RECORDS` is prose-derived:
+
+| Edge | (source to target) | Tier | From |
+| -- | -- | -- | -- |
+| AUTHORED | Person to AgentSession | 1 (deterministic) | the user who ran the agent |
+| TOUCHED | AgentSession to File | 1 (deterministic) | files the session edited |
+| REFERENCES | AgentSession to PullRequest, AgentSession to Issue | 1 (deterministic) | the PR/issue the session opened or named in git metadata |
+| RECORDS | AgentSession to Decision, AgentSession to ActionItem | 2 (prose-derived) | decisions and action items mined from the transcript |
+
+The key contrast: `REFERENCES` is a **deferred Tier 3** edge from a `Document` or
+`Conversation` (prose-inferred coreference, sparse and unreliable), but **Tier 1**
+from a `AgentSession`, because the hook knows from git exactly which PR/issue the session
+touched. The same edge name is reliable or not depending on its *source* —
+determinism comes from the connector, per the framework fact above, not from the edge
+name. `AUTHORED` is reused for `Person to AgentSession` (the same coarse-edge move as
+`REVIEWED` and `ASSIGNED_TO`); `PARTICIPATED_IN` is not, because an AgentSession has a
+single actor, not participants. `Decision` and `ActionItem` stay provisional, and a
+AgentSession is now their richest prose source.
+
+Consequence for code: the shipped capture path maps a session to a `Conversation`
+([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)),
+which now contradicts the glossary — it must become `AgentSession`, and `engram.py` gains
+the `AgentSession` entity type and the `TOUCHED` / `REFERENCES` (AgentSession) edges. The
+deterministic links require enriching the capture payload with session work-metadata.

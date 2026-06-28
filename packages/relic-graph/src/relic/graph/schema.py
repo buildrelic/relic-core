@@ -118,6 +118,24 @@ class FileNode(BaseModel):
     so there are no custom attributes."""
 
 
+class AgentSessionNode(BaseModel):
+    """A coding agent's work-session captured into the engram.
+
+    Distinct from a Conversation: an AgentSession *did work*, so it links to the files it
+    touched (`TOUCHED`) and the PR/issue it opened (`REFERENCES`), and is a prime prose
+    source for `Decision`/`ActionItem`. The session title is the node `name`. See the
+    AgentSession amendment in docs/adr/0001-engram-graph-ontology.mdx.
+    """
+
+    title: str | None = Field(None, description="AgentSession title (also the node name)")
+    agent: str | None = Field(None, description="The coding agent, e.g. claude-code")
+    repo: str | None = Field(None, description="owner/name slug of the repo worked in")
+    cwd: str | None = Field(None, description="Working directory the session ran in")
+    url: str | None = Field(None, description="AgentSession URL, e.g. session://<id>")
+    started_at: datetime | None = Field(None, description="When the session started")
+    ended_at: datetime | None = Field(None, description="When the session ended")
+
+
 # --- Flat edge types (attributes only; Graphiti owns the endpoints) ---------
 
 
@@ -170,6 +188,18 @@ class Closes(BaseModel):
     relation: str | None = Field(None, description="closes, resolves, or relates")
 
 
+class Touched(BaseModel):
+    """A session edited a file path. The path is the target File node's name."""
+
+
+class References(BaseModel):
+    """A session references the pull request or issue it opened or named.
+
+    Deterministic (Tier 1) from an AgentSession -- the link is known from git metadata --
+    unlike the deferred Tier 3 `REFERENCES` from a Document/Conversation (prose-inferred).
+    """
+
+
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Person": PersonNode,
     "Repo": RepoNode,
@@ -177,6 +207,7 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Issue": IssueNode,
     "Label": LabelNode,
     "File": FileNode,
+    "AgentSession": AgentSessionNode,
 }
 
 EDGE_TYPES: dict[str, type[BaseModel]] = {
@@ -184,6 +215,8 @@ EDGE_TYPES: dict[str, type[BaseModel]] = {
     "REVIEWED": Reviewed,
     "REQUESTED_REVIEW": RequestedReview,
     "TOUCHES_PATH": TouchesPath,
+    "TOUCHED": Touched,
+    "REFERENCES": References,
     "HAS_LABEL": HasLabel,
     "IN_REPO": InRepo,
     "ASSIGNED_TO": AssignedTo,
@@ -203,4 +236,10 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ("Issue", "Person"): ["ASSIGNED_TO"],
     ("Issue", "Issue"): ["PARENT_OF"],
     ("PullRequest", "Issue"): ["CLOSES"],
+    # AgentSession edges: AUTHORED is reused (Person -> AgentSession), the same coarse-edge move
+    # as REVIEWED on a PR. TOUCHED/REFERENCES are deterministic from session metadata.
+    ("Person", "AgentSession"): ["AUTHORED"],
+    ("AgentSession", "File"): ["TOUCHED"],
+    ("AgentSession", "PullRequest"): ["REFERENCES"],
+    ("AgentSession", "Issue"): ["REFERENCES"],
 }

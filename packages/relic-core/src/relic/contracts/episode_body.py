@@ -512,3 +512,42 @@ class ConversationEpisodeBody(BaseModel):
     decisions: list[str] = Field(default_factory=list)
     action_items: list[ActionItem] = Field(default_factory=list)
     links: list[RelatedRef] = Field(default_factory=list)
+
+
+# --- AgentSession (coding-agent work-session) -----------------------------------
+
+
+class AgentSessionEpisodeBody(BaseModel):
+    """A coding agent's work-session, captured back into the engram: the write half
+    of "context as a service" (docs/adr/0004) and the AgentSession artifact type
+    (docs/adr/0001, the AgentSession amendment).
+
+    Distinct from a Conversation (human discourse): an AgentSession *did work*, so its value
+    is the deterministic links to what it touched. ``files_touched`` and ``references``
+    (the PR/issue it opened) are *known from git*, not inferred from prose -- they feed
+    the Tier-1 ``TOUCHED`` and ``REFERENCES`` edges. ``transcript`` and ``summary`` are
+    the prose the extractor mines for ``decisions`` and ``action_items``. The
+    structural fields stay empty until the capture hook enriches the payload with git
+    metadata (the wave-by-wave pattern), so a transcript-only capture still lands.
+
+    ``url`` (``session://<id>``) is the citation anchor; ``recall._extract_url`` falls
+    back to a top-level ``url``. ``schema_version`` lives in the body, never the name.
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    source_type: Literal["agent_session"] = "agent_session"
+    context: str | None = None
+    url: str  # citation anchor: session://<id>. Do not move.
+    title: str | None = None
+    agent: str | None = None  # the coding agent, e.g. "claude-code"
+    actor: PersonRef | None = None  # the human who ran the session (the AUTHORED edge)
+    repo: RepoRef | None = None
+    cwd: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    transcript: str | None = None  # distilled prose, clipped
+    summary: str | None = None
+    files_touched: list[FileEntry] = Field(default_factory=list)  # deterministic: TOUCHED
+    references: list[RelatedRef] = Field(default_factory=list)  # deterministic: REFERENCES
+    decisions: list[str] = Field(default_factory=list)  # prose-mined: RECORDS
+    action_items: list[ActionItem] = Field(default_factory=list)  # prose-mined: RECORDS

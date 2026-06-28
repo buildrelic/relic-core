@@ -111,6 +111,7 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_cli_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_load.py) | the `load` command and `ingest --no-load`: the capture/load split, gates, and exit codes (graph stubbed) |
 | [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-repo checkpoint ledger: append, load, skip, and `--fresh` clear |
 | [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, resume skipping |
+| [`test_graph_operations.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_graph_operations.py) | `recall`, `reviewers_of`, and `graph_stats` against a real seeded FalkorDB; gated on `RELIC_LIVE_TESTS=1` and a reachable FalkorDB (real LLM calls) |
 | [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
 | [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |

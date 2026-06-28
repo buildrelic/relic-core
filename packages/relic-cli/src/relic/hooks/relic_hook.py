@@ -30,9 +30,7 @@ _CAPTURE_TIMEOUT = 10.0
 
 def _post(path: str, payload: dict, timeout: float) -> dict:
     url = os.environ.get("RELIC_DAEMON_URL", _DEFAULT_URL).rstrip("/") + path
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"), method="POST"
-    )
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
     req.add_header("content-type", "application/json")
     token = os.environ.get("RELIC_DAEMON_TOKEN")
     if token:

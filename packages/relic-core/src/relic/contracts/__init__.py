@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from relic.contracts.episode import EpisodeSpec
 from relic.contracts.episode_body import (
     SCHEMA_VERSION,
+    AgentSessionEpisodeBody,
     CiRunEpisodeBody,
     CommitEpisodeBody,
     ConversationEpisodeBody,
@@ -23,7 +24,6 @@ from relic.contracts.episode_body import (
     IssueEpisodeBody,
     PrEpisodeBody,
     ReleaseEpisodeBody,
-    SessionEpisodeBody,
 )
 from relic.ontology import Citation, FieldSpec, SkillIR
 
@@ -47,6 +47,6 @@ __all__ = [
     "PrEpisodeBody",
     "RecallFn",
     "ReleaseEpisodeBody",
-    "SessionEpisodeBody",
+    "AgentSessionEpisodeBody",
     "SkillIR",
 ]

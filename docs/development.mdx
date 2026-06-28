@@ -114,7 +114,7 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_graph_operations.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_graph_operations.py) | `recall`, `reviewers_of`, and `graph_stats` against a real seeded FalkorDB; gated on `RELIC_LIVE_TESTS=1` and a reachable FalkorDB (real LLM calls) |
 | [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
 | [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
-| [`test_schema.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_schema.py) | the flat Graphiti-facing ontology (`relic.graph.schema`): entity/edge registration invariants and the Session artifact type wiring |
+| [`test_schema.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_schema.py) | the flat Graphiti-facing ontology (`relic.graph.schema`): entity/edge registration invariants and the AgentSession artifact type wiring |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
 | [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |
 | [`test_catalog.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_catalog.py) | the markdown catalog index |

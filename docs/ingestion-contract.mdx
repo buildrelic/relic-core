@@ -45,7 +45,7 @@ as the full target, with capture landing wave by wave. Each carries a top-level
 | Doc | `doc` | `DocEpisodeBody` | README/CONTRIBUTING/ADR/runbook, Notion, Confluence | `doc` | MADR + Diataxis | defined |
 | Discussion | `discussion` | `DiscussionEpisodeBody` | GitHub Discussions, RFC, Q&A | `github discussion` | GitHub Discussions (category/answer) | defined |
 | Conversation | `conversation` | `ConversationEpisodeBody` | Slack thread, meeting (Granola), Discord | `slack conversation` / `meeting` | decision + action-item capture | defined |
-| Session | `session` | `SessionEpisodeBody` | Claude Code coding session (other coding agents later) | `session` | coding-agent work-session, see [ADR-0001 Session amendment](/adr/0001-engram-graph-ontology) | defined |
+| AgentSession | `session` | `SessionEpisodeBody` | Claude Code coding session (other coding agents later) | `session` | coding-agent work-session, see [ADR-0001 AgentSession amendment](/adr/0001-engram-graph-ontology) | defined |
 
 The `source_type` discriminator names the **artifact type**, not the connector
 (github vs linear is carried by `EpisodeSpec.source_description` and the

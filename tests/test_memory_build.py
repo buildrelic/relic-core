@@ -155,7 +155,7 @@ def test_ontology_registers_the_rel93_in_scope_types() -> None:
         "Issue",
         "Label",
         "File",
-        "Session",
+        "AgentSession",
     }
     assert set(EDGE_TYPES) == {
         "AUTHORED",

@@ -514,15 +514,15 @@ class ConversationEpisodeBody(BaseModel):
     links: list[RelatedRef] = Field(default_factory=list)
 
 
-# --- Session (coding-agent work-session) -----------------------------------
+# --- AgentSession (coding-agent work-session) -----------------------------------
 
 
-class SessionEpisodeBody(BaseModel):
+class AgentSessionEpisodeBody(BaseModel):
     """A coding agent's work-session, captured back into the engram: the write half
-    of "context as a service" (docs/adr/0004) and the Session artifact type
-    (docs/adr/0001, the Session amendment).
+    of "context as a service" (docs/adr/0004) and the AgentSession artifact type
+    (docs/adr/0001, the AgentSession amendment).
 
-    Distinct from a Conversation (human discourse): a Session *did work*, so its value
+    Distinct from a Conversation (human discourse): an AgentSession *did work*, so its value
     is the deterministic links to what it touched. ``files_touched`` and ``references``
     (the PR/issue it opened) are *known from git*, not inferred from prose -- they feed
     the Tier-1 ``TOUCHED`` and ``REFERENCES`` edges. ``transcript`` and ``summary`` are
@@ -535,7 +535,7 @@ class SessionEpisodeBody(BaseModel):
     """
 
     schema_version: int = SCHEMA_VERSION
-    source_type: Literal["session"] = "session"
+    source_type: Literal["agent_session"] = "agent_session"
     context: str | None = None
     url: str  # citation anchor: session://<id>. Do not move.
     title: str | None = None

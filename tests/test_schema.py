@@ -9,7 +9,7 @@ artifact type (docs/adr/0001, the Session amendment) is checked explicitly.
 
 from pydantic import BaseModel
 
-from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, SessionNode
+from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, AgentSessionNode
 
 # Graphiti reserves these EntityNode field names; a custom attribute may not collide.
 _RESERVED = {
@@ -25,7 +25,7 @@ _RESERVED = {
 
 
 def test_session_artifact_type_is_registered() -> None:
-    assert ENTITY_TYPES["Session"] is SessionNode
+    assert ENTITY_TYPES["AgentSession"] is AgentSessionNode
     assert "TOUCHED" in EDGE_TYPES
     assert "REFERENCES" in EDGE_TYPES
 
@@ -33,10 +33,10 @@ def test_session_artifact_type_is_registered() -> None:
 def test_session_edge_map_links_work_to_artifacts() -> None:
     # AUTHORED is reused for Person -> Session; TOUCHED/REFERENCES are the deterministic
     # links to what the session worked on.
-    assert EDGE_TYPE_MAP[("Person", "Session")] == ["AUTHORED"]
-    assert EDGE_TYPE_MAP[("Session", "File")] == ["TOUCHED"]
-    assert EDGE_TYPE_MAP[("Session", "PullRequest")] == ["REFERENCES"]
-    assert EDGE_TYPE_MAP[("Session", "Issue")] == ["REFERENCES"]
+    assert EDGE_TYPE_MAP[("Person", "AgentSession")] == ["AUTHORED"]
+    assert EDGE_TYPE_MAP[("AgentSession", "File")] == ["TOUCHED"]
+    assert EDGE_TYPE_MAP[("AgentSession", "PullRequest")] == ["REFERENCES"]
+    assert EDGE_TYPE_MAP[("AgentSession", "Issue")] == ["REFERENCES"]
 
 
 def test_edge_map_only_names_registered_nodes_and_edges() -> None:

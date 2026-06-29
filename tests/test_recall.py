@@ -133,6 +133,19 @@ async def test_recall_include_superseded_keeps_history() -> None:
     assert len(answer.facts) == 1
 
 
+def test_memory_edge_is_current_tracks_both_invalidation_and_expiry() -> None:
+    # A fact is current only while neither bound is set; expiry (a later episode
+    # contradicted it) supersedes it just as invalidation does.
+    from datetime import UTC, datetime
+
+    stamp = datetime(2020, 1, 1, tzinfo=UTC)
+    assert _edge("x", "OWNS", []).is_current
+    assert not _edge("x", "OWNS", [], invalid_at=stamp).is_current
+    person = MemoryEntity(uuid="p", name="paris", labels=["Person"])
+    expired = MemoryEdge(relation="OWNS", fact="x", source=person, target=person, expired_at=stamp)
+    assert not expired.is_current
+
+
 def test_extract_url_prefers_pr_then_issue() -> None:
     assert _extract_url('{"pull_request": {"url": "https://x/pr/12"}}') == "https://x/pr/12"
     assert _extract_url('{"issue": {"url": "https://x/issue/42"}}') == "https://x/issue/42"

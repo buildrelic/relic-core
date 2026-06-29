@@ -15,7 +15,13 @@ mistake the split prevents.
    ported verbatim from the system-design doc.
 
 A fourth shape sits between ingestion and the graph: the **episode JSON**, whose
-keys mirror the flat graph attributes so the extractor maps cleanly onto them.
+keys mirror the flat graph attributes so the extractor maps cleanly onto them. The
+flatten-and-rename the extractor performs from the body to the flat node is recorded
+as executable data in
+[`relic.graph.field_map`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/field_map.py)
+(`ARTIFACT_FIELD_MAPS`) and checked by `tests/test_field_map.py`, so a node field with
+no body source — or a mapped body path that no longer resolves — fails in CI instead of
+surfacing as a silent null at graph-read time.
 
 ## Why three layers
 

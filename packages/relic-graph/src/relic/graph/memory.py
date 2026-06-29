@@ -364,7 +364,7 @@ class GraphitiMemory:
         from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, require_episode_zone
 
         # Fail closed before any write: a Zoned episode with no Zone is never persisted.
-        require_episode_zone(spec.group_id)
+        zone = require_episode_zone(spec.group_id)
         await self._with_backoff(
             lambda: self._graphiti.add_episode(
                 name=spec.name,
@@ -372,7 +372,7 @@ class GraphitiMemory:
                 source_description=spec.source_description,
                 reference_time=spec.reference_time,
                 source=EpisodeType.json,
-                group_id=spec.group_id,
+                group_id=zone,
                 entity_types=ENTITY_TYPES,
                 edge_types=EDGE_TYPES,
                 edge_type_map=EDGE_TYPE_MAP,
@@ -390,8 +390,7 @@ class GraphitiMemory:
         if not specs:
             return
         # Fail closed before any write: every episode in the batch must carry a Zone.
-        for spec in specs:
-            require_episode_zone(spec.group_id)
+        zones = [require_episode_zone(spec.group_id) for spec in specs]
         raws = [
             RawEpisode(
                 name=spec.name,
@@ -402,7 +401,7 @@ class GraphitiMemory:
             )
             for spec in specs
         ]
-        group_id = specs[0].group_id
+        group_id = zones[0]
         await self._with_backoff(
             lambda: self._graphiti.add_episode_bulk(
                 raws,

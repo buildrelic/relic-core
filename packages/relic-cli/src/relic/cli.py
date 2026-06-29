@@ -391,15 +391,20 @@ async def _extract(
 
     try:
         with load_progress(progress_label, len(to_load), enabled=show_bar) as update:
-            on_progress: Callable[[LoadStats], None] | None = None
+            on_progress: Callable[[LoadStats], None] | None
             if update is not None:
+                update_fn = update
 
-                def on_progress(s: LoadStats) -> None:
-                    update(  # type: ignore[misc]  # update is non-None inside this branch
+                def _on_progress(s: LoadStats) -> None:
+                    update_fn(
                         s.loaded + s.superseded + s.skipped + s.failed,
                         f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
                         f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]",
                     )
+
+                on_progress = _on_progress
+            else:
+                on_progress = None
 
             stats = await _run(on_progress)
     finally:

@@ -115,6 +115,7 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
 | [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
 | [`test_schema.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_schema.py) | the flat Graphiti-facing ontology (`relic.graph.schema`): entity/edge registration invariants and the AgentSession artifact type wiring |
+| [`test_field_map.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_field_map.py) | the body→flat-node correspondence (`relic.graph.field_map`): every node field has a body source, every mapped body path resolves |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
 | [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |
 | [`test_catalog.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_catalog.py) | the markdown catalog index |
@@ -129,6 +130,7 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report |
 | [`test_config.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_config.py) | settings: secret sanitization and the deprecated SEMAPHORE_LIMIT fallback |
 | [`test_obs.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs.py) | logging setup: stderr routing, scoped to the `relic` logger, idempotent |
+| [`test_obs_progress.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs_progress.py) | `relic.obs.load_progress`: disabled yields a no-op, enabled yields an `update(completed, counts)` callback |
 | [`test_cli.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli.py), [`test_cli_skills.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_skills.py) | CLI wiring |
 | [`test_pipeline_slice.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_pipeline_slice.py) | draft to verify to emit to serve, end to end |
 

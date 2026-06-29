@@ -76,9 +76,11 @@ _Avoid_: Review node, approval (which is one review `state`).
 
 **Repo**:
 A source-code repository: an anchor node carrying `full_name`/`url`/
-`default_branch`. Artifacts link to it via `IN_REPO`. (The `group_id` partition
-also encodes repo membership; the edge makes it explicit and traversable.)
-_Avoid_: repository (in code), project (a Linear Project is a different thing).
+`default_branch`. Artifacts link to it via `IN_REPO`. A Repo is identity and
+provenance only — it is *not* the access boundary (that is a Zone) and an
+artifact's Repo is orthogonal to the Zone it lives in.
+_Avoid_: repository (in code), project (a Linear Project is a different thing),
+zone (a Repo is not an access unit).
 
 **Project**:
 A Linear project: a base node grouping issues toward a goal. Issues link via
@@ -97,3 +99,38 @@ A follow-up task with an owner, extracted from a Document or Conversation. A nod
 assigned to a Person. Distinct from an Issue (the *tracked* unit of work).
 Provisional: prose-extracted.
 _Avoid_: todo, task, ticket.
+
+## Tenancy and access
+
+The unit of physical isolation. Repos, teams, and topical neighborhoods all live
+inside one tenant graph and may link to each other; access is governed *within*
+that graph, not by physical separation.
+
+**Tenant**:
+An organization. One FalkorDB database per tenant — the hard isolation boundary
+that nothing crosses. A Tenant owns many Zones.
+_Avoid_: org, account, customer, workspace, group.
+
+**Zone**:
+A governed, deliberately-bounded region of a tenant graph that access is granted
+against. Every artifact lives in exactly one Zone. A Repo's data, a sprint team's
+work, the company-wide knowledge base, and a restricted "classified" region are
+each a Zone (or kind of Zone). Distinct from a Community: a Zone is *deliberate
+and stable* (a human owns its boundary), a Community is *emergent and recomputed*.
+_Avoid_: scope, group, community, workspace, enclave, compartment.
+
+**Community**:
+An emergent topical cluster of related nodes, detected automatically (Graphiti's
+`build_communities`, label propagation) and recomputed as the graph grows. About
+*what a neighborhood is about*, never about who may see it. Access never rides on
+a Community.
+_Avoid_: zone, cluster, neighborhood, group, topic.
+
+**Zoned vs global**:
+The ontology splits in two for access. **Zoned**: artifacts (Pull request, Issue,
+Document, Conversation, AgentSession, Decision, Action item) and every fact (edge)
+carry exactly one Zone — access is enforced on these. **Global**: the connective
+identity spine (Person, Repo, Label, File) is tenant-wide and Zone-exempt — any
+member can see these nodes, but traversing *from* them into a Zoned fact still
+dead-ends at Zone boundaries. (Consequence: a person's or repo's *existence* is
+tenant-public; only their *activity* is gated.)

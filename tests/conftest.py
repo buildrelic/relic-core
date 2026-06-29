@@ -32,6 +32,7 @@ class FakeMemory:
     episodes: dict[str, MemoryEpisode] = field(default_factory=dict)
     walk_edges: list[MemoryEdge] = field(default_factory=list)
     search_raises: bool = False
+    recorded_group_ids: list[list[str] | None] = field(default_factory=list)  # each search call
     # writer state
     fail_on: set[str] = field(default_factory=set)
     bulk_fail_on: set[str] = field(default_factory=set)
@@ -45,6 +46,7 @@ class FakeMemory:
     async def search(
         self, query: str, *, group_ids: list[str] | None = None, num_results: int = 10
     ) -> list[MemoryEdge]:
+        self.recorded_group_ids.append(group_ids)
         if self.search_raises:
             raise RuntimeError("search unavailable")
         return self.edges[:num_results]

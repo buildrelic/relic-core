@@ -9,6 +9,16 @@ icon: "server"
 fixes the decisions that are expensive to retrofit once we host in production. It
 builds on the Memory seam ([ADR-0003](/adr/0003-memory-seam)) and changes no network
 code yet — it shapes the in-process seam and names the network surface it will grow.
+
+**Partially superseded by [ADR-0005](/adr/0005-tenant-zone-access-model) (2026-06-28).**
+The **isolation decisions below are superseded**: the boundary moves up from
+database-per-group (repo) to **database-per-tenant**, with access governed *inside*
+the graph by **Zones** rather than by physical separation, and **`group_id` now means
+Zone, not repo**. Tenancy/isolation in Decision 2 and the "no cross-repo recall"
+scoping no longer hold as written. The rest of this record stands: reads-sync /
+writes-as-jobs (Decision 3), the connection model (Decision 4), the narrow network
+surface (Decision 5), session-capture-as-a-job (Decision 6), and the control-plane
+ownership check — which ADR-0005 generalizes from repo-ownership to Zone-membership.
 </Info>
 
 ## Context

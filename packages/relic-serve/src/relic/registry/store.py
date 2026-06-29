@@ -21,6 +21,10 @@ from relic.contracts import SkillIR
 
 SkillStatus = Literal["draft", "verified", "deprecated"]
 
+# ADR-0005: where a Person↔Zone grant came from. Config-driven mappings are the
+# deterministic default; "api" is reserved for grants made through an admin surface.
+ZoneGrantSource = Literal["config", "api"]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
     skill_id          TEXT PRIMARY KEY,
@@ -33,6 +37,17 @@ CREATE TABLE IF NOT EXISTS skills (
     document          TEXT NOT NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
+);
+
+-- ADR-0005 control plane: which Zones a Person may see. Deliberately OUT of the graph
+-- so an access check is never itself a graph traversal. The graph holds each node's Zone
+-- tag; this table holds the authorization, and the two are joined at the API boundary.
+CREATE TABLE IF NOT EXISTS zone_grants (
+    person_id   TEXT NOT NULL,
+    zone_id     TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (person_id, zone_id)
 );
 """
 
@@ -149,3 +164,43 @@ def mark_verified(
         raise ValueError(f"cannot verify a deprecated skill: {skill_id}")
     stamp = now or _now()
     return set_status(conn, skill_id, "verified", last_verified_at=stamp, now=stamp)
+
+
+def grant_zone(
+    conn: sqlite3.Connection,
+    person_id: str,
+    zone_id: str,
+    *,
+    source: ZoneGrantSource = "config",
+    now: datetime | None = None,
+) -> None:
+    """Grant a Person access to a Zone. Idempotent on ``(person_id, zone_id)``."""
+    conn.execute(
+        """
+        INSERT INTO zone_grants (person_id, zone_id, source, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(person_id, zone_id) DO NOTHING
+        """,
+        (person_id, zone_id, source, _iso(now or _now())),
+    )
+    conn.commit()
+
+
+def revoke_zone(conn: sqlite3.Connection, person_id: str, zone_id: str) -> None:
+    """Remove one Person↔Zone grant. A no-op if the grant does not exist."""
+    conn.execute(
+        "DELETE FROM zone_grants WHERE person_id = ? AND zone_id = ?", (person_id, zone_id)
+    )
+    conn.commit()
+
+
+def zones_for_person(conn: sqlite3.Connection, person_id: str) -> set[str]:
+    """Return the Zones a Person may access. Empty set when none -- fail closed (ADR-0005).
+
+    An unknown principal resolves to no Zones, so a caller that injects this set as the
+    recall scope sees nothing rather than everything.
+    """
+    rows = conn.execute(
+        "SELECT zone_id FROM zone_grants WHERE person_id = ?", (person_id,)
+    ).fetchall()
+    return {row["zone_id"] for row in rows}

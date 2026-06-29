@@ -239,7 +239,7 @@ def test_trigger_ingest_stashes_server_token_for_child(monkeypatch: pytest.Monke
     # the server resolves its own identity the normal way
     monkeypatch.setattr(cli, "_resolve_server_token", lambda: _SERVER_TOKEN)
 
-    cli._trigger_ingest("owner/repo", _USER_TOKEN)
+    cli._trigger_ingest("github", "owner/repo", _USER_TOKEN)
     env = captured["env"]
     assert env["GITHUB_TOKEN"] == _USER_TOKEN  # child runs as the user
     assert env[cli._SERVER_TOKEN_ENV] == _SERVER_TOKEN  # server token rides along for fallback
@@ -261,7 +261,7 @@ def test_trigger_ingest_drops_stale_server_token(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv(cli._SERVER_TOKEN_ENV, "gho_stale_leftover")
     monkeypatch.setattr(cli, "_resolve_server_token", lambda: None)
 
-    cli._trigger_ingest("owner/repo", _USER_TOKEN)
+    cli._trigger_ingest("github", "owner/repo", _USER_TOKEN)
     # the stale value must not survive into the child posing as a fallback identity
     assert cli._SERVER_TOKEN_ENV not in captured["env"]
     assert captured["env"]["GITHUB_TOKEN"] == _USER_TOKEN
@@ -278,5 +278,5 @@ def test_trigger_ingest_no_user_token_inherits_env(monkeypatch: pytest.MonkeyPat
         return type("P", (), {"poll": lambda self: None})()
 
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
-    cli._trigger_ingest("owner/repo", None)
+    cli._trigger_ingest("github", "owner/repo", None)
     assert captured["env"] is None  # no override, no stash; child inherits the parent env

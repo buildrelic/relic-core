@@ -62,6 +62,36 @@ def test_connector_status_last_sync_is_per_source(tmp_path, monkeypatch) -> None
     assert connectors["linear"]["lastSyncAt"].startswith("1970-01-24")
 
 
+def test_connector_status_surfaces_granola_row(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    # two meetings under one owner-scope, plus a github repo alongside it
+    _ledger("owner/repoA", "PR owner/repoA#1")
+    gran = checkpoint_path("granola__zidan_tryrelic_io")
+    for name in ("Meeting abc123", "Meeting def456"):
+        record_done(gran, name)
+
+    connectors = {c["source"]: c for c in _connector_status()["connectors"]}
+    granola = connectors["granola"]
+    assert granola["itemCount"] == 2
+    assert granola["itemLabel"] == "meetings"
+    assert granola["repos"] == []  # meetings have no repo scope
+    assert granola["connected"] is True  # landed meetings count as connected
+    # the github card is unaffected by the granola ledger living alongside it
+    assert connectors["github"]["repos"] == ["owner/repoA"]
+
+
+def test_connector_status_granola_ledger_not_treated_as_repo(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    gran = checkpoint_path("granola__zidan_tryrelic_io")
+    record_done(gran, "Meeting abc123")
+
+    connectors = {c["source"]: c for c in _connector_status()["connectors"]}
+    # a granola ledger must never be slugified into a fake "granola/<email>" repo on
+    # the github or linear cards.
+    assert all("granola" not in repo for repo in connectors["github"]["repos"])
+    assert all("granola" not in repo for repo in connectors["linear"]["repos"])
+
+
 def test_ingest_runs_totals_are_repo_scoped(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _ledger("owner/repoA", "PR owner/repoA#1", "PR owner/repoA#2")
@@ -82,3 +112,31 @@ def test_ingest_runs_totals_are_repo_scoped(tmp_path, monkeypatch) -> None:
 
     glob = _ingest_runs(None, 50)
     assert glob["totals"]["memories"] == 5
+
+
+def test_ingest_runs_filters_by_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    # a github repo ledger plus a granola owner-scope ledger
+    _ledger("owner/repoA", "PR owner/repoA#1", "PR owner/repoA#2")
+    gran = checkpoint_path("granola__zidan_tryrelic_io")
+    for name in ("Meeting a", "Meeting b", "Meeting c"):
+        record_done(gran, name)
+    runs_path = tmp_path / "data" / "ingest" / "runs.jsonl"
+    runs_path.write_text(
+        json.dumps({"id": "gh1", "repo": "owner/repoA", "source": "GitHub"})
+        + "\n"
+        + json.dumps({"id": "gr1", "repo": None, "source": "Granola"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    granola = _ingest_runs(None, 50, "granola")
+    # case-insensitive match on the stored "Granola"; the github run is filtered out
+    assert [r["id"] for r in granola["runs"]] == ["gr1"]
+    # totals scope to the granola ledgers (3 meetings), not the global five
+    assert granola["totals"]["memories"] == 3
+
+    # a per-repo github call (what the web app fans out) still drops the repo-less granola run
+    gh = _ingest_runs("owner/repoA", 50)
+    assert [r["id"] for r in gh["runs"]] == ["gh1"]
+    assert gh["totals"]["memories"] == 2

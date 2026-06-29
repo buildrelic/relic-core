@@ -121,7 +121,9 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_emit.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_emit.py) | emit, prune, catalog reconciliation |
 | [`test_serve.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve.py) | MCP server: tools, resources, search |
 | [`test_mcp_e2e.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mcp_e2e.py) | the MCP server end to end |
-| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting |
+| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting, and the current-by-default filter (ADR-0006) |
+| [`test_scoped_memory.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scoped_memory.py) | `ScopedMemory` Zone enforcement: nonexistent out-of-Zone reads, global-spine passthrough, empty-scope fail-closed (ADR-0006) |
+| [`test_zone_integrity.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_zone_integrity.py) | write-time `require_episode_zone` refusal, mixed-Zone bulk refusal, and `audit_zone_integrity` over the introspection hatch (ADR-0006) |
 | [`test_falkordb_query.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_falkordb_query.py) | the query path and Cypher fallback |
 | [`test_scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scorecard.py) | eval scoring and summary |
 | [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report |

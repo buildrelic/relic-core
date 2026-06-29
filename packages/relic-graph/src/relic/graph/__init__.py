@@ -13,6 +13,7 @@ retired ``make_engram`` is now ``_build_graphiti``, reachable only via ``open_me
 """
 
 from relic.graph.audit import ZoneAuditReport, ZoneViolation, audit_zone_integrity
+from relic.graph.field_map import ARTIFACT_FIELD_MAPS, body_path_exists
 from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
 from relic.graph.memory import (
     GraphitiMemory,
@@ -38,6 +39,7 @@ from relic.graph.schema import (
 )
 
 __all__ = [
+    "ARTIFACT_FIELD_MAPS",
     "GLOBAL_ENTITY_TYPES",
     "ZONED_ENTITY_TYPES",
     "GraphitiMemory",
@@ -56,6 +58,7 @@ __all__ = [
     "ZoneIntegrityError",
     "ZoneViolation",
     "audit_zone_integrity",
+    "body_path_exists",
     "ensure_indexes",
     "falkordb_reachable",
     "format_answer",

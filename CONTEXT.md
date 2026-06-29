@@ -134,3 +134,33 @@ identity spine (Person, Repo, Label, File) is tenant-wide and Zone-exempt — an
 member can see these nodes, but traversing *from* them into a Zoned fact still
 dead-ends at Zone boundaries. (Consequence: a person's or repo's *existence* is
 tenant-public; only their *activity* is gated.)
+
+## Graph soundness
+
+The guarantees a reader of the graph can rely on. They make the access boundary a
+property of the *data and the seam*, not of a filter the caller must remember to
+pass — so the graph is safe to read past recall (see
+[ADR-0006](/adr/0006-sound-graph-for-consumers)).
+
+**Zone integrity**:
+The invariant that every Zoned node and edge carries exactly one Zone, and no
+global node carries any. A graph satisfying it is **well-tagged**. Integrity is the
+precondition for the access boundary to mean anything: an untagged Zoned fact is
+either lost (filtered everywhere) or leaked (filtered nowhere).
+_Avoid_: tagged (alone — say *well-tagged*), valid (overloaded with fact validity).
+
+**Scoped read** / **Unscoped read**:
+A **scoped read** is a read made on behalf of a principal: it returns only the
+connected subgraph that principal's Zone-set unlocks, and out-of-Zone nodes read as
+nonexistent (no error, no redaction marker). An **unscoped read** sees the whole
+tenant graph and is reserved for trusted, non-principal callers (ingest, eval,
+admin); it is never reachable from a serving surface.
+_Avoid_: filtered read, authorized read, public read.
+
+**Current fact** / **Superseded fact**:
+Facts are bi-temporal. A **current fact** holds as of now; a **superseded fact** was
+true but has been invalidated by a later one (e.g. an owner changed). Recall returns
+current facts by default — a superseded fact surfaced as if current is a grounding
+error, not a recall.
+_Avoid_: stale (imprecise), old, expired (a specific Graphiti field), invalid (Zone
+integrity term).

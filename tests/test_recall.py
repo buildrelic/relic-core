@@ -14,11 +14,18 @@ from relic.graph.recall import (
 from relic.registry.store import connect
 
 
-def _edge(fact: str, relation: str, episodes: list[str]) -> MemoryEdge:
+def _edge(
+    fact: str, relation: str, episodes: list[str], *, invalid_at: object = None
+) -> MemoryEdge:
     person = MemoryEntity(uuid="p", name="paris", labels=["Person"], attributes={})
     work = MemoryEntity(uuid="w", name="PR#1", labels=["PullRequest"], attributes={})
     return MemoryEdge(
-        relation=relation, fact=fact, source=person, target=work, episode_uuids=episodes
+        relation=relation,
+        fact=fact,
+        source=person,
+        target=work,
+        episode_uuids=episodes,
+        invalid_at=invalid_at,  # set => the fact is superseded, not current
     )
 
 
@@ -100,6 +107,30 @@ async def test_recall_legacy_group_id_still_scopes() -> None:
     memory = FakeMemory(edges=[_edge("paris reviews auth PRs", "REVIEWED", ["ep1"])])
     await recall(memory, "auth", group_id="team-a")
     assert memory.recorded_group_ids == [["team-a"]]
+
+
+async def test_recall_drops_superseded_facts_by_default() -> None:
+    # ADR-0006: a fact a later episode invalidated is never surfaced as current.
+    from datetime import UTC, datetime
+
+    superseded = datetime(2020, 1, 1, tzinfo=UTC)
+    memory = FakeMemory(
+        edges=[
+            _edge("paris owns auth", "OWNS", ["ep1"]),
+            _edge("robin owned auth", "OWNS", ["ep2"], invalid_at=superseded),
+        ]
+    )
+    answer = await recall(memory, "auth owner")
+    assert [f.fact for f in answer.facts] == ["paris owns auth"]
+
+
+async def test_recall_include_superseded_keeps_history() -> None:
+    from datetime import UTC, datetime
+
+    superseded = datetime(2020, 1, 1, tzinfo=UTC)
+    memory = FakeMemory(edges=[_edge("robin owned auth", "OWNS", ["ep2"], invalid_at=superseded)])
+    answer = await recall(memory, "auth owner", include_superseded=True)
+    assert len(answer.facts) == 1
 
 
 def test_extract_url_prefers_pr_then_issue() -> None:

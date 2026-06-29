@@ -31,6 +31,7 @@ from relic.obs import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
 
     from graphiti_core import Graphiti
     from graphiti_core.cross_encoder.client import CrossEncoderClient
@@ -56,12 +57,17 @@ _RETRY_ATTEMPTS = 6
 
 @dataclass(slots=True, frozen=True)
 class MemoryEntity:
-    """A node: the resolved endpoint of an edge, or a looked-up entity."""
+    """A node: the resolved endpoint of an edge, or a looked-up entity.
+
+    ``group_id`` is the node's Zone (ADR-0005); ``None`` for a global-tier node
+    (Person/Repo/Label/File), which is Zone-exempt. Zone enforcement keys on it.
+    """
 
     uuid: str
     name: str
     labels: list[str]
     attributes: dict[str, Any] = field(default_factory=dict)
+    group_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -69,7 +75,12 @@ class MemoryEdge:
     """A fact: a relation between two entities, with the episodes that support it.
 
     ``source`` and ``target`` are *resolved* — full entities, not bare uuids — so callers
-    read ``edge.source.labels`` without a second lookup.
+    read ``edge.source.labels`` without a second lookup. ``group_id`` is the fact's Zone.
+
+    Facts are bi-temporal (ADR-0006): ``valid_at``/``invalid_at`` bound when the fact held
+    in the world, ``expired_at`` when a later episode contradicted it. A fact is *current*
+    when both ``invalid_at`` and ``expired_at`` are ``None``; recall returns current facts
+    by default, never silently surfacing a superseded one.
     """
 
     relation: str
@@ -77,15 +88,29 @@ class MemoryEdge:
     source: MemoryEntity
     target: MemoryEntity
     episode_uuids: list[str] = field(default_factory=list)
+    group_id: str | None = None
+    valid_at: datetime | None = None
+    invalid_at: datetime | None = None
+    expired_at: datetime | None = None
+
+    @property
+    def is_current(self) -> bool:
+        """True if this fact has not been invalidated or superseded by a later one."""
+        return self.invalid_at is None and self.expired_at is None
 
 
 @dataclass(slots=True, frozen=True)
 class MemoryEpisode:
-    """A source episode: its name (a citation label) and verbatim content."""
+    """A source episode: its name (a citation label), verbatim content, and Zone.
+
+    ``group_id`` is the episode's Zone, so a scoped read can drop an episode the
+    requester may not see rather than leak its content as provenance.
+    """
 
     uuid: str
     name: str
     content: str | None
+    group_id: str | None = None
 
 
 # --- The two interfaces -------------------------------------------------------
@@ -99,6 +124,8 @@ class MemoryReader(Protocol):
     ) -> list[MemoryEdge]: ...
 
     async def get_episode(self, uuid: str) -> MemoryEpisode | None: ...
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None: ...
 
     async def reviewer_walk(
         self, query: str, *, group_id: str | None, limit: int
@@ -155,6 +182,74 @@ _REVIEWER_WALK_CYPHER: LiteralString = """
 """
 
 
+# --- The scoped read view -----------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class ScopedMemory:
+    """A principal-scoped read view over a ``MemoryReader`` (ADR-0006 Decision 2).
+
+    Closes over the principal's accessible Zone-set and applies it to *every* read, so a
+    serving surface that only ever holds a ``ScopedMemory`` cannot leak across Zones by
+    forgetting a filter -- the unsafe path is removed, not documented. An empty Zone-set
+    sees nothing (fail closed). Out-of-Zone nodes read as **nonexistent** -- no error, no
+    redaction marker (ADR-0005 Decision 5), so the requester never learns they exist.
+
+    Global-tier nodes (Person/Repo/Label/File) are Zone-exempt: a tenant member may see
+    *that* a person or repo exists; only their Zoned activity is gated (ADR-0005 Decision
+    6). Construct this from the principal's grants at the composition root and hand serve
+    nothing else; the unscoped ``GraphitiMemory`` stays for ingest/eval/admin only.
+    """
+
+    inner: MemoryReader
+    zones: frozenset[str]
+
+    async def search(
+        self, query: str, *, group_ids: list[str] | None = None, num_results: int = 10
+    ) -> list[MemoryEdge]:
+        # The scope is the principal's Zones, always; a caller-supplied ``group_ids`` can
+        # only narrow within it, never widen it. Empty scope -> see nothing.
+        scoped = self.zones if group_ids is None else self.zones.intersection(group_ids)
+        if not scoped:
+            return []
+        return await self.inner.search(query, group_ids=sorted(scoped), num_results=num_results)
+
+    async def get_episode(self, uuid: str) -> MemoryEpisode | None:
+        episode = await self.inner.get_episode(uuid)
+        if episode is None or not self._in_scope(episode.group_id):
+            return None
+        return episode
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None:
+        from relic.graph.schema import is_global_entity
+
+        entity = await self.inner.get_entity(uuid)
+        if entity is None:
+            return None
+        if is_global_entity(entity.labels):
+            return entity  # the identity spine is tenant-public
+        if not self._in_scope(entity.group_id):
+            return None  # out-of-Zone reads as nonexistent
+        return entity
+
+    async def reviewer_walk(
+        self, query: str, *, group_id: str | None, limit: int
+    ) -> list[MemoryEdge]:
+        # The deterministic fallback honors the scope too: an out-of-scope ``group_id``
+        # yields nothing, and an unscoped walk fans over the principal's Zones.
+        if not self.zones or (group_id is not None and group_id not in self.zones):
+            return []
+        targets = [group_id] if group_id is not None else sorted(self.zones)
+        hits: list[MemoryEdge] = []
+        for zone in targets:
+            hits.extend(await self.inner.reviewer_walk(query, group_id=zone, limit=limit))
+        return hits[:limit]
+
+    def _in_scope(self, group_id: str | None) -> bool:
+        """A Zoned read is in scope only when its Zone is one the principal holds."""
+        return group_id is not None and group_id in self.zones
+
+
 # --- The Graphiti adapter -----------------------------------------------------
 
 
@@ -184,8 +279,23 @@ class GraphitiMemory:
         except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
             return None
         return MemoryEpisode(
-            uuid=str(episode.uuid), name=episode.name or "", content=episode.content
+            uuid=str(episode.uuid),
+            name=episode.name or "",
+            content=episode.content,
+            group_id=getattr(episode, "group_id", None),
         )
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None:
+        """Resolve a single node by uuid, or ``None`` if it does not exist.
+
+        The unscoped lookup: it returns the node regardless of Zone. Zone enforcement is
+        the job of ``ScopedMemory.get_entity``, which wraps this and hides out-of-Zone
+        nodes -- keep the boundary in one place rather than duplicated per call site.
+        """
+        try:
+            return await self._resolve(uuid)
+        except Exception:  # noqa: BLE001 - a missing node reads as nonexistent, never fatal
+            return None
 
     async def reviewer_walk(
         self, query: str, *, group_id: str | None, limit: int
@@ -208,6 +318,10 @@ class GraphitiMemory:
             source=source,
             target=target,
             episode_uuids=[str(e) for e in (getattr(edge, "episodes", None) or [])],
+            group_id=getattr(edge, "group_id", None),
+            valid_at=getattr(edge, "valid_at", None),
+            invalid_at=getattr(edge, "invalid_at", None),
+            expired_at=getattr(edge, "expired_at", None),
         )
 
     async def _resolve(self, uuid: Any) -> MemoryEntity:
@@ -219,6 +333,7 @@ class GraphitiMemory:
             name=node.name or "",
             labels=_clean_labels(node.labels),
             attributes=_parse_attrs(getattr(node, "attributes", None)),
+            group_id=getattr(node, "group_id", None),
         )
 
     @staticmethod
@@ -246,8 +361,10 @@ class GraphitiMemory:
     async def add_episode(self, spec: EpisodeSpec) -> None:
         from graphiti_core.nodes import EpisodeType
 
-        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, require_episode_zone
 
+        # Fail closed before any write: a Zoned episode with no Zone is never persisted.
+        require_episode_zone(spec.group_id)
         await self._with_backoff(
             lambda: self._graphiti.add_episode(
                 name=spec.name,
@@ -268,10 +385,13 @@ class GraphitiMemory:
         from graphiti_core.nodes import EpisodeType
         from graphiti_core.utils.bulk_utils import RawEpisode
 
-        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, require_episode_zone
 
         if not specs:
             return
+        # Fail closed before any write: every episode in the batch must carry a Zone.
+        for spec in specs:
+            require_episode_zone(spec.group_id)
         raws = [
             RawEpisode(
                 name=spec.name,

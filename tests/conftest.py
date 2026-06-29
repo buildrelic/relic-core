@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from relic.contracts import EpisodeSpec
-from relic.graph.memory import MemoryEdge, MemoryEpisode
+from relic.graph.memory import MemoryEdge, MemoryEntity, MemoryEpisode
 from relic.ontology.skill_ir import Citation, FieldSpec, SkillIR
 
 
@@ -30,6 +30,7 @@ class FakeMemory:
     # reader state
     edges: list[MemoryEdge] = field(default_factory=list)
     episodes: dict[str, MemoryEpisode] = field(default_factory=dict)
+    entities: dict[str, MemoryEntity] = field(default_factory=dict)  # uuid -> node, for get_entity
     walk_edges: list[MemoryEdge] = field(default_factory=list)
     search_raises: bool = False
     recorded_group_ids: list[list[str] | None] = field(default_factory=list)  # each search call
@@ -53,6 +54,9 @@ class FakeMemory:
 
     async def get_episode(self, uuid: str) -> MemoryEpisode | None:
         return self.episodes.get(uuid)
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None:
+        return self.entities.get(uuid)
 
     async def reviewer_walk(
         self, query: str, *, group_id: str | None, limit: int

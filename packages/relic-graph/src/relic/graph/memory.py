@@ -385,12 +385,25 @@ class GraphitiMemory:
         from graphiti_core.nodes import EpisodeType
         from graphiti_core.utils.bulk_utils import RawEpisode
 
-        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, require_episode_zone
+        from relic.graph.schema import (
+            EDGE_TYPE_MAP,
+            EDGE_TYPES,
+            ENTITY_TYPES,
+            ZoneIntegrityError,
+            require_episode_zone,
+        )
 
         if not specs:
             return
         # Fail closed before any write: every episode in the batch must carry a Zone.
         zones = [require_episode_zone(spec.group_id) for spec in specs]
+        # A bulk batch maps to a single graphiti.add_episode_bulk group_id, so a mixed-Zone
+        # batch would silently drop all but the first Zone. Refuse it.
+        if len(set(zones)) > 1:
+            raise ZoneIntegrityError(
+                "refusing to write a bulk batch spanning multiple Zones "
+                f"({sorted(set(zones))!r}); each bulk batch must carry exactly one Zone (ADR-0006)"
+            )
         raws = [
             RawEpisode(
                 name=spec.name,

@@ -281,6 +281,10 @@ def require_episode_zone(group_id: str | None) -> str:
     Zone), so an episode with no Zone would write untagged Zoned facts. The global-tier
     exemption is a *read*-time rule (``is_global_type`` skips the filter), not a license
     to write untagged: there is no such thing as a Zoneless write.
+
+    The ``.strip()`` is intentional normalization: the returned trimmed value is the
+    canonical Zone persisted on the episode and referenced by recall and grants, so
+    surrounding whitespace is normalized by design (not by accident).
     """
     zone = (group_id or "").strip()
     if not zone:

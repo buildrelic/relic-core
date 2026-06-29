@@ -11,6 +11,8 @@ imported, to keep this module free of any graph or network dependency.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from fastmcp import FastMCP
@@ -20,6 +22,42 @@ from fastmcp.tools.function_tool import FunctionTool
 from relic.contracts import RecallFn, SkillIR
 from relic.registry import list_skills
 from relic.serve.render import render
+
+
+def _object_schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A JSON Schema ``object`` from its properties and required keys.
+
+    The one place the tool input-schema shape is built, so every tool spells it the
+    same way instead of hand-rolling the dict and forgetting ``required``.
+    """
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = list(required)
+    return schema
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """Everything needed to register one MCP tool: name, description, schema, handler.
+
+    The single deep interface tools are built from. A new tool is one ``ToolSpec``, not
+    another hand-rolled ``FunctionTool`` + schema dict + handler triple.
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    handler: Callable[..., Any]
+
+
+def _function_tool(spec: ToolSpec) -> FunctionTool:
+    """Turn a :class:`ToolSpec` into the FastMCP tool. The only ``FunctionTool`` call site."""
+    return FunctionTool(
+        name=spec.name,
+        description=spec.description,
+        parameters=spec.parameters,
+        fn=spec.handler,
+    )
 
 
 def input_schema(skill: SkillIR) -> dict[str, Any]:
@@ -33,45 +71,68 @@ def input_schema(skill: SkillIR) -> dict[str, Any]:
         properties[name] = prop
         if spec.required:
             required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
-    if required:
-        schema["required"] = required
-    return schema
+    return _object_schema(properties, tuple(required))
 
 
-def _skill_tool(skill: SkillIR) -> FunctionTool:
+def _skill_spec(skill: SkillIR) -> ToolSpec:
     document = render(skill)
 
     def handler(**_kwargs: Any) -> str:
         return document
 
-    return FunctionTool(
+    return ToolSpec(
         name=skill.skill_id,
         description=skill.description,
         parameters=input_schema(skill),
-        fn=handler,
+        handler=handler,
     )
 
 
-_RECALL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "query": {"type": "string", "description": "what to recall from team memory"},
-        "num_results": {"type": "integer", "description": "max facts to return", "default": 10},
-    },
-    "required": ["query"],
-}
-
-
-def _recall_tool(recall_fn: RecallFn) -> FunctionTool:
+def _recall_spec(recall_fn: RecallFn) -> ToolSpec:
     async def recall_memory(query: str, num_results: int = 10) -> str:
         return await recall_fn(query, num_results)
 
-    return FunctionTool(
+    parameters = _object_schema(
+        {
+            "query": {"type": "string", "description": "what to recall from team memory"},
+            "num_results": {
+                "type": "integer",
+                "description": "max facts to return",
+                "default": 10,
+            },
+        },
+        required=("query",),
+    )
+    return ToolSpec(
         name="recall_memory",
         description="Recall facts from the team's memory graph, with their sources.",
-        parameters=_RECALL_SCHEMA,
-        fn=recall_memory,
+        parameters=parameters,
+        handler=recall_memory,
+    )
+
+
+def _search_skills_spec(skills: list[SkillIR]) -> ToolSpec:
+    def search_skills(query: str = "", scope: str | None = None) -> str:
+        return _format_matches([s for s in skills if _match(s, query, scope)])
+
+    parameters = _object_schema(
+        {
+            "query": {
+                "type": "string",
+                "description": "text to match in a skill's id, title, description, or tags",
+                "default": "",
+            },
+            "scope": {
+                "type": "string",
+                "description": "filter by scope: org, team, repo, project, or person",
+            },
+        }
+    )
+    return ToolSpec(
+        name="search_skills",
+        description="Find verified skills by text or scope. Returns id, title, and description.",
+        parameters=parameters,
+        handler=search_skills,
     )
 
 
@@ -104,32 +165,6 @@ def _format_matches(skills: list[SkillIR]) -> str:
     return "\n".join(lines)
 
 
-def _search_skills_tool(skills: list[SkillIR]) -> FunctionTool:
-    def search_skills(query: str = "", scope: str | None = None) -> str:
-        return _format_matches([s for s in skills if _match(s, query, scope)])
-
-    schema: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "text to match in a skill's id, title, description, or tags",
-                "default": "",
-            },
-            "scope": {
-                "type": "string",
-                "description": "filter by scope: org, team, repo, project, or person",
-            },
-        },
-    }
-    return FunctionTool(
-        name="search_skills",
-        description="Find verified skills by text or scope. Returns id, title, and description.",
-        parameters=schema,
-        fn=search_skills,
-    )
-
-
 _INSTRUCTIONS = (
     "Relic serves a team's verified skills and its memory.\n"
     "- Each verified skill is a tool (call it for the grounded steps) and a resource "
@@ -145,10 +180,14 @@ def build_server(
     """Build the server: skills as tools and resources, search, and recall when provided."""
     skills = list_skills(conn, status="verified")
     mcp = FastMCP(name, instructions=_INSTRUCTIONS)
-    for skill in skills:
-        mcp.add_tool(_skill_tool(skill))
-        mcp.add_resource(_skill_resource(skill))
-    mcp.add_tool(_search_skills_tool(skills))
+
+    specs: list[ToolSpec] = [_skill_spec(skill) for skill in skills]
+    specs.append(_search_skills_spec(skills))
     if recall_fn is not None:
-        mcp.add_tool(_recall_tool(recall_fn))
+        specs.append(_recall_spec(recall_fn))
+
+    for spec in specs:
+        mcp.add_tool(_function_tool(spec))
+    for skill in skills:
+        mcp.add_resource(_skill_resource(skill))
     return mcp

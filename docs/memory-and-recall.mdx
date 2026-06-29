@@ -74,14 +74,19 @@ RecallAnswer
                 └── url: str?    # the PR or issue URL, resolved best-effort
 ```
 
-`recall(graphiti, query, group_id, num_results)`:
+`recall(memory, query, *, zones=None, group_id=None, num_results=10)`:
 
-1. Calls `graphiti.search(query, group_ids, num_results)`: hybrid semantic plus
+1. Resolves the search scope from `zones` (the ADR-0005 principal Zone-set) or the
+   legacy single-scope `group_id` alias. An explicit empty `zones` collection means
+   "no accessible Zones" and **fails closed**: recall returns an empty answer and
+   never calls `search`. Passing neither is an unscoped read, reserved for trusted
+   single-tenant callers.
+2. Calls `graphiti.search(query, group_ids, num_results)`: hybrid semantic plus
    keyword search, reranked. This is the portable Graphiti API, so it survived the
    Kuzu to FalkorDB migration unchanged.
-2. For each returned edge, takes its `fact` text and `name` (the relation), and
+3. For each returned edge, takes its `fact` text and `name` (the relation), and
    resolves its source episodes.
-3. Returns a `RecallAnswer`. If search raises (for example FTS unavailable), it
+4. Returns a `RecallAnswer`. If search raises (for example FTS unavailable), it
    returns an empty answer. Recall never raises.
 
 **Provenance resolution** (`_resolve_sources`) looks up each episode uuid via

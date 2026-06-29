@@ -341,7 +341,7 @@ async def _extract(
 
     from relic.graph import LoadStats, load_episodes, load_episodes_bulk, open_memory
     from relic.ingest import checkpoint_path, clear, compact, load_done, record_done
-    from relic.obs import stderr_console
+    from relic.obs import load_progress, stderr_console
 
     ledger = checkpoint_path(group_id)
     if fresh:
@@ -384,48 +384,24 @@ async def _extract(
         return await load_episodes(engram, to_load, **common)
 
     # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
-    # and --no-progress; otherwise fall back to the heartbeat log lines.
+    # and --no-progress; otherwise fall back to the heartbeat log lines. The bar wiring
+    # lives in relic.obs; here we only map LoadStats onto its (completed, counts) update.
     verbose = logging.getLogger("relic").getEffectiveLevel() <= logging.DEBUG
-    bar_console = stderr_console()
-    show_bar = bar_console.is_terminal and not no_progress and not verbose
+    show_bar = stderr_console().is_terminal and not no_progress and not verbose
 
     try:
-        if show_bar:
-            from rich.progress import (
-                BarColumn,
-                MofNCompleteColumn,
-                Progress,
-                SpinnerColumn,
-                TextColumn,
-                TimeElapsedColumn,
-                TimeRemainingColumn,
-            )
+        with load_progress(progress_label, len(to_load), enabled=show_bar) as update:
+            on_progress: Callable[[LoadStats], None] | None = None
+            if update is not None:
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TextColumn("{task.fields[counts]}"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                console=bar_console,
-            ) as bar:
-                task = bar.add_task(progress_label, total=len(to_load), counts="")
-
-                def _on_progress(s: LoadStats) -> None:
-                    bar.update(
-                        task,
-                        completed=s.loaded + s.superseded + s.skipped + s.failed,
-                        counts=(
-                            f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
-                            f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]"
-                        ),
+                def on_progress(s: LoadStats) -> None:
+                    update(  # type: ignore[misc]  # update is non-None inside this branch
+                        s.loaded + s.superseded + s.skipped + s.failed,
+                        f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
+                        f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]",
                     )
 
-                stats = await _run(_on_progress)
-        else:
-            stats = await _run(None)
+            stats = await _run(on_progress)
     finally:
         await engram.close()
 
@@ -851,121 +827,23 @@ def _make_recall_fn(
     return recall_fn
 
 
-# A coding session is captured as one AgentSession episode (docs/adr/0001, the AgentSession
-# amendment). Clip to the recent chars, where the decisions land: 200k would be a
-# single huge add_episode call.
-_MAX_SESSION_CHARS = 24_000
-
-
-def _distill_claude_transcript(raw: str) -> str:
-    """Turn a Claude Code transcript (JSONL) into clean User/Assistant prose.
-
-    Keeps real user prompts and assistant text; drops thinking, tool calls, tool
-    results, and the bookkeeping line types, so extraction sees a conversation rather
-    than tool-call noise (the engram ontology has no Decision/ActionItem types yet, so
-    clean prose is what gives it a chance). Falls back to the raw text when the input
-    is not the expected JSONL (an inline transcript). Clipped to the recent tail.
-    """
-    import json
-
-    turns: list[str] = []
-    parsed_any = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        parsed_any = True
-        if obj.get("type") not in ("user", "assistant"):
-            continue
-        msg = obj.get("message") or {}
-        content = msg.get("content")
-        if isinstance(content, str):
-            text = content.strip()
-        elif isinstance(content, list):
-            text = "\n".join(
-                b["text"]
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-            ).strip()
-        else:
-            text = ""
-        if text:
-            who = "User" if msg.get("role") == "user" else "Assistant"
-            turns.append(f"{who}: {text}")
-    distilled = "\n\n".join(turns) if parsed_any else raw
-    return distilled[-_MAX_SESSION_CHARS:]
-
-
-def _resolve_session_transcript(payload: dict[str, Any]) -> str:
-    """Read and distill the session text from a capture payload.
-
-    Prefer the transcript file the hook points at, so the size/curation policy lives
-    server-side (tunable without reinstalling hooks) and the HTTP payload stays small;
-    fall back to an inline transcript.
-    """
-    import os
-
-    raw = ""
-    path = str(payload.get("transcript_path", "")).strip()
-    if path and os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                raw = fh.read()
-        except OSError:
-            raw = ""
-    if not raw:
-        raw = str(payload.get("transcript", ""))
-    return _distill_claude_transcript(raw)
-
-
 async def _write_session_episode(
     engram: "GraphitiMemory", group: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """Write one finished session into ``group`` as an AgentSession episode.
 
-    The session is distilled to clean prose and run through the same loader ingest uses,
-    so existing extraction turns it into typed facts with no new write path. Idempotent
-    per session via the group's checkpoint ledger: the episode name is the session id,
-    so a repeated SessionEnd (Claude Code can fire it more than once) is skipped, not
-    re-extracted into a fork.
-
-    The deterministic ``files_touched`` / ``references`` links (docs/adr/0001 AgentSession
-    amendment) stay empty until the capture hook enriches the payload with git metadata;
-    a transcript-only capture still lands.
+    Composition only: ``relic.ingest.session_to_episode`` owns turning the capture payload
+    (transcript distillation included) into the ``EpisodeSpec``; this runs it through the
+    same loader ingest uses. Idempotent per session via the group's checkpoint ledger -- the
+    episode name is the session id, so a repeated SessionEnd is skipped, not re-extracted.
     """
-    from datetime import datetime
-
-    from relic.contracts import AgentSessionEpisodeBody, EpisodeSpec
     from relic.graph import load_episodes
-    from relic.ingest import checkpoint_path, load_done, record_done
+    from relic.ingest import checkpoint_path, load_done, record_done, session_to_episode
 
     session_id = str(payload.get("session_id", "")).strip()
-    summary = payload.get("summary") or None
-    transcript = _resolve_session_transcript(payload)
-
     ledger = checkpoint_path(group)
     done = load_done(ledger)
-
-    body = AgentSessionEpisodeBody(
-        url=f"session://{session_id}",
-        title=f"Coding session {session_id[:8]}",
-        agent="claude-code",
-        cwd=str(payload.get("cwd", "")).strip() or None,
-        ended_at=datetime.now(UTC).isoformat(),
-        transcript=transcript or None,
-        summary=summary,
-    )
-    spec = EpisodeSpec(
-        name=f"AgentSession {session_id}",
-        body=body.model_dump_json(),
-        source_description="Claude Code session (relic daemon)",
-        reference_time=datetime.now(UTC),
-        group_id=group,
-    )
+    spec = session_to_episode(payload, group)
     stats = await load_episodes(
         engram,
         [spec],

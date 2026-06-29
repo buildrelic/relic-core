@@ -23,6 +23,11 @@ from relic.ingest.mappers import (
     repo_group_id,
 )
 from relic.ingest.raw_store import dump_raw, raw_path
+from relic.ingest.sessions import (
+    distill_claude_transcript,
+    resolve_session_transcript,
+    session_to_episode,
+)
 from relic.ingest.spool import (
     clear_spool,
     read_spool,
@@ -44,6 +49,7 @@ __all__ = [
     "clear",
     "clear_spool",
     "compact",
+    "distill_claude_transcript",
     "dump_raw",
     "fetch_issues",
     "fetch_meetings",
@@ -61,6 +67,8 @@ __all__ = [
     "record_done",
     "repo_group_id",
     "resolve_github_token",
+    "resolve_session_transcript",
+    "session_to_episode",
     "sort_episodes",
     "spool_count",
     "spool_dir",

@@ -17,28 +17,32 @@ def _edge(fact: str = "paris reviews auth", group_id: str = "team-a") -> MemoryE
 
 
 async def test_search_forces_the_principal_zone_filter() -> None:
-    memory = ScopedMemory(FakeMemory(edges=[_edge()]), frozenset({"team-a"}))
+    inner = FakeMemory(edges=[_edge()])
+    memory = ScopedMemory(inner, frozenset({"team-a"}))
     edges = await memory.search("auth")
     assert len(edges) == 1
-    assert memory.inner.recorded_group_ids == [["team-a"]]  # scope pushed into the inner search
+    assert inner.recorded_group_ids == [["team-a"]]  # scope pushed into the inner search
 
 
 async def test_empty_zone_set_sees_nothing_and_never_calls_inner() -> None:
-    memory = ScopedMemory(FakeMemory(edges=[_edge()]), frozenset())
+    inner = FakeMemory(edges=[_edge()])
+    memory = ScopedMemory(inner, frozenset())
     assert await memory.search("auth") == []
-    assert memory.inner.recorded_group_ids == []  # fail closed: inner search not consulted
+    assert inner.recorded_group_ids == []  # fail closed: inner search not consulted
 
 
 async def test_caller_group_ids_can_only_narrow_within_scope() -> None:
-    memory = ScopedMemory(FakeMemory(edges=[_edge()]), frozenset({"team-a", "kb"}))
+    inner = FakeMemory(edges=[_edge()])
+    memory = ScopedMemory(inner, frozenset({"team-a", "kb"}))
     await memory.search("auth", group_ids=["kb", "team-b"])  # team-b not held
-    assert memory.inner.recorded_group_ids == [["kb"]]  # intersection only
+    assert inner.recorded_group_ids == [["kb"]]  # intersection only
 
 
 async def test_caller_group_ids_disjoint_from_scope_sees_nothing() -> None:
-    memory = ScopedMemory(FakeMemory(edges=[_edge()]), frozenset({"team-a"}))
+    inner = FakeMemory(edges=[_edge()])
+    memory = ScopedMemory(inner, frozenset({"team-a"}))
     assert await memory.search("auth", group_ids=["team-b"]) == []
-    assert memory.inner.recorded_group_ids == []
+    assert inner.recorded_group_ids == []
 
 
 async def test_global_entity_is_visible_regardless_of_zone() -> None:

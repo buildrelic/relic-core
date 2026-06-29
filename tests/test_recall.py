@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from mcp.types import TextContent
 
 from conftest import FakeMemory
@@ -15,7 +17,7 @@ from relic.registry.store import connect
 
 
 def _edge(
-    fact: str, relation: str, episodes: list[str], *, invalid_at: object = None
+    fact: str, relation: str, episodes: list[str], *, invalid_at: datetime | None = None
 ) -> MemoryEdge:
     person = MemoryEntity(uuid="p", name="paris", labels=["Person"], attributes={})
     work = MemoryEntity(uuid="w", name="PR#1", labels=["PullRequest"], attributes={})

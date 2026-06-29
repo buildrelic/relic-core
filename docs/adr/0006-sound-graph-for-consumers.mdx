@@ -1,0 +1,137 @@
+---
+title: "A sound graph for consumers: enforced Zone integrity, scoped-only reads, current-by-default facts"
+description: "Turn the three guarantees a downstream developer needs — that the access boundary is a property of the data and the seam (not a filter the caller must remember), and that recall never emits a superseded fact — into enforced invariants before the graph is handed off."
+icon: "shield-check"
+---
+
+<Info>
+**Status:** proposed (2026-06-28). Builds on
+[ADR-0005](/adr/0005-tenant-zone-access-model) — it does not change the access
+*model*, it makes that model *sound enough to hand to another developer*. ADR-0005
+fixed what a Zone is and that enforcement is deny-by-default; this record fixes
+where enforcement lives (in the data and the seam, not in a caller's argument),
+adds the integrity invariant that gives the boundary meaning, and makes recall
+temporally honest. Scope: the read/write **seam** (`relic.graph.memory`) and the
+graph it guards — not the network or auth layer.
+</Info>
+
+## Context
+
+[ADR-0005](/adr/0005-tenant-zone-access-model) made access deny-by-default and
+traversal-level, but the read-side foundation that shipped (PR #42) put enforcement
+in exactly one place: the `group_ids` filter that `recall()` hands to `search()`.
+That is safe **only if the consumer never reads past `recall()`**.
+
+The graph is about to be handed to a second developer to build a servable API on.
+`recall()` is hybrid-search-only; any real feature will want to resolve an
+`edge.target.uuid` to a node, take a second hop, list what exists, or run its own
+Cypher. **Every one of those paths bypasses the filter today**, because enforcement
+lives in the caller, not the data. The existing `reviewer_walk` already shows the
+hazard — it re-implements `rel.group_id = $group_id` by hand
+([memory.py](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/memory.py)).
+Each new read path is a new place to forget the filter, and one forgotten filter is
+a silent cross-Zone leak.
+
+Three guarantees a downstream reader must be able to rely on are not yet properties
+of the graph:
+
+1. **Integrity** — that every Zoned node and edge actually carries a Zone. Nothing
+   enforces it, so the boundary could be quietly hollow.
+2. **A safe-by-construction read path** — that you cannot leak by forgetting an
+   argument. The safe path is currently optional.
+3. **Temporal honesty** — that a recalled fact is current. `MemoryEdge` carries no
+   validity, so a superseded fact is indistinguishable from a true one.
+
+This record turns those three into enforced invariants. Costs and rejected
+alternatives below.
+
+## Decisions
+
+1. **Zone integrity is enforced at write and verifiable at read.** The writer seam
+   **refuses, fail-closed, to persist a Zoned episode or edge with no Zone** (and a
+   global-tier node that wrongly carries one) — a violation cannot enter through the
+   ingest path. A separate **audit read** (`audit_zone_integrity`, exposed as a CLI
+   command) scans the existing graph for the same violations, so a graph built
+   before this rule can be proven clean or repaired. Integrity is the precondition
+   for everything in ADR-0005: an untagged Zoned fact is either lost or leaked, and
+   without the invariant you cannot tell which.
+
+2. **The serving path can only obtain a scoped reader.** A `ScopedMemory` view
+   closes over a principal's Zone-set and applies it to **every** read it exposes —
+   `search`, episode lookup, and a new Zone-checked entity lookup
+   (`get_entity(uuid)`) so a consumer **never needs raw Cypher to resolve an
+   endpoint** (the move that bypasses Zones today). If the only handle a serving
+   surface can construct is already scoped, it **cannot** leak by forgetting an
+   argument. The unsafe path is removed, not documented.
+
+3. **Out-of-Zone reads behave as nonexistent.** A scoped read of a node outside the
+   principal's Zones returns nothing — no error, no redaction marker, no "you can't
+   see this" — exactly as if the node did not exist. This is ADR-0005's
+   no-existence-leak rule (Decision 5) applied to direct lookup and endpoint
+   resolution, and ADR-0005's intersection rule (Decision 9) applied to a fact whose
+   far endpoint is out of Zone: the fact dead-ends. Raising or redacting would leak
+   the very existence the model is built to hide.
+
+4. **An explicit, named unscoped reader remains for trusted callers.** Ingest, the
+   eval harness, and admin tooling legitimately read the whole tenant graph; ADR-0005
+   already sanctions the unscoped path for non-principal callers. It stays, but as a
+   distinctly named seam that **no serving surface can reach** — the danger is an
+   *accidental* unscoped read on a request path, not a deliberate one in a batch job.
+
+5. **Recall returns current facts by default, and validity crosses the seam.**
+   `MemoryEdge` gains `valid_at` / `invalid_at` (and `expired_at`), and
+   `search`/`recall` exclude superseded facts unless explicitly asked otherwise.
+   Grounded recall that silently emits a superseded fact is a correctness failure,
+   not a recall. Exposing the fields (rather than only filtering) lets a consumer
+   reason about recency and lets a later as-of / history query be added without a
+   seam change.
+
+## Considered options
+
+- **Enforcement as a caller-passed filter (status quo)** (rejected): one forgotten
+  `zones=` argument on any read path is a cross-Zone leak. Acceptable for a single
+  author who wrote every call site; unsafe to hand to a second developer.
+- **Integrity by audit only, no write-time refusal** (rejected): detects violations
+  but lets them land first; the boundary is only ever eventually-sound. Refusal makes
+  it sound by construction; the audit is the safety net for pre-existing data.
+- **Out-of-Zone reads raise or return a redaction marker** (rejected): both leak
+  existence — the requester learns the node is there — which is fatal for a
+  need-to-know Classified Zone (ADR-0005, Decision 5).
+- **Expose validity but return all facts, caller filters** (rejected): re-introduces
+  the staleness footgun the scoped reader exists to remove — every consumer must
+  remember to filter, the exact failure mode we are designing out.
+- **A general second-hop traversal / neighbors API now** (deferred): this record
+  makes endpoint resolution safe; a broad walk inherits the same scoped contract when
+  a concrete need appears.
+
+## Consequences
+
+- **`recall`/`queries` refactor to take a `MemoryReader` that is the scoped view** on
+  the serving path; the composition root constructs `ScopedMemory` from the
+  principal's Zone-set (the seam wiring specced separately) and hands nothing else to
+  serve.
+- **The writer seam gains a fail-closed Zone check.** Ingest must supply a Zone for
+  every Zoned episode — today `group_id` is always set by ingest, so the live risk is
+  low, but the global-tier exemption must be honored so identity nodes are not
+  rejected.
+- **`MemoryEdge` grows validity fields**; existing readers, `FakeMemory`, and tests
+  update to carry and assert them.
+- **A new `audit_zone_integrity` read and CLI command** become the way to answer "is
+  this graph sound?" — the single most useful thing handed to the next developer.
+- **The unscoped reader must be unmistakably named and walled off** from serve;
+  a lint-time or review-time guard against importing it from a serving module is worth
+  considering.
+
+## Deferred (decide when a concrete need appears)
+
+- **Citability guarantee**: `recall` still falls back to a bare uuid when an episode
+  is unknown, so a fact can be uncitable. Flag it (`is_cited`) or drop it — deferred;
+  it is a degradation the consumer can see, unlike a silent leak.
+- **Zone reconciliation**: a `zones_present()` read over distinct in-graph Zones, so
+  control-plane grants can be validated against what data actually exists (a grant to
+  an empty Zone, or data in an ungranted Zone, is currently invisible).
+- **Ontology version pin**: an `ONTOLOGY_VERSION` the consumer pins to, with a
+  stability promise, so a renamed entity type is a versioned break, not a silent one.
+- **History / as-of queries**: validity is exposed now; time-travel reads come later.
+- **General traversal API**: neighbors / multi-hop walks under the same scoped
+  contract.

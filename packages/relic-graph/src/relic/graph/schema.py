@@ -258,3 +258,38 @@ ZONED_ENTITY_TYPES: frozenset[str] = frozenset(ENTITY_TYPES) - GLOBAL_ENTITY_TYP
 def is_global_type(label: str) -> bool:
     """True if ``label`` is part of the tenant-global identity spine (Zone-exempt)."""
     return label in GLOBAL_ENTITY_TYPES
+
+
+def is_global_entity(labels: list[str]) -> bool:
+    """True if any of a node's ``labels`` is global (the node is Zone-exempt)."""
+    return any(is_global_type(label) for label in labels)
+
+
+class ZoneIntegrityError(ValueError):
+    """A write would violate Zone integrity (ADR-0006): a Zoned write with no Zone.
+
+    Raised by the writer seam, fail-closed, before anything reaches the graph -- a
+    Zoned node or edge with no ``group_id`` is either lost (filtered everywhere) or
+    leaked (filtered nowhere), so it must never be persisted.
+    """
+
+
+def require_episode_zone(group_id: str | None) -> str:
+    """Return the episode's Zone, or fail closed if it has none (ADR-0006 Decision 1).
+
+    Every episode tags the nodes and edges extracted from it with one ``group_id`` (its
+    Zone), so an episode with no Zone would write untagged Zoned facts. The global-tier
+    exemption is a *read*-time rule (``is_global_type`` skips the filter), not a license
+    to write untagged: there is no such thing as a Zoneless write.
+
+    The ``.strip()`` is intentional normalization: the returned trimmed value is the
+    canonical Zone persisted on the episode and referenced by recall and grants, so
+    surrounding whitespace is normalized by design (not by accident).
+    """
+    zone = (group_id or "").strip()
+    if not zone:
+        raise ZoneIntegrityError(
+            "refusing to write an episode with no Zone (group_id is empty); "
+            "every Zoned write must carry exactly one Zone (ADR-0006)"
+        )
+    return zone

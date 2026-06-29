@@ -1626,6 +1626,54 @@ async def _recall(query: str, repo: str | None, num_results: int) -> None:
     print(format_answer(answer))
 
 
+@app.command("audit-zones")
+def audit_zones_command(
+    repo: Annotated[
+        str | None,
+        typer.Option(help="owner/name whose database to audit, defaults to TARGET_REPO"),
+    ] = None,
+    limit: Annotated[int, typer.Option(help="max violations to report per kind")] = 1000,
+) -> None:
+    """Audit Zone integrity (ADR-0006): is every Zoned node and edge tagged with a Zone?
+
+    Exits non-zero if any violation is found, so it can gate CI. A clean report is the
+    proof that the access boundary is structurally sound.
+    """
+    import asyncio
+
+    asyncio.run(_audit_zones(repo, limit))
+
+
+async def _audit_zones(repo: str | None, limit: int) -> None:
+    from relic.config import get_settings
+    from relic.graph import audit_zone_integrity, open_memory
+    from relic.ingest import repo_group_id
+
+    settings = get_settings()
+    repo = repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
+    engram = open_memory(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=group_id or settings.falkordb_database,
+        api_key=settings.openai_api_key,
+    )
+    try:
+        report = await audit_zone_integrity(engram, limit=limit)
+    finally:
+        await engram.close()
+    if report.is_clean:
+        console.print("[green]Zone integrity: clean[/] — every Zoned node and edge carries a Zone.")
+        return
+    console.print(f"[red]Zone integrity: {len(report.violations)} violation(s)[/]")
+    for violation in report.violations:
+        console.print(f"  [yellow]{violation.kind}[/] {violation.uuid}: {violation.detail}")
+    if report.truncated:
+        console.print("[yellow]…report truncated at the row limit; more violations may exist.[/]")
+    raise typer.Exit(code=1)
+
+
 @app.command("eval")
 def eval_recall(
     path: Annotated[Path, typer.Option(help="scorecard gold set JSON")] = Path(

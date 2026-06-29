@@ -68,6 +68,7 @@ async def recall(
     zones: Collection[str] | None = None,
     group_id: str | None = None,
     num_results: int = 10,
+    include_superseded: bool = False,
 ) -> RecallAnswer:
     """Return facts matching ``query`` with their source episodes. Never raises.
 
@@ -75,6 +76,10 @@ async def recall(
     fails closed: an explicit empty Zone-set sees nothing, and ``search`` is never
     consulted. ``group_id`` is the legacy single-scope alias; passing neither is an
     unscoped read reserved for trusted single-tenant callers.
+
+    Per ADR-0006 recall returns only **current** facts: a fact a later episode
+    invalidated or superseded is dropped, so a grounded answer never surfaces a stale
+    fact as if it were true. Set ``include_superseded`` to keep them (history views).
     """
     group_ids = _scope_filter(zones, group_id)
     if group_ids is not None and not group_ids:
@@ -87,6 +92,8 @@ async def recall(
 
     facts: list[RecalledFact] = []
     for edge in edges:
+        if not include_superseded and not edge.is_current:
+            continue  # ADR-0006: never surface a superseded fact as current
         text = edge.fact.strip()
         if not text:
             continue

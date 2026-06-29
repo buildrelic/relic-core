@@ -38,7 +38,8 @@
           "adr/0001-engram-graph-ontology",
           "adr/0003-memory-seam",
           "adr/0004-memory-service-api",
-          "adr/0005-tenant-zone-access-model"
+          "adr/0005-tenant-zone-access-model",
+          "adr/0006-sound-graph-for-consumers"
         ]
       },
       {

@@ -243,3 +243,18 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ("AgentSession", "PullRequest"): ["REFERENCES"],
     ("AgentSession", "Issue"): ["REFERENCES"],
 }
+
+# ADR-0005: the ontology splits in two for access control. The tenant-global identity
+# spine (Person/Repo/Label/File) is Zone-exempt -- any tenant member may see these
+# connective nodes, and entity resolution requires one node per human, which is
+# impossible if identity were Zoned. Every other node, and every edge (fact), is Zoned:
+# it carries exactly one Zone and access is enforced on it. The partition must stay
+# exhaustive over ENTITY_TYPES (test_schema guards it); a new entity type lands in one
+# tier on purpose, not by omission.
+GLOBAL_ENTITY_TYPES: frozenset[str] = frozenset({"Person", "Repo", "Label", "File"})
+ZONED_ENTITY_TYPES: frozenset[str] = frozenset(ENTITY_TYPES) - GLOBAL_ENTITY_TYPES
+
+
+def is_global_type(label: str) -> bool:
+    """True if ``label`` is part of the tenant-global identity spine (Zone-exempt)."""
+    return label in GLOBAL_ENTITY_TYPES

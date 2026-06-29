@@ -81,6 +81,27 @@ async def test_recall_never_raises_on_search_failure() -> None:
     assert answer.is_empty
 
 
+async def test_recall_fail_closed_on_empty_zones() -> None:
+    # ADR-0005: a principal with no accessible Zones sees nothing, and search is never
+    # consulted -- so even a fake brimming with edges yields an empty answer.
+    memory = FakeMemory(edges=[_edge("classified fact", "REVIEWED", ["ep1"])])
+    answer = await recall(memory, "anything", zones=[])
+    assert answer.is_empty
+    assert memory.recorded_group_ids == []  # search not called at all
+
+
+async def test_recall_passes_zones_to_search_as_filter() -> None:
+    memory = FakeMemory(edges=[_edge("paris reviews auth PRs", "REVIEWED", ["ep1"])])
+    await recall(memory, "auth", zones=["team-a", "kb"])
+    assert memory.recorded_group_ids == [["team-a", "kb"]]
+
+
+async def test_recall_legacy_group_id_still_scopes() -> None:
+    memory = FakeMemory(edges=[_edge("paris reviews auth PRs", "REVIEWED", ["ep1"])])
+    await recall(memory, "auth", group_id="team-a")
+    assert memory.recorded_group_ids == [["team-a"]]
+
+
 def test_extract_url_prefers_pr_then_issue() -> None:
     assert _extract_url('{"pull_request": {"url": "https://x/pr/12"}}') == "https://x/pr/12"
     assert _extract_url('{"issue": {"url": "https://x/issue/42"}}') == "https://x/issue/42"

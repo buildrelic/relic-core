@@ -26,8 +26,11 @@ from relic.graph.memory import (
 )
 from relic.graph.queries import ReviewerHit, reviewers_of
 from relic.graph.recall import RecallAnswer, RecalledFact, Source, format_answer, recall
+from relic.graph.schema import GLOBAL_ENTITY_TYPES, ZONED_ENTITY_TYPES, is_global_type
 
 __all__ = [
+    "GLOBAL_ENTITY_TYPES",
+    "ZONED_ENTITY_TYPES",
     "GraphitiMemory",
     "LoadStats",
     "MemoryEdge",
@@ -42,6 +45,7 @@ __all__ = [
     "ensure_indexes",
     "falkordb_reachable",
     "format_answer",
+    "is_global_type",
     "load_episodes",
     "load_episodes_bulk",
     "open_memory",

@@ -110,7 +110,10 @@ async def _collect_meetings(
     """
     out: list[MeetingRec] = []
     cursor: str | None = None
-    updated_after = cutoff.isoformat()
+    # Granola's date filter wants RFC3339 with a Z suffix and no sub-second precision;
+    # datetime.isoformat() emits a "+00:00" offset plus microseconds, which the API
+    # rejects with a 400 "Invalid date". cutoff is UTC, so wall-clock + literal Z is exact.
+    updated_after = cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     while True:
         block = await client.list_notes(cursor=cursor, updated_after=updated_after)
         for summary in block.get("notes", []):

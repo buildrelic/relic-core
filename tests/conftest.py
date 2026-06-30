@@ -9,7 +9,7 @@ FalkorDB, OpenAI, or Graphiti (ADR-0003). Import it directly: ``from conftest im
 FakeMemory``.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 import pytest
@@ -17,6 +17,27 @@ import pytest
 from relic.contracts import EpisodeSpec
 from relic.graph.memory import MemoryEdge, MemoryEntity, MemoryEpisode
 from relic.ontology.skill_ir import Citation, FieldSpec, SkillIR
+
+
+@pytest.fixture(autouse=True)
+def _isolate_connector_secrets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Give every test the CI-clean connector baseline, regardless of the developer's .env.
+
+    A combined ``ingest --repo`` run (``_capture``) also fetches Linear and Granola whenever
+    their keys are configured. ``get_settings`` is lru_cached and reads the real ``.env``, so a
+    developer with ``GRANOLA_API_KEY`` / ``LINEAR_API_KEY`` set would have unit tests pull live
+    data over the network — matching neither CI (which has no keys) nor the tests' mocked-
+    GitHub-only intent. Null those secrets (an env var overrides the ``.env`` file in
+    pydantic-settings) and reset the cache so settings re-read clean. A test that needs a key
+    sets it explicitly and clears the cache itself.
+    """
+    from relic.config import get_settings
+
+    monkeypatch.setenv("GRANOLA_API_KEY", "")
+    monkeypatch.setenv("LINEAR_API_KEY", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @dataclass

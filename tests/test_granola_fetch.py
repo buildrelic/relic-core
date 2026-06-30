@@ -120,7 +120,9 @@ async def test_lists_then_hydrates_each_note() -> None:
 async def test_updated_after_window_is_passed_server_side() -> None:
     client = _FakeGranola({None: _list_block([_summary("not_a")])}, {"not_a": _full_note("not_a")})
     await _collect_meetings(cast("GranolaClient", client), cutoff=CUTOFF, limit=None)
-    assert client.list_calls[0]["updated_after"] == CUTOFF.isoformat()
+    # The live API rejects isoformat()'s "+00:00" offset + microseconds as an "Invalid date";
+    # it wants RFC3339 with a Z suffix at second precision. Pin the exact wire format.
+    assert client.list_calls[0]["updated_after"] == "2026-01-01T00:00:00Z"
 
 
 async def test_pagination_follows_the_cursor() -> None:

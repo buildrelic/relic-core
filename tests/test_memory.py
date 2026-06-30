@@ -49,8 +49,12 @@ class _FakeGraphiti:
         self._edges = edges
         self.driver = object()
 
-    async def search(self, query, *, group_ids=None, num_results=10):  # noqa: ANN001, ANN202
-        return self._edges
+    async def search_(self, query, config=None, group_ids=None, **_kw):  # noqa: ANN001, ANN202
+        # GraphitiMemory.search uses the cross-encoder recipe via graphiti.search_ (REL-11),
+        # which returns a SearchResults object whose .edges carries the matched edges.
+        from types import SimpleNamespace
+
+        return SimpleNamespace(edges=self._edges)
 
 
 async def test_search_returns_edges_with_resolved_endpoints(monkeypatch) -> None:

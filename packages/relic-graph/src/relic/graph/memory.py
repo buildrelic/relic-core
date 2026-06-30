@@ -268,8 +268,16 @@ class GraphitiMemory:
     async def search(
         self, query: str, *, group_ids: list[str] | None = None, num_results: int = 10
     ) -> list[MemoryEdge]:
-        edges = await self._graphiti.search(query, group_ids=group_ids, num_results=num_results)
-        return [await self._to_memory_edge(edge) for edge in edges]
+        # Use the cross-encoder recipe, not the default RRF. The OpenAIRerankerClient is already
+        # built and paid for at ingest (passed as cross_encoder= when Graphiti is constructed),
+        # but the plain ``graphiti.search`` never invokes it, so recall was RRF-only (REL-11).
+        # ``search_`` with the EDGE cross-encoder recipe turns on the LLM rerank AND bfs graph-hop
+        # expansion in one move; copy the recipe to carry this call's result limit.
+        from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_CROSS_ENCODER
+
+        config = EDGE_HYBRID_SEARCH_CROSS_ENCODER.model_copy(update={"limit": num_results})
+        results = await self._graphiti.search_(query, config=config, group_ids=group_ids)
+        return [await self._to_memory_edge(edge) for edge in results.edges]
 
     async def get_episode(self, uuid: str) -> MemoryEpisode | None:
         from graphiti_core.nodes import EpisodicNode

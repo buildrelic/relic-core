@@ -55,7 +55,7 @@ def ingest(
         str | None, typer.Option(help="owner/name to ingest (github sources)")
     ] = None,
     source: Annotated[
-        str, typer.Option(help="source to ingest: github (needs --repo) | granola")
+        str, typer.Option(help="source to ingest: github (needs --repo) | granola | notion")
     ] = "github",
     limit: Annotated[
         int | None, typer.Option(help="cap items pulled, most recent first")
@@ -119,7 +119,7 @@ def load(
         str | None, typer.Option(help="owner/name whose spooled episodes to extract (github)")
     ] = None,
     source: Annotated[
-        str, typer.Option(help="source to extract: github (needs --repo) | granola")
+        str, typer.Option(help="source to extract: github (needs --repo) | granola | notion")
     ] = "github",
     limit: Annotated[
         int | None,
@@ -459,10 +459,24 @@ async def _ingest(
     _quiet_background_errors(log)
     settings = get_settings()
 
-    # Granola is a non-repo source: it scopes per note-owner, not per repo, so it runs its
-    # own capture + per-scope extract rather than the owner/name path below.
+    # Granola and Notion are non-repo sources: they scope per note-owner / per workspace,
+    # not per repo, so they run their own capture + per-scope extract rather than the
+    # owner/name path below.
     if source == "granola":
         await _ingest_granola(
+            limit,
+            months=months,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            no_load=no_load,
+            settings=settings,
+            log=log,
+        )
+        return
+
+    if source == "notion":
+        await _ingest_notion(
             limit,
             months=months,
             bulk=bulk,
@@ -609,9 +623,10 @@ async def _capture_granola(
     return episodes, fetch_seconds, prepare_seconds
 
 
-async def _extract_granola_scopes(
+async def _extract_scopes(
     by_scope: "dict[str, list[EpisodeSpec]]",
     *,
+    source: str,
     settings: "Settings",
     bulk: bool,
     fresh: bool,
@@ -620,11 +635,13 @@ async def _extract_granola_scopes(
     verb: str,
     log: "logging.Logger",
 ) -> "tuple[int, int]":
-    """Extract each owner-scope into its own partition + ledger. Returns ``(loaded, failed)``.
+    """Extract each scope into its own partition + ledger. Returns ``(loaded, failed)``.
 
-    ``_extract`` checkpoints under the group_id it is handed, so each granola scope is passed
-    its own ``granola__<email>`` key and lands in ``data/ingest/granola__<email>.log`` (what
-    ``_connector_status`` reads), instead of being lumped under a single ledger.
+    Shared by the non-repo sources (granola, notion). ``_extract`` checkpoints under the
+    group_id it is handed, so each scope is passed its own key (``granola__<email>`` /
+    ``notion__<workspace>``) and lands in its own ``data/ingest/<scope>.log`` (what
+    ``_connector_status`` reads), instead of being lumped under a single ledger. ``source``
+    is the run-history label ("Granola" / "Notion").
     """
     total_loaded = total_failed = 0
     for scope, specs in sorted(by_scope.items()):
@@ -640,8 +657,8 @@ async def _extract_granola_scopes(
             progress_label=f"{verb} {scope}",
             log=log,
         )
-        # Granola runs have no repo; the "Granola" source label + the per-scope id identify it.
-        _record_run(stats, None, source="Granola")
+        # A non-repo run has no repo; the source label + the per-scope id identify it.
+        _record_run(stats, None, source=source)
         total_loaded += stats.loaded
         total_failed += stats.failed
     return total_loaded, total_failed
@@ -702,8 +719,9 @@ async def _ingest_granola(
         return
 
     by_scope = _by_scope(episodes)
-    loaded, failed = await _extract_granola_scopes(
+    loaded, failed = await _extract_scopes(
         by_scope,
+        source="Granola",
         settings=settings,
         bulk=bulk,
         fresh=fresh,
@@ -761,8 +779,9 @@ async def _load_granola(
         sum(len(specs) for specs in by_scope.values()),
         len(by_scope),
     )
-    loaded, failed = await _extract_granola_scopes(
+    loaded, failed = await _extract_scopes(
         by_scope,
+        source="Granola",
         settings=settings,
         bulk=bulk,
         fresh=fresh,
@@ -772,6 +791,177 @@ async def _load_granola(
         log=log,
     )
     log.info("granola load done: %d meetings loaded, %d failed", loaded, failed)
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
+async def _capture_notion(
+    limit: int | None,
+    *,
+    api_key: str,
+    months: int,
+    log: "logging.Logger",
+) -> "tuple[list[EpisodeSpec], float, float]":
+    """Fetch, map, raw-store, and spool Notion pages: the no-LLM half of a notion ingest.
+
+    Returns ``(episodes, fetch_seconds, prepare_seconds)``. Each page carries its own
+    per-workspace ``group_id`` (``notion__<workspace>``), so episodes are spooled per scope
+    (a token nearly always maps to one workspace, but the per-scope grouping keeps the path
+    identical to granola's). Each scope is its own graph partition and checkpoint.
+    """
+    import time
+
+    from relic.ingest import (
+        dump_raw,
+        fetch_pages,
+        page_to_episode,
+        sort_episodes,
+        spool_episodes,
+    )
+
+    fetch_start = time.monotonic()
+    pages = await fetch_pages(api_key, months=months, limit=limit)
+    fetch_seconds = time.monotonic() - fetch_start
+    log.info("fetched %d Notion pages in %.1fs", len(pages), fetch_seconds)
+
+    prepare_start = time.monotonic()
+    for page in pages:
+        dump_raw(page.raw, source="notion", ident=_safe_ident(page.id))
+    episodes = sort_episodes([page_to_episode(page) for page in pages])
+    for scope, specs in _by_scope(episodes).items():
+        spool_episodes(specs, scope)
+        log.debug("spooled %d episodes under data/spool/%s", len(specs), scope)
+    prepare_seconds = time.monotonic() - prepare_start
+    return episodes, fetch_seconds, prepare_seconds
+
+
+async def _ingest_notion(
+    limit: int | None,
+    *,
+    months: int,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    no_load: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Standalone Notion ingest: capture pages, then extract per workspace-scope.
+
+    Unlike the github path there is no repo. The Notion token (a per-user token forwarded by
+    the web app's POST /v1/ingest, else the server's own ``NOTION_API_KEY``) is read from
+    settings; each page is partitioned by its workspace (``notion__<workspace>``).
+    """
+    import time
+
+    from relic.graph import falkordb_reachable
+
+    if not settings.notion_api_key:
+        log.error(
+            "Notion ingest needs an API token (set NOTION_API_KEY or connect it in the web app)"
+        )
+        raise typer.Exit(code=2)
+
+    ingest_start = time.monotonic()
+    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    episodes, fetch_seconds, prepare_seconds = await _capture_notion(
+        limit, api_key=settings.notion_api_key, months=months, log=log
+    )
+    if not episodes:
+        log.warning("nothing to ingest")
+        return
+
+    if no_load:
+        log.info(
+            "captured %d Notion pages in %.1fs (fetch %.1fs, map + spool %.1fs); "
+            "extract them with `relic load --source notion`",
+            len(episodes),
+            time.monotonic() - ingest_start,
+            fetch_seconds,
+            prepare_seconds,
+        )
+        return
+
+    by_scope = _by_scope(episodes)
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Notion",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=None,
+        verb="ingesting",
+        log=log,
+    )
+    total_seconds = time.monotonic() - ingest_start
+    log.info(
+        "notion ingest done: %d pages loaded across %d workspace-scope(s) in %.1fs "
+        "(fetch %.1fs, map + spool %.1fs)",
+        loaded,
+        len(by_scope),
+        total_seconds,
+        fetch_seconds,
+        prepare_seconds,
+    )
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
+async def _load_notion(
+    limit: int | None,
+    *,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Extract spooled Notion episodes per workspace-scope: the LLM half of a notion run."""
+    from relic.graph import falkordb_reachable
+    from relic.ingest import read_spool
+
+    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    spool_base = Path("data/spool")
+    scopes = sorted(p.name for p in spool_base.glob("notion__*")) if spool_base.exists() else []
+    by_scope = {scope: read_spool(scope) for scope in scopes}
+    by_scope = {scope: specs for scope, specs in by_scope.items() if specs}
+    if not by_scope:
+        log.warning(
+            "no spooled notion episodes; run `relic ingest --no-load --source notion` first"
+        )
+        return
+    log.info(
+        "read %d spooled pages across %d workspace-scope(s)",
+        sum(len(specs) for specs in by_scope.values()),
+        len(by_scope),
+    )
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Notion",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=limit,
+        verb="extracting",
+        log=log,
+    )
+    log.info("notion load done: %d pages loaded, %d failed", loaded, failed)
     if loaded == 0 and failed:
         raise typer.Exit(code=1)
 
@@ -798,6 +988,12 @@ async def _load(
 
     if source == "granola":
         await _load_granola(
+            limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
+        )
+        return
+
+    if source == "notion":
+        await _load_notion(
             limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
         )
         return
@@ -1413,11 +1609,13 @@ def _connector_status() -> dict[str, Any]:
     github_prs = 0
     linear_issues = 0
     granola_meetings = 0
+    notion_pages = 0
     github_repos: list[str] = []
     linear_repos: list[str] = []
     github_mtime = 0.0
     linear_mtime = 0.0
     granola_mtime = 0.0
+    notion_mtime = 0.0
     for ledger in ledgers:
         stem = ledger.stem
         mtime = ledger.stat().st_mtime
@@ -1429,6 +1627,14 @@ def _connector_status() -> dict[str, Any]:
             if meetings:
                 granola_meetings += meetings
                 granola_mtime = max(granola_mtime, mtime)
+            continue
+        # Notion scopes are per workspace (notion__<workspace>), not repos. Same treatment:
+        # count pages and move on so the ledger never becomes a fake repo on another card.
+        if stem.startswith("notion__"):
+            pages = sum(1 for name in load_done(ledger) if name.startswith("Notion "))
+            if pages:
+                notion_pages += pages
+                notion_mtime = max(notion_mtime, mtime)
             continue
         repo = stem.replace("__", "/")
         has_github = False
@@ -1476,6 +1682,14 @@ def _connector_status() -> dict[str, Any]:
                 "itemCount": granola_meetings,
                 "itemLabel": "meetings",
                 "lastSyncAt": _iso(granola_mtime),
+                "repos": [],
+            },
+            {
+                "source": "notion",
+                "connected": bool(settings.notion_api_key) or notion_pages > 0,
+                "itemCount": notion_pages,
+                "itemLabel": "pages",
+                "lastSyncAt": _iso(notion_mtime),
                 "repos": [],
             },
         ]
@@ -1530,6 +1744,9 @@ def _ingest_runs(repo: str | None, limit: int, source: str | None = None) -> dic
     elif src == "granola":
         base = Path("data/ingest")
         ledgers = sorted(base.glob("granola__*.log")) if base.exists() else []
+    elif src == "notion":
+        base = Path("data/ingest")
+        ledgers = sorted(base.glob("notion__*.log")) if base.exists() else []
     else:
         base = Path("data/ingest")
         ledgers = sorted(base.glob("*.log")) if base.exists() else []
@@ -1542,7 +1759,12 @@ def _ingest_runs(repo: str | None, limit: int, source: str | None = None) -> dic
     settings = get_settings()
     sources_connected = sum(
         1
-        for key in (settings.github_token, settings.linear_api_key, settings.granola_api_key)
+        for key in (
+            settings.github_token,
+            settings.linear_api_key,
+            settings.granola_api_key,
+            settings.notion_api_key,
+        )
         if key
     ) or (1 if total else 0)
     last_run = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
@@ -1592,10 +1814,10 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
     new, so a webhook or cron can call this repeatedly and only the new items get loaded.
 
     For ``source == "github"`` ``repo`` is required (owner/name) and the in-flight guard
-    keys on it. For ``source == "granola"`` there is no repo: the graph scope
-    (``granola__<owner-email>``) isn't knowable until the notes are fetched, so the guard
-    keys on a hash of the grn_ key instead (one key ≈ one user), and the run spawns
-    `relic ingest --source granola`.
+    keys on it. For the non-repo sources (``granola``, ``notion``) there is no repo: the
+    graph scope (``granola__<owner-email>`` / ``notion__<workspace>``) isn't knowable until
+    the data is fetched, so the guard keys on a hash of the source token instead (one token
+    ≈ one user/workspace), and the run spawns `relic ingest --source <source>`.
 
     ``token`` is the connecting user's secret for that source (a GitHub OAuth token, or a
     granola grn_ key). It reaches the child through its environment, never argv, so it does
@@ -1628,6 +1850,24 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
         )
         _INGEST_PROCS[key] = proc
         return {"status": "running", "source": "granola"}
+
+    if source == "notion":
+        # No repo, and the workspace scope is unknown until fetch, so key the in-flight guard
+        # on the token itself (one token ~ one workspace). A hash, never the raw token, so the
+        # lock id (which can surface in logs) can't leak the secret; no user token falls back
+        # to a server bucket.
+        key = "notion:" + (hashlib.sha256(token.encode()).hexdigest()[:16] if token else "server")
+        running = _INGEST_PROCS.get(key)
+        if running is not None and running.poll() is None:
+            return {"status": "already_running", "source": "notion"}
+        # NOTION_API_KEY carries the user token (settings.notion_api_key reads it); with no
+        # user token, env=None lets the child inherit the server's own NOTION_API_KEY.
+        env = {**os.environ, "NOTION_API_KEY": token} if token else None
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-m", "relic", "ingest", "--source", "notion"], env=env
+        )
+        _INGEST_PROCS[key] = proc
+        return {"status": "running", "source": "notion"}
 
     if not repo:
         return {"status": "error", "error": "repo is required for the github source"}

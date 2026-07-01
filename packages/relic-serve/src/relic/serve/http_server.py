@@ -27,11 +27,12 @@ from starlette.routing import Route
 ConnectorsFn = Callable[[], Awaitable[dict[str, Any]]]
 # (repo | None, limit, source | None) -> {"runs": [...], "totals": {...}}
 # repo and source are independent filters: a repo scopes to one github repo, source scopes
-# to a non-repo connector (granola, whose runs carry no repo). Either, both, or neither.
+# to a non-repo connector (granola/notion, whose runs carry no repo). Either, both, or neither.
 IngestRunsFn = Callable[[str | None, int, str | None], Awaitable[dict[str, Any]]]
 # (source, repo | None, token | None) -> {"status": "running" | "already_running", ...}
-# source is "github" (repo required) or "granola" (no repo, scopes itself server-side).
-# token is the per-user secret for that source (a github OAuth token / a granola grn_ key).
+# source is "github" (repo required) or a non-repo source ("granola", "notion") that scopes
+# itself server-side. token is the per-user secret for that source (a github OAuth token, a
+# granola grn_ key, or a notion integration token).
 IngestTriggerFn = Callable[[str, str | None, str | None], Awaitable[dict[str, Any]]]
 
 _MAX_LIMIT = 200
@@ -95,9 +96,9 @@ def build_http_app(
         except Exception:  # noqa: BLE001 - any malformed body is a 400
             return JSONResponse({"error": "invalid json body"}, status_code=400)
         # `source` selects the ingest path. Default is github, for back-compat with the
-        # original {repo, token} body. Granola is a non-repo, API-key source whose graph
-        # scope is derived server-side from the note owner (REL-119): it carries a token
-        # but no repo, so it must branch before the owner/name guard below.
+        # original {repo, token} body. Granola and Notion are non-repo, API-key sources whose
+        # graph scope is derived server-side (the note owner / the workspace): they carry a
+        # token but no repo, so they must branch before the owner/name guard below.
         source = str(body.get("source", "github")).strip().lower() or "github"
         # Optional per-user secret: a github OAuth token, or a granola grn_ key. Ingest
         # authenticates as the connecting user so it reads their data, not just ours.
@@ -109,8 +110,8 @@ def build_http_app(
         if user_token and not _valid_token(user_token):
             return JSONResponse({"error": "invalid token"}, status_code=400)
 
-        if source == "granola":
-            result = await ingest_trigger("granola", None, user_token or None)
+        if source in ("granola", "notion"):
+            result = await ingest_trigger(source, None, user_token or None)
         elif source == "github":
             repo = str(body.get("repo", "")).strip()
             if "/" not in repo:

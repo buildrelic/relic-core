@@ -35,6 +35,7 @@ def _isolate_connector_secrets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
     monkeypatch.setenv("GRANOLA_API_KEY", "")
     monkeypatch.setenv("LINEAR_API_KEY", "")
+    monkeypatch.setenv("NOTION_API_KEY", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

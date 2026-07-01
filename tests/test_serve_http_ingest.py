@@ -297,3 +297,93 @@ def test_trigger_ingest_granola_no_token_inherits_env(monkeypatch):
     assert result == {"status": "running", "source": "granola"}
     assert captured["env"] is None
     assert "--source" in captured["args"] and "granola" in captured["args"]
+
+
+def test_post_ingest_notion_no_repo_routes_with_token():
+    """Notion carries a token but no repo; the trigger is called with source=notion, repo=None."""
+    seen = {}
+
+    async def trigger(source, repo, token):
+        seen["source"], seen["repo"], seen["token"] = source, repo, token
+        return {"status": "running", "source": "notion"}
+
+    resp = _client(trigger).post("/v1/ingest", json={"source": "notion", "token": "ntn_abc"})
+    assert resp.status_code == 202
+    assert seen == {"source": "notion", "repo": None, "token": "ntn_abc"}
+    assert "ntn_abc" not in resp.text  # the token is never echoed back
+
+
+def test_post_ingest_notion_without_token_falls_back():
+    """No token still triggers (the child falls back to the server's own NOTION_API_KEY)."""
+    seen = {}
+
+    async def trigger(source, repo, token):
+        seen["source"], seen["token"] = source, token
+        return {"status": "running", "source": "notion"}
+
+    resp = _client(trigger).post("/v1/ingest", json={"source": "notion"})
+    assert resp.status_code == 202
+    assert seen == {"source": "notion", "token": None}
+
+
+def test_post_ingest_notion_already_running_is_409():
+    async def trigger(source, repo, token):
+        return {"status": "already_running", "source": "notion"}
+
+    resp = _client(trigger).post("/v1/ingest", json={"source": "notion", "token": "ntn_x"})
+    assert resp.status_code == 409
+
+
+def test_trigger_ingest_notion_keys_by_token_hash(monkeypatch):
+    """Notion has no repo, so the in-flight guard keys on the token (one token ~ one workspace).
+
+    A second trigger for the same token while the first runs is a 409; a different token runs.
+    The token rides in NOTION_API_KEY env, never argv, and the run spawns --source notion.
+    """
+    from relic import cli
+
+    cli._INGEST_PROCS.clear()
+    captured = {}
+
+    class _RunningProc:
+        def poll(self):
+            return None  # still running
+
+    def _fake_popen(args, env=None):
+        captured["args"], captured["env"] = list(args), env
+        return _RunningProc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+
+    first = cli._trigger_ingest("notion", None, "ntn_userkey")
+    assert first == {"status": "running", "source": "notion"}
+    assert "--source" in captured["args"] and "notion" in captured["args"]
+    assert "--repo" not in captured["args"]
+    assert "ntn_userkey" not in captured["args"]  # never on the command line
+    assert captured["env"]["NOTION_API_KEY"] == "ntn_userkey"
+
+    # same token while the first is in flight: a conflict, not a duplicate run
+    again = cli._trigger_ingest("notion", None, "ntn_userkey")
+    assert again["status"] == "already_running"
+
+    # a different token is a distinct scope, so it runs
+    other = cli._trigger_ingest("notion", None, "ntn_otherkey")
+    assert other["status"] == "running"
+
+
+def test_trigger_ingest_notion_no_token_inherits_env(monkeypatch):
+    """No token: env=None so the child inherits the server's own NOTION_API_KEY."""
+    from relic import cli
+
+    cli._INGEST_PROCS.clear()
+    captured = {}
+
+    def _fake_popen(args, env=None):
+        captured["args"], captured["env"] = list(args), env
+        return type("P", (), {"poll": lambda self: None})()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    result = cli._trigger_ingest("notion", None, None)
+    assert result == {"status": "running", "source": "notion"}
+    assert captured["env"] is None
+    assert "--source" in captured["args"] and "notion" in captured["args"]

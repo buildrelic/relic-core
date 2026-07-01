@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     github_token: str | None = None
     linear_api_key: str | None = None
     granola_api_key: str | None = None
+    notion_api_key: str | None = None
 
     graphiti_llm_provider: str = "openai"
     # Model used when graphiti_llm_provider == "gemini". Configurable so a wrong or
@@ -87,6 +88,7 @@ class Settings(BaseSettings):
         "github_token",
         "linear_api_key",
         "granola_api_key",
+        "notion_api_key",
         mode="after",
     )
     @classmethod

@@ -140,3 +140,54 @@ def test_ingest_runs_filters_by_source(tmp_path, monkeypatch) -> None:
     gh = _ingest_runs("owner/repoA", 50)
     assert [r["id"] for r in gh["runs"]] == ["gh1"]
     assert gh["totals"]["memories"] == 2
+
+
+def test_connector_status_surfaces_notion_row(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    # two pages under one workspace-scope, plus a github repo alongside it
+    _ledger("owner/repoA", "PR owner/repoA#1")
+    notion = checkpoint_path("notion__ws-1")
+    for name in ("Notion pa", "Notion pb"):
+        record_done(notion, name)
+
+    connectors = {c["source"]: c for c in _connector_status()["connectors"]}
+    row = connectors["notion"]
+    assert row["itemCount"] == 2
+    assert row["itemLabel"] == "pages"
+    assert row["repos"] == []  # pages have no repo scope
+    assert row["connected"] is True  # landed pages count as connected
+    # the github card is unaffected by the notion ledger living alongside it
+    assert connectors["github"]["repos"] == ["owner/repoA"]
+
+
+def test_connector_status_notion_ledger_not_treated_as_repo(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    notion = checkpoint_path("notion__ws-1")
+    record_done(notion, "Notion pa")
+
+    connectors = {c["source"]: c for c in _connector_status()["connectors"]}
+    # a notion ledger must never be slugified into a fake "notion/<ws>" repo on another card.
+    assert all("notion" not in repo for repo in connectors["github"]["repos"])
+    assert all("notion" not in repo for repo in connectors["linear"]["repos"])
+
+
+def test_ingest_runs_filters_by_notion_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _ledger("owner/repoA", "PR owner/repoA#1", "PR owner/repoA#2")
+    notion = checkpoint_path("notion__ws-1")
+    for name in ("Notion a", "Notion b", "Notion c"):
+        record_done(notion, name)
+    runs_path = tmp_path / "data" / "ingest" / "runs.jsonl"
+    runs_path.write_text(
+        json.dumps({"id": "gh1", "repo": "owner/repoA", "source": "GitHub"})
+        + "\n"
+        + json.dumps({"id": "nt1", "repo": None, "source": "Notion"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    notion_runs = _ingest_runs(None, 50, "notion")
+    # case-insensitive match on the stored "Notion"; the github run is filtered out
+    assert [r["id"] for r in notion_runs["runs"]] == ["nt1"]
+    # totals scope to the notion ledgers (3 pages), not the global five
+    assert notion_runs["totals"]["memories"] == 3

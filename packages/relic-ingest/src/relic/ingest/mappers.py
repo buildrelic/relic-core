@@ -156,6 +156,27 @@ class MeetingRec:
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
+@dataclass(slots=True)
+class PageRec:
+    """A normalized Notion page: title, url, flattened text, and editor identities.
+
+    Source-agnostic shape the connector populates. ``workspace_id`` is the per-workspace
+    scope key (pages have no repo), ``url`` is the permalink recall cites, and ``text`` is
+    the flattened page body the extractor mines. Editors (creator + last editor) become
+    ``participants`` — the closest identity a page carries, absent chat authors.
+    """
+
+    id: str
+    title: str | None
+    url: str
+    workspace_id: str | None
+    participants: list[str] = field(default_factory=list)
+    text: str | None = None
+    created_at: str | None = None
+    last_edited_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
 # --- Pure transforms ---------------------------------------------------------
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -175,6 +196,17 @@ def granola_group_id(owner_email: str | None) -> str:
     Graphiti-legal; a missing owner falls back to a single stable bucket.
     """
     return repo_group_id(f"granola/{owner_email or 'unknown'}")
+
+
+def notion_group_id(workspace_id: str | None) -> str:
+    """Per-workspace Notion scope key, e.g. ``notion__<workspace-uuid>``.
+
+    Pages belong to a workspace, not an individual, so the graph partition is the Notion
+    workspace id (from ``users/me``) — a real key, not a faked repo. Reuses
+    ``repo_group_id``'s slugify so the result is Graphiti-legal (a workspace uuid's dashes
+    are already legal); a missing workspace falls back to one stable bucket.
+    """
+    return repo_group_id(f"notion/{workspace_id or 'unknown'}")
 
 
 def _parse_aware(value: str) -> datetime:
@@ -543,4 +575,46 @@ def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
         source_description="granola meeting",
         reference_time=_parse_aware(ref) if ref else _EPOCH,
         group_id=granola_group_id(meeting.owner_email),
+    )
+
+
+def page_to_episode(page: PageRec) -> EpisodeSpec:
+    """Map a Notion page to a Conversation episode (``medium="other"``).
+
+    Rides the existing conversation path rather than inventing a Document type (a proper
+    ``DocumentEpisodeBody`` is a deliberate follow-up): the Notion url lands in ``url`` (the
+    anchor recall cites), the creator + last editor become ``participants``, and the
+    flattened page text is the ``summary`` the extractor mines. ``messages`` stays empty (a
+    page is not a chat). The title is fence-defused, the text is clipped, and the assembled
+    body is trimmed to the per-episode token budget. The scope (``group_id``) is per Notion
+    workspace — a real identity, so it takes no faked ``RepoBundle``.
+    """
+    n_people = len(page.participants)
+    context = "notion page"
+    if n_people:
+        context += f", {n_people} editor{'s' if n_people != 1 else ''}"
+    body = ConversationEpisodeBody(
+        context=context,
+        url=page.url,
+        medium="other",
+        title=_defuse_fences(page.title) if page.title else None,
+        # A page has no single "occurred" moment; anchor conversation-time to its last edit.
+        occurred_at=page.last_edited_at or page.created_at,
+        participants=[PersonRef(login=name) for name in page.participants],
+        summary=_clip(page.text, _MAX_SUMMARY_CHARS),
+    )
+    # Anchor to when the page was last edited, falling back to when it was created, then
+    # the epoch if even that is missing.
+    ref = page.last_edited_at or page.created_at
+    return EpisodeSpec(
+        # The stable page id is the dedup key, so a re-presented page is skipped, not
+        # re-extracted. Deliberately NO version folded in: a version in the name forks the
+        # graph (Graphiti mints a fresh Episodic uuid per add) instead of updating in place.
+        # Re-ingesting an edited page needs episode supersession at the loader/checkpoint
+        # layer, not a mapper rename.
+        name=f"Notion {page.id}",
+        body=_fit_conversation_budget(body).model_dump_json(),
+        source_description="notion page",
+        reference_time=_parse_aware(ref) if ref else _EPOCH,
+        group_id=notion_group_id(page.workspace_id),
     )

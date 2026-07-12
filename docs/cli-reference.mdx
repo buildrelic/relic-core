@@ -259,6 +259,24 @@ nothing, never raises. See [Configuration](/configuration).
 relic doctor
 ```
 
+### relic audit-zones
+
+Scan a repo's graph for Zone-integrity violations: Zoned nodes or edges that
+carry no Zone (`group_id`). A clean report is the proof that the access
+boundary is structurally sound; any violation exits non-zero so the command can
+gate CI. The write path already refuses untagged Zoned writes (ADR-0006
+Decision 1); this audit is the safety net for data that predates the rule. See
+[ADR-0006](/adr/0006-sound-graph-for-consumers).
+
+```
+relic audit-zones [--repo OWNER/NAME] [--limit N]
+```
+
+- `--repo` (optional): the repo whose graph to audit. Defaults to `TARGET_REPO`.
+- `--limit` (optional, default 1000): max violations to report per kind
+  (untagged nodes vs untagged edges). The report flags itself as truncated when
+  the cap is hit, so a clean exit never masks an aborted scan.
+
 ## Stubs (later phases)
 
 ### relic resolve
@@ -294,5 +312,6 @@ relic compile --skill ARCHETYPE
 | `serve` | none | `--repo` | optional |
 | `serve-http` | none | `--host`, `--port`, `--token` | no |
 | `doctor` | none | none | no |
+| `audit-zones` | none | `--repo`, `--limit` | yes |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

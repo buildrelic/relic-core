@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from mcp.types import TextContent
 
 from conftest import FakeMemory
@@ -14,11 +16,18 @@ from relic.graph.recall import (
 from relic.registry.store import connect
 
 
-def _edge(fact: str, relation: str, episodes: list[str]) -> MemoryEdge:
+def _edge(
+    fact: str, relation: str, episodes: list[str], *, invalid_at: datetime | None = None
+) -> MemoryEdge:
     person = MemoryEntity(uuid="p", name="paris", labels=["Person"], attributes={})
     work = MemoryEntity(uuid="w", name="PR#1", labels=["PullRequest"], attributes={})
     return MemoryEdge(
-        relation=relation, fact=fact, source=person, target=work, episode_uuids=episodes
+        relation=relation,
+        fact=fact,
+        source=person,
+        target=work,
+        episode_uuids=episodes,
+        invalid_at=invalid_at,  # set => the fact is superseded, not current
     )
 
 
@@ -79,6 +88,64 @@ async def test_recall_maps_edges_and_drops_blank_facts(monkeypatch) -> None:
 async def test_recall_never_raises_on_search_failure() -> None:
     answer = await recall(FakeMemory(search_raises=True), "anything")
     assert answer.is_empty
+
+
+async def test_recall_fail_closed_on_empty_zones() -> None:
+    # ADR-0005: a principal with no accessible Zones sees nothing, and search is never
+    # consulted -- so even a fake brimming with edges yields an empty answer.
+    memory = FakeMemory(edges=[_edge("classified fact", "REVIEWED", ["ep1"])])
+    answer = await recall(memory, "anything", zones=[])
+    assert answer.is_empty
+    assert memory.recorded_group_ids == []  # search not called at all
+
+
+async def test_recall_passes_zones_to_search_as_filter() -> None:
+    memory = FakeMemory(edges=[_edge("paris reviews auth PRs", "REVIEWED", ["ep1"])])
+    await recall(memory, "auth", zones=["team-a", "kb"])
+    assert memory.recorded_group_ids == [["team-a", "kb"]]
+
+
+async def test_recall_legacy_group_id_still_scopes() -> None:
+    memory = FakeMemory(edges=[_edge("paris reviews auth PRs", "REVIEWED", ["ep1"])])
+    await recall(memory, "auth", group_id="team-a")
+    assert memory.recorded_group_ids == [["team-a"]]
+
+
+async def test_recall_drops_superseded_facts_by_default() -> None:
+    # ADR-0006: a fact a later episode invalidated is never surfaced as current.
+    from datetime import UTC, datetime
+
+    superseded = datetime(2020, 1, 1, tzinfo=UTC)
+    memory = FakeMemory(
+        edges=[
+            _edge("paris owns auth", "OWNS", ["ep1"]),
+            _edge("robin owned auth", "OWNS", ["ep2"], invalid_at=superseded),
+        ]
+    )
+    answer = await recall(memory, "auth owner")
+    assert [f.fact for f in answer.facts] == ["paris owns auth"]
+
+
+async def test_recall_include_superseded_keeps_history() -> None:
+    from datetime import UTC, datetime
+
+    superseded = datetime(2020, 1, 1, tzinfo=UTC)
+    memory = FakeMemory(edges=[_edge("robin owned auth", "OWNS", ["ep2"], invalid_at=superseded)])
+    answer = await recall(memory, "auth owner", include_superseded=True)
+    assert len(answer.facts) == 1
+
+
+def test_memory_edge_is_current_tracks_both_invalidation_and_expiry() -> None:
+    # A fact is current only while neither bound is set; expiry (a later episode
+    # contradicted it) supersedes it just as invalidation does.
+    from datetime import UTC, datetime
+
+    stamp = datetime(2020, 1, 1, tzinfo=UTC)
+    assert _edge("x", "OWNS", []).is_current
+    assert not _edge("x", "OWNS", [], invalid_at=stamp).is_current
+    person = MemoryEntity(uuid="p", name="paris", labels=["Person"])
+    expired = MemoryEdge(relation="OWNS", fact="x", source=person, target=person, expired_at=stamp)
+    assert not expired.is_current
 
 
 def test_extract_url_prefers_pr_then_issue() -> None:

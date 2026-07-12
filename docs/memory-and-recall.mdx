@@ -58,6 +58,47 @@ The mechanism: `repo_group_id("owner/name")` produces a slug like
 The repo is resolved as `--repo` if given, else the `TARGET_REPO` setting. So a
 common setup is to set `TARGET_REPO` once and let recall default to it.
 
+## A sound graph for consumers
+
+[ADR-0006](/adr/0006-sound-graph-for-consumers) makes three guarantees properties
+of the *data and the seam* rather than of a filter the caller must remember, so
+the graph in `relic.graph.memory` is safe to hand to a downstream developer past
+`recall()`. Today the unscoped `GraphitiMemory` is still the production reader
+(ingest, eval, admin, the existing CLI and serve paths); a follow-up wires
+`ScopedMemory` onto the MCP and daemon surfaces from a principal's grants.
+
+**Zone integrity (write-time refusal + read-time audit).** The writer seam
+refuses, fail-closed, to persist a Zoned episode with no Zone:
+`GraphitiMemory.add_episode` and `add_episode_bulk` route the `group_id` through
+`require_episode_zone` and raise `ZoneIntegrityError` on an empty Zone. A bulk
+batch must also carry exactly one Zone, since `graphiti.add_episode_bulk` maps a
+batch to a single `group_id` and a mixed-Zone batch would silently drop all but
+the first. `audit_zone_integrity` (exposed as `relic audit-zones`, see
+[CLI reference](/cli-reference#relic-audit-zones)) is the read-side safety net:
+it scans the graph through the `execute_read` introspection hatch for Zoned
+nodes and edges that carry no `group_id`, so a graph built before the rule can
+be proven clean or repaired.
+
+**Scoped reads (`ScopedMemory`).** `ScopedMemory(inner, zones)` is a
+principal-scoped read view over a `MemoryReader`: it closes over the principal's
+Zone-set and applies it to **every** read it exposes — `search`, `get_episode`,
+`reviewer_walk`, and a new Zone-checked `get_entity(uuid)` so consumers never
+need raw Cypher to resolve an edge endpoint (the move that bypasses Zones
+today). A caller-supplied `group_ids` can only narrow within the principal's
+scope, never widen it; an empty scope sees nothing. Out-of-Zone nodes read as
+**nonexistent** — no error, no redaction marker — exactly as if they did not
+exist (ADR-0005 §5). The global identity spine (Person, Repo, Label, File)
+stays tenant-public: `is_global_entity` short-circuits the Zone check for those
+labels, so a tenant member can still see that a person or repo exists.
+
+**Temporal honesty.** `MemoryEdge` now carries `valid_at`, `invalid_at`, and
+`expired_at`, with an `is_current` property — a fact is current when both
+`invalid_at` and `expired_at` are unset. `recall` returns only current facts by
+default; opt into history with `include_superseded=True`. `MemoryEpisode` and
+`MemoryEntity` also carry `group_id` so a scoped read can drop an out-of-Zone
+episode or entity rather than leak its content as provenance. All new fields
+have defaults, so existing positional constructors and callers are untouched.
+
 ## Recall: facts with sources
 
 [`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py) is the general path. It is the keystone
@@ -74,14 +115,23 @@ RecallAnswer
                 └── url: str?    # the PR or issue URL, resolved best-effort
 ```
 
-`recall(graphiti, query, group_id, num_results)`:
+`recall(memory, query, *, zones=None, group_id=None, num_results=10, include_superseded=False)`:
 
-1. Calls `graphiti.search(query, group_ids, num_results)`: hybrid semantic plus
+1. Resolves the search scope from `zones` (the ADR-0005 principal Zone-set) or the
+   legacy single-scope `group_id` alias. An explicit empty `zones` collection means
+   "no accessible Zones" and **fails closed**: recall returns an empty answer and
+   never calls `search`. Passing neither is an unscoped read, reserved for trusted
+   single-tenant callers.
+2. Calls `graphiti.search(query, group_ids, num_results)`: hybrid semantic plus
    keyword search, reranked. This is the portable Graphiti API, so it survived the
    Kuzu to FalkorDB migration unchanged.
-2. For each returned edge, takes its `fact` text and `name` (the relation), and
+3. For each returned edge, takes its `fact` text and `name` (the relation), and
    resolves its source episodes.
-3. Returns a `RecallAnswer`. If search raises (for example FTS unavailable), it
+4. Drops every fact that is not **current** — a fact a later episode invalidated
+   (`invalid_at`) or superseded (`expired_at`) — so a grounded answer never
+   surfaces a stale fact as if it still held. Set `include_superseded=True` to
+   keep them for history views (ADR-0006 Decision 5).
+5. Returns a `RecallAnswer`. If search raises (for example FTS unavailable), it
    returns an empty answer. Recall never raises.
 
 **Provenance resolution** (`_resolve_sources`) looks up each episode uuid via

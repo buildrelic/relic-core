@@ -1,0 +1,162 @@
+---
+title: "Tenant–Zone access model: one connected graph per tenant, access governed inside it"
+description: "Move the isolation boundary up from the repo to the tenant so engineering history lives in one connected graph, and govern who sees what with Zones — a deny-by-default, traversal-level access model enforced inside the graph rather than by physical separation."
+icon: "shield-halved"
+---
+
+<Info>
+**Status:** proposed (2026-06-28). Supersedes the isolation decisions of
+[ADR-0004](/adr/0004-memory-service-api) (database-per-group, no cross-group recall).
+The rest of ADR-0004 — reads-sync/writes-as-jobs, the connection model, the narrow
+network surface, and the control-plane ownership check — still stands; this record
+only changes the **isolation unit** (repo → tenant) and the **security mechanism**
+(physical separation → in-graph Zones). No code changes yet; this fixes the shape.
+</Info>
+
+## Context
+
+[ADR-0004](/adr/0004-memory-service-api) made the security boundary **physical**:
+one FalkorDB database per group (a group being a repo, `group_id = owner__name`),
+with **no cross-repo recall**. That buys isolation for free — a node in one database
+cannot link to or leak into another — at the cost of connectivity: a graph edge
+lives inside a single database, so a decision in one repo can never link to a
+decision in another, the same person fragments into a separate node per repo, and
+there is no org-wide "who knows what."
+
+The product is an **org knowledge graph**. Its value is precisely the connections
+that the per-repo wall forbids — cross-repo decisions, a unified Person across all
+sources, meeting notes that link to the repo they discuss. The per-repo boundary
+optimizes for multi-tenant SaaS isolation; it is the wrong boundary for the thing we
+are building. ADR-0004 already *reserved* "database-per-tenant" as a future
+hard-isolation tier; this record **promotes that to the default** and moves the
+access boundary *inside* the graph.
+
+The trade this record accepts: isolation stops being free. Inside one connected
+graph, keeping teams and sensitive work apart becomes a **query-time** concern, not
+a physical one. The decisions below are how we pay that bill correctly.
+
+## Decisions
+
+1. **Database-per-tenant is the isolation unit.** A **tenant** is an organization;
+   one FalkorDB database per tenant is the hard boundary nothing crosses. A repo is
+   demoted from "the partition" to an ordinary node (identity and provenance only).
+   `group_id` stops meaning "repo."
+
+2. **Two kinds of grouping, never conflated.** A **Community** is an *emergent*
+   topical cluster (Graphiti's `build_communities`, recomputed as the graph grows) —
+   about *what a neighborhood is about*. A **Zone** is a *governed*, deliberately
+   bounded region a human owns — the unit access is granted against. They are
+   different node types. **Access never rides on a Community**, or it would silently
+   reshuffle every time clustering reruns.
+
+3. **Repo is orthogonal to Zone.** A Repo is a node (identity/provenance); a Zone is
+   the access axis. A single repo's knowledge can spread across several Zones (most in
+   a team Zone, sensitive bits in a Classified Zone, shared learnings promoted to the
+   tenant-wide Zone). **Every artifact lives in exactly one Zone.** Repo-as-the-access-
+   unit is rejected because it cannot wall off a sensitive subgraph *inside* a repo.
+
+4. **Access is flat Zone membership with union semantics.** A principal holds a set of
+   `Person —MEMBER_OF→ Zone` grants and sees the **union** of their Zones. There is
+   no nesting. One distinguished **tenant-wide Zone** every member joins by default is
+   the "company knowledge base." The felt "privilege ladder" is *emergent*: a senior
+   person simply belongs to more Zones.
+
+5. **Enforcement is traversal-level, deny-by-default.** The principal's Zone-set is
+   pushed *into the query*; a traversal **cannot enter** a node outside their Zones, so
+   cross-boundary paths **dead-end** — the requester never learns the out-of-Zone node
+   exists. No existence leak, no redaction markers. Recall returns the partial answer
+   the requester is entitled to. The cost: every read path (recall, reviewer walk,
+   neighbors, stats, the Phase-4 compiler) must thread the Zone filter, and answer
+   completeness becomes a function of who is asking.
+
+6. **The ontology splits into Zoned and global tiers.** **Zoned**: artifacts (Pull
+   request, Issue, Document, Conversation, AgentSession, Decision, Action item) and
+   every fact (edge) carry exactly one Zone. **Global**: the connective identity spine
+   (Person, Repo, Label, File) is tenant-wide and Zone-exempt — entity resolution
+   *requires* one Person node per human, which is impossible if identity is Zoned.
+   Consequence: a person's or repo's **existence** is tenant-public; only their
+   **activity** is gated. Aggregates over a global node (degree, neighbors) are still
+   Zone-filtered — no reading a cached count that spans Zones.
+
+7. **Zone tag lives in the graph; grants live in the control plane.** Each Zoned node
+   and edge carries its Zone as a property — this **repurposes `group_id`** (was repo,
+   now Zone), reusing Graphiti's existing `group_ids` filter machinery. **Person↔Zone
+   grants do not live in the graph**: authorization must not itself be a graph
+   traversal. Grants live in a control-plane store (ADR-0004's same store, generalized
+   from repo-ownership to Zone-membership); at the API boundary the authenticated
+   principal is resolved to a Zone-set and injected as a `$zones` query parameter that
+   **fails closed** — a missing set means see nothing, never everything.
+
+8. **Zone assignment at ingest is deterministic.** A **connector→Zone mapping**
+   (admin-configured) decides each artifact's Zone — boring and auditable, because a
+   security boundary must be. The fallback for an unmapped connector is a **restrictive
+   default Zone** (admin-only), so misconfiguration fails closed. **Nothing
+   auto-routes into the Classified Zone or into the tenant-wide Zone** — both are
+   deliberate acts. Mirroring a source's native ACL is an opt-in refinement (deferred);
+   LLM/content classification is deferred and, if ever added, may only *narrow*.
+
+9. **A cross-Zone fact is visible by intersection.** A fact spanning two Zones is
+   visible iff the requester holds **both** endpoints' Zones; enforcement keys on the
+   endpoints, not a single edge tag (a fact cannot carry "one of two" Zones).
+   Same-Zone facts (the majority) collapse to plain membership. This is the precise
+   sense in which a connected graph survives Zoning: **there is one whole tenant graph,
+   and each person sees the connected subgraph their Zone-set unlocks.** Cross-Zone
+   links — the org-wide insights — are the most valuable and the least visible, seen
+   only by those who belong to both sides.
+
+10. **Classified is just a restrictive Zone.** A "radioactive" subgraph only a few may
+    touch is a Zone with almost no members; flat membership + deny-by-default +
+    intersection already deliver it. No separate ordered-clearance / multi-level-
+    security axis (deferred): ordered levels are emergent from membership, and the one
+    thing MLS uniquely adds — no-write-down — has no real surface in a deterministic-
+    ingest, read-mostly system. The AgentSession write-back, the closest thing to a
+    user-authored write, lands in a Zone fixed by the same deterministic mapping, so a
+    classified session can only land in Classified.
+
+## Considered options
+
+- **Keep database-per-repo (ADR-0004)** (rejected): free isolation, but forbids the
+  cross-repo connectivity and unified identity that are the product's core value.
+- **Database-per-repo + a cross-group stitching layer** (rejected for now): preserves
+  physical isolation and adds a global entity registry across databases. Heaviest
+  option; revisit only if per-tenant co-location proves untenable.
+- **Result-level access filtering** (rejected): filtering returned rows leaks
+  existence through ranking, counts, and provenance ids — fatal for a need-to-know
+  Classified Zone.
+- **Access on Communities** (rejected): clustering is recomputed, so permissions would
+  silently drift.
+- **Grants as in-graph edges** (rejected): makes the authorization check itself a
+  traversal of the graph it protects — a bootstrap leak, and it mutates security state
+  through the ingest path.
+- **Multi-level security (ordered clearance + information-flow control)** (deferred):
+  unjustified while membership delivers the ladder and ingest is deterministic.
+
+## Consequences
+
+- `group_id` is repurposed from repo to **Zone**; ADR-0004's `group_id = owner__name`
+  and [CONTEXT.md](/) Repo note are updated accordingly.
+- **Every read path must thread `$zones`** and fail closed. This is the recurring
+  correctness burden traded for connectivity — one query that forgets is a hole.
+- **Recall is scoped to a principal, not a repo.** It returns the connected subgraph a
+  Zone-set unlocks; answer completeness varies by requester.
+- **Zone configuration is security-critical operational surface.** Onboarding a
+  team/repo means wiring a connector→Zone mapping; a typo grants the wrong people
+  access.
+- **Entity resolution becomes a hard prerequisite**, not a nice-to-have: a connected
+  org graph over fragmented identities is noise. It must precede any access-model build.
+- The eventual servable API (ADR-0004's narrow surface) inherits all of this — recall
+  scoping, the `$zones` parameter, the control-plane join — so it must not be built on
+  the repo-scoped model.
+
+## Deferred (decide when a concrete need appears)
+
+- **Source-native ACL mirroring** (e.g. GitHub private repos, Notion sharing → Zone).
+- **Content/LLM classification** at ingest (narrow-only if ever added).
+- **Multi-level security**: ordered clearance levels and information-flow control;
+  the reserved term "compartment" is held for this.
+- **Sensitive identity**: a Person whose mere existence is secret breaks the
+  global-identity rule and needs a special case; v1 accepts identity as tenant-public.
+- **Promotion workflow**: how an artifact is deliberately promoted into the tenant-wide
+  Zone (the only sanctioned way content widens its audience).
+</content>
+</invoke>

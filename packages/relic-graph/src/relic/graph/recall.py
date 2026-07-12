@@ -9,6 +9,7 @@ backend-agnostic API). Provenance resolution is best-effort and never raises.
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -45,15 +46,45 @@ class RecallAnswer:
         return not self.facts
 
 
+def _scope_filter(zones: Collection[str] | None, group_id: str | None) -> list[str] | None:
+    """Resolve the group_id search filter from the caller's Zone scope.
+
+    ``zones`` is the ADR-0005 principal scope and takes precedence: an explicit empty
+    collection means "no accessible Zones" and is returned as ``[]`` so recall can fail
+    closed. ``group_id`` is the legacy single-scope shim. ``None`` from both means an
+    unscoped read (trusted, single-tenant callers only).
+    """
+    if zones is not None:
+        return list(zones)
+    if group_id is not None:
+        return [group_id]
+    return None
+
+
 async def recall(
     memory: MemoryReader,
     query: str,
     *,
+    zones: Collection[str] | None = None,
     group_id: str | None = None,
     num_results: int = 10,
+    include_superseded: bool = False,
 ) -> RecallAnswer:
-    """Return facts matching ``query`` with their source episodes. Never raises."""
-    group_ids = [group_id] if group_id else None
+    """Return facts matching ``query`` with their source episodes. Never raises.
+
+    Recall is scoped to the caller's accessible Zones (``zones``). Per ADR-0005 this
+    fails closed: an explicit empty Zone-set sees nothing, and ``search`` is never
+    consulted. ``group_id`` is the legacy single-scope alias; passing neither is an
+    unscoped read reserved for trusted single-tenant callers.
+
+    Per ADR-0006 recall returns only **current** facts: a fact a later episode
+    invalidated or superseded is dropped, so a grounded answer never surfaces a stale
+    fact as if it were true. Set ``include_superseded`` to keep them (history views).
+    """
+    group_ids = _scope_filter(zones, group_id)
+    if group_ids is not None and not group_ids:
+        # Fail closed: a principal with no accessible Zones sees nothing.
+        return RecallAnswer(query=query)
     try:
         edges = await memory.search(query, group_ids=group_ids, num_results=num_results)
     except Exception:  # noqa: BLE001 - search may fail if the memory backend is unavailable
@@ -61,6 +92,8 @@ async def recall(
 
     facts: list[RecalledFact] = []
     for edge in edges:
+        if not include_superseded and not edge.is_current:
+            continue  # ADR-0006: never surface a superseded fact as current
         text = edge.fact.strip()
         if not text:
             continue

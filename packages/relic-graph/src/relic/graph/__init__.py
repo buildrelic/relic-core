@@ -12,6 +12,8 @@ liveness probe (ADR-0003). Raw Graphiti construction stays private to ``memory``
 retired ``make_engram`` is now ``_build_graphiti``, reachable only via ``open_memory``).
 """
 
+from relic.graph.audit import ZoneAuditReport, ZoneViolation, audit_zone_integrity
+from relic.graph.field_map import ARTIFACT_FIELD_MAPS, body_path_exists
 from relic.graph.load import LoadStats, load_episodes, load_episodes_bulk
 from relic.graph.memory import (
     GraphitiMemory,
@@ -20,14 +22,26 @@ from relic.graph.memory import (
     MemoryEpisode,
     MemoryReader,
     MemoryWriter,
+    ScopedMemory,
     ensure_indexes,
     falkordb_reachable,
     open_memory,
 )
 from relic.graph.queries import ReviewerHit, reviewers_of
 from relic.graph.recall import RecallAnswer, RecalledFact, Source, format_answer, recall
+from relic.graph.schema import (
+    GLOBAL_ENTITY_TYPES,
+    ZONED_ENTITY_TYPES,
+    ZoneIntegrityError,
+    is_global_entity,
+    is_global_type,
+    require_episode_zone,
+)
 
 __all__ = [
+    "ARTIFACT_FIELD_MAPS",
+    "GLOBAL_ENTITY_TYPES",
+    "ZONED_ENTITY_TYPES",
     "GraphitiMemory",
     "LoadStats",
     "MemoryEdge",
@@ -38,13 +52,22 @@ __all__ = [
     "RecallAnswer",
     "RecalledFact",
     "ReviewerHit",
+    "ScopedMemory",
     "Source",
+    "ZoneAuditReport",
+    "ZoneIntegrityError",
+    "ZoneViolation",
+    "audit_zone_integrity",
+    "body_path_exists",
     "ensure_indexes",
     "falkordb_reachable",
     "format_answer",
+    "is_global_entity",
+    "is_global_type",
     "load_episodes",
     "load_episodes_bulk",
     "open_memory",
     "recall",
+    "require_episode_zone",
     "reviewers_of",
 ]

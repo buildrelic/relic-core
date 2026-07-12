@@ -1,0 +1,92 @@
+"""Notion mapper: PageRec -> Conversation EpisodeSpec (medium="other"), scope, body budget.
+
+Builds PageRec records directly (no fetch) and asserts the EpisodeSpec envelope and the
+parsed body, mirroring test_granola_mappers.py / test_slack_mappers.py.
+"""
+
+import json
+import re
+from datetime import UTC, datetime
+
+from relic.ingest.mappers import (
+    _MAX_BODY_CHARS,
+    PageRec,
+    notion_group_id,
+    page_to_episode,
+)
+
+
+def _page(**overrides: object) -> PageRec:
+    base: dict[str, object] = {
+        "id": "1a2b3c4d-5e6f-7080-90a0-b0c0d0e0f000",
+        "title": "Relic architecture notes",
+        "url": "https://www.notion.so/Relic-architecture-notes-1a2b3c",
+        "workspace_id": "11112222-3333-4444-5555-666677778888",
+        "participants": ["Zidan Kazi", "Paris Phan"],
+        "text": "## Decisions\n- ship the notion connector",
+        "created_at": "2026-06-22T15:00:11.000Z",
+        "last_edited_at": "2026-06-22T15:48:02.000Z",
+    }
+    base.update(overrides)
+    return PageRec(**base)  # type: ignore[arg-type]
+
+
+def test_notion_group_id_is_per_workspace() -> None:
+    assert notion_group_id("11112222-3333-4444-5555-666677778888") == (
+        "notion__11112222-3333-4444-5555-666677778888"
+    )
+    # Always Graphiti-legal (^[A-Za-z0-9_-]+$); a workspace uuid's dashes are already legal.
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", notion_group_id("ws-abc"))
+    # A missing workspace falls back to one stable bucket rather than a crash or empty key.
+    assert notion_group_id(None) == "notion__unknown"
+
+
+def test_page_to_episode_shape_and_scope() -> None:
+    spec = page_to_episode(_page())
+    assert spec.name == "Notion 1a2b3c4d-5e6f-7080-90a0-b0c0d0e0f000"  # stable page dedup key
+    assert spec.source_description == "notion page"
+    assert spec.group_id == "notion__11112222-3333-4444-5555-666677778888"  # per-workspace
+    assert spec.schema_version == 2
+    # anchored to the last-edited time, not created time
+    assert spec.reference_time == datetime(2026, 6, 22, 15, 48, 2, tzinfo=UTC)
+
+    body = json.loads(spec.body)
+    assert body["schema_version"] == 2
+    assert body["source_type"] == "conversation"
+    assert body["medium"] == "other"
+    assert body["url"] == "https://www.notion.so/Relic-architecture-notes-1a2b3c"  # citation
+    assert body["title"] == "Relic architecture notes"
+    assert [p["login"] for p in body["participants"]] == ["Zidan Kazi", "Paris Phan"]
+    assert body["summary"] == "## Decisions\n- ship the notion connector"
+    assert body["messages"] == []  # a page is not a chat
+
+
+def test_reference_time_falls_back_to_created_at() -> None:
+    spec = page_to_episode(_page(last_edited_at=None))
+    assert spec.reference_time == datetime(2026, 6, 22, 15, 0, 11, tzinfo=UTC)
+
+
+def test_untitled_page_still_validates() -> None:
+    body = json.loads(page_to_episode(_page(title=None)).body)
+    assert body["title"] is None
+
+
+def test_long_text_is_trimmed_to_budget() -> None:
+    spec = page_to_episode(_page(text="word " * 20000))
+    # The whole serialized body stays under the per-episode token-proxy ceiling (the flattened
+    # text lands in summary, which the mapper clips before assembly).
+    assert len(spec.body) <= _MAX_BODY_CHARS
+    assert json.loads(spec.body)["summary"]  # some text survives the clip
+
+
+def test_missing_url_still_validates() -> None:
+    # a page url should always be present, but the body requires a url, so an empty one
+    # degrades to "" rather than failing to construct.
+    spec = page_to_episode(_page(url=""))
+    assert json.loads(spec.body)["url"] == ""
+
+
+def test_no_participants_context_is_bare() -> None:
+    body = json.loads(page_to_episode(_page(participants=[])).body)
+    assert body["participants"] == []
+    assert body["context"] == "notion page"  # no ", N editors" suffix

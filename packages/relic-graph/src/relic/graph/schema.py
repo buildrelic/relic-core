@@ -113,6 +113,24 @@ class FileNode(BaseModel):
     so there are no custom attributes."""
 
 
+class AgentSessionNode(BaseModel):
+    """A coding agent's work-session captured into the engram.
+
+    Distinct from a Conversation: an AgentSession *did work*, so it links to the files it
+    touched (`TOUCHED`) and the PR/issue it opened (`REFERENCES`), and is a prime prose
+    source for `Decision`/`ActionItem`. The session title is the node `name`. See the
+    AgentSession amendment in docs/adr/0001-engram-graph-ontology.mdx.
+    """
+
+    title: str | None = Field(None, description="AgentSession title (also the node name)")
+    agent: str | None = Field(None, description="The coding agent, e.g. claude-code")
+    repo: str | None = Field(None, description="owner/name slug of the repo worked in")
+    cwd: str | None = Field(None, description="Working directory the session ran in")
+    url: str | None = Field(None, description="AgentSession URL, e.g. session://<id>")
+    started_at: datetime | None = Field(None, description="When the session started")
+    ended_at: datetime | None = Field(None, description="When the session ended")
+
+
 # --- Flat edge types (attributes only; Graphiti owns the endpoints) ---------
 
 
@@ -161,12 +179,25 @@ class Closes(BaseModel):
     relation: str | None = Field(None, description="closes, resolves, or relates")
 
 
+class Touched(BaseModel):
+    """A session edited a file path. The path is the target File node's name."""
+
+
+class References(BaseModel):
+    """A session references the pull request or issue it opened or named.
+
+    Deterministic (Tier 1) from an AgentSession -- the link is known from git metadata --
+    unlike the deferred Tier 3 `REFERENCES` from a Document/Conversation (prose-inferred).
+    """
+
+
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Person": PersonNode,
     "Repo": RepoNode,
     "PullRequest": PullRequestNode,
     "Issue": IssueNode,
     "File": FileNode,
+    "AgentSession": AgentSessionNode,
 }
 
 EDGE_TYPES: dict[str, type[BaseModel]] = {
@@ -174,6 +205,8 @@ EDGE_TYPES: dict[str, type[BaseModel]] = {
     "REVIEWED": Reviewed,
     "REQUESTED_REVIEW": RequestedReview,
     "TOUCHES_PATH": TouchesPath,
+    "TOUCHED": Touched,
+    "REFERENCES": References,
     "IN_REPO": InRepo,
     "ASSIGNED_TO": AssignedTo,
     "PARENT_OF": ParentOf,
@@ -190,4 +223,60 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ("Issue", "Person"): ["ASSIGNED_TO"],
     ("Issue", "Issue"): ["PARENT_OF"],
     ("PullRequest", "Issue"): ["CLOSES"],
+    # AgentSession edges: AUTHORED is reused (Person -> AgentSession), the same coarse-edge move
+    # as REVIEWED on a PR. TOUCHED/REFERENCES are deterministic from session metadata.
+    ("Person", "AgentSession"): ["AUTHORED"],
+    ("AgentSession", "File"): ["TOUCHED"],
+    ("AgentSession", "PullRequest"): ["REFERENCES"],
+    ("AgentSession", "Issue"): ["REFERENCES"],
 }
+
+# ADR-0005: the ontology splits in two for access control. The tenant-global identity
+# spine (Person/Repo/File) is Zone-exempt -- any tenant member may see these
+# connective nodes, and entity resolution requires one node per human, which is
+# impossible if identity were Zoned. Every other node, and every edge (fact), is Zoned:
+# it carries exactly one Zone and access is enforced on it. The partition must stay
+# exhaustive over ENTITY_TYPES (test_schema guards it); a new entity type lands in one
+# tier on purpose, not by omission.
+GLOBAL_ENTITY_TYPES: frozenset[str] = frozenset({"Person", "Repo", "File"})
+ZONED_ENTITY_TYPES: frozenset[str] = frozenset(ENTITY_TYPES) - GLOBAL_ENTITY_TYPES
+
+
+def is_global_type(label: str) -> bool:
+    """True if ``label`` is part of the tenant-global identity spine (Zone-exempt)."""
+    return label in GLOBAL_ENTITY_TYPES
+
+
+def is_global_entity(labels: list[str]) -> bool:
+    """True if any of a node's ``labels`` is global (the node is Zone-exempt)."""
+    return any(is_global_type(label) for label in labels)
+
+
+class ZoneIntegrityError(ValueError):
+    """A write would violate Zone integrity (ADR-0006): a Zoned write with no Zone.
+
+    Raised by the writer seam, fail-closed, before anything reaches the graph -- a
+    Zoned node or edge with no ``group_id`` is either lost (filtered everywhere) or
+    leaked (filtered nowhere), so it must never be persisted.
+    """
+
+
+def require_episode_zone(group_id: str | None) -> str:
+    """Return the episode's Zone, or fail closed if it has none (ADR-0006 Decision 1).
+
+    Every episode tags the nodes and edges extracted from it with one ``group_id`` (its
+    Zone), so an episode with no Zone would write untagged Zoned facts. The global-tier
+    exemption is a *read*-time rule (``is_global_type`` skips the filter), not a license
+    to write untagged: there is no such thing as a Zoneless write.
+
+    The ``.strip()`` is intentional normalization: the returned trimmed value is the
+    canonical Zone persisted on the episode and referenced by recall and grants, so
+    surrounding whitespace is normalized by design (not by accident).
+    """
+    zone = (group_id or "").strip()
+    if not zone:
+        raise ZoneIntegrityError(
+            "refusing to write an episode with no Zone (group_id is empty); "
+            "every Zoned write must carry exactly one Zone (ADR-0006)"
+        )
+    return zone

@@ -58,12 +58,17 @@ _RETRY_ATTEMPTS = 6
 
 @dataclass(slots=True, frozen=True)
 class MemoryEntity:
-    """A node: the resolved endpoint of an edge, or a looked-up entity."""
+    """A node: the resolved endpoint of an edge, or a looked-up entity.
+
+    ``group_id`` is the node's Zone (ADR-0005); ``None`` for a global-tier node
+    (Person/Repo/File), which is Zone-exempt. Zone enforcement keys on it.
+    """
 
     uuid: str
     name: str
     labels: list[str]
     attributes: dict[str, Any] = field(default_factory=dict)
+    group_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -71,7 +76,12 @@ class MemoryEdge:
     """A fact: a relation between two entities, with the episodes that support it.
 
     ``source`` and ``target`` are *resolved* — full entities, not bare uuids — so callers
-    read ``edge.source.labels`` without a second lookup.
+    read ``edge.source.labels`` without a second lookup. ``group_id`` is the fact's Zone.
+
+    Facts are bi-temporal (ADR-0006): ``valid_at``/``invalid_at`` bound when the fact held
+    in the world, ``expired_at`` when a later episode contradicted it. A fact is *current*
+    when both ``invalid_at`` and ``expired_at`` are ``None``; recall returns current facts
+    by default, never silently surfacing a superseded one.
     """
 
     relation: str
@@ -79,15 +89,29 @@ class MemoryEdge:
     source: MemoryEntity
     target: MemoryEntity
     episode_uuids: list[str] = field(default_factory=list)
+    group_id: str | None = None
+    valid_at: datetime | None = None
+    invalid_at: datetime | None = None
+    expired_at: datetime | None = None
+
+    @property
+    def is_current(self) -> bool:
+        """True if this fact has not been invalidated or superseded by a later one."""
+        return self.invalid_at is None and self.expired_at is None
 
 
 @dataclass(slots=True, frozen=True)
 class MemoryEpisode:
-    """A source episode: its name (a citation label) and verbatim content."""
+    """A source episode: its name (a citation label), verbatim content, and Zone.
+
+    ``group_id`` is the episode's Zone, so a scoped read can drop an episode the
+    requester may not see rather than leak its content as provenance.
+    """
 
     uuid: str
     name: str
     content: str | None
+    group_id: str | None = None
 
 
 # --- The two interfaces -------------------------------------------------------
@@ -101,6 +125,8 @@ class MemoryReader(Protocol):
     ) -> list[MemoryEdge]: ...
 
     async def get_episode(self, uuid: str) -> MemoryEpisode | None: ...
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None: ...
 
     async def reviewer_walk(
         self, query: str, *, group_id: str | None, limit: int
@@ -157,6 +183,74 @@ _REVIEWER_WALK_CYPHER: LiteralString = """
 """
 
 
+# --- The scoped read view -----------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class ScopedMemory:
+    """A principal-scoped read view over a ``MemoryReader`` (ADR-0006 Decision 2).
+
+    Closes over the principal's accessible Zone-set and applies it to *every* read, so a
+    serving surface that only ever holds a ``ScopedMemory`` cannot leak across Zones by
+    forgetting a filter -- the unsafe path is removed, not documented. An empty Zone-set
+    sees nothing (fail closed). Out-of-Zone nodes read as **nonexistent** -- no error, no
+    redaction marker (ADR-0005 Decision 5), so the requester never learns they exist.
+
+    Global-tier nodes (Person/Repo/File) are Zone-exempt: a tenant member may see
+    *that* a person or repo exists; only their Zoned activity is gated (ADR-0005 Decision
+    6). Construct this from the principal's grants at the composition root and hand serve
+    nothing else; the unscoped ``GraphitiMemory`` stays for ingest/eval/admin only.
+    """
+
+    inner: MemoryReader
+    zones: frozenset[str]
+
+    async def search(
+        self, query: str, *, group_ids: list[str] | None = None, num_results: int = 10
+    ) -> list[MemoryEdge]:
+        # The scope is the principal's Zones, always; a caller-supplied ``group_ids`` can
+        # only narrow within it, never widen it. Empty scope -> see nothing.
+        scoped = self.zones if group_ids is None else self.zones.intersection(group_ids)
+        if not scoped:
+            return []
+        return await self.inner.search(query, group_ids=sorted(scoped), num_results=num_results)
+
+    async def get_episode(self, uuid: str) -> MemoryEpisode | None:
+        episode = await self.inner.get_episode(uuid)
+        if episode is None or not self._in_scope(episode.group_id):
+            return None
+        return episode
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None:
+        from relic.graph.schema import is_global_entity
+
+        entity = await self.inner.get_entity(uuid)
+        if entity is None:
+            return None
+        if is_global_entity(entity.labels):
+            return entity  # the identity spine is tenant-public
+        if not self._in_scope(entity.group_id):
+            return None  # out-of-Zone reads as nonexistent
+        return entity
+
+    async def reviewer_walk(
+        self, query: str, *, group_id: str | None, limit: int
+    ) -> list[MemoryEdge]:
+        # The deterministic fallback honors the scope too: an out-of-scope ``group_id``
+        # yields nothing, and an unscoped walk fans over the principal's Zones.
+        if not self.zones or (group_id is not None and group_id not in self.zones):
+            return []
+        targets = [group_id] if group_id is not None else sorted(self.zones)
+        hits: list[MemoryEdge] = []
+        for zone in targets:
+            hits.extend(await self.inner.reviewer_walk(query, group_id=zone, limit=limit))
+        return hits[:limit]
+
+    def _in_scope(self, group_id: str | None) -> bool:
+        """A Zoned read is in scope only when its Zone is one the principal holds."""
+        return group_id is not None and group_id in self.zones
+
+
 # --- The Graphiti adapter -----------------------------------------------------
 
 
@@ -175,8 +269,16 @@ class GraphitiMemory:
     async def search(
         self, query: str, *, group_ids: list[str] | None = None, num_results: int = 10
     ) -> list[MemoryEdge]:
-        edges = await self._graphiti.search(query, group_ids=group_ids, num_results=num_results)
-        return [await self._to_memory_edge(edge) for edge in edges]
+        # Use the cross-encoder recipe, not the default RRF. The OpenAIRerankerClient is already
+        # built and paid for at ingest (passed as cross_encoder= when Graphiti is constructed),
+        # but the plain ``graphiti.search`` never invokes it, so recall was RRF-only (REL-11).
+        # ``search_`` with the EDGE cross-encoder recipe turns on the LLM rerank AND bfs graph-hop
+        # expansion in one move; copy the recipe to carry this call's result limit.
+        from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_CROSS_ENCODER
+
+        config = EDGE_HYBRID_SEARCH_CROSS_ENCODER.model_copy(update={"limit": num_results})
+        results = await self._graphiti.search_(query, config=config, group_ids=group_ids)
+        return [await self._to_memory_edge(edge) for edge in results.edges]
 
     async def get_episode(self, uuid: str) -> MemoryEpisode | None:
         from graphiti_core.nodes import EpisodicNode
@@ -186,8 +288,23 @@ class GraphitiMemory:
         except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
             return None
         return MemoryEpisode(
-            uuid=str(episode.uuid), name=episode.name or "", content=episode.content
+            uuid=str(episode.uuid),
+            name=episode.name or "",
+            content=episode.content,
+            group_id=getattr(episode, "group_id", None),
         )
+
+    async def get_entity(self, uuid: str) -> MemoryEntity | None:
+        """Resolve a single node by uuid, or ``None`` if it does not exist.
+
+        The unscoped lookup: it returns the node regardless of Zone. Zone enforcement is
+        the job of ``ScopedMemory.get_entity``, which wraps this and hides out-of-Zone
+        nodes -- keep the boundary in one place rather than duplicated per call site.
+        """
+        try:
+            return await self._resolve(uuid)
+        except Exception:  # noqa: BLE001 - a missing node reads as nonexistent, never fatal
+            return None
 
     async def reviewer_walk(
         self, query: str, *, group_id: str | None, limit: int
@@ -210,6 +327,10 @@ class GraphitiMemory:
             source=source,
             target=target,
             episode_uuids=[str(e) for e in (getattr(edge, "episodes", None) or [])],
+            group_id=getattr(edge, "group_id", None),
+            valid_at=getattr(edge, "valid_at", None),
+            invalid_at=getattr(edge, "invalid_at", None),
+            expired_at=getattr(edge, "expired_at", None),
         )
 
     async def _resolve(self, uuid: Any) -> MemoryEntity:
@@ -221,6 +342,7 @@ class GraphitiMemory:
             name=node.name or "",
             labels=_clean_labels(node.labels),
             attributes=_parse_attrs(getattr(node, "attributes", None)),
+            group_id=getattr(node, "group_id", None),
         )
 
     @staticmethod
@@ -248,8 +370,10 @@ class GraphitiMemory:
     async def add_episode(self, spec: EpisodeSpec) -> None:
         from graphiti_core.nodes import EpisodeType
 
-        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, require_episode_zone
 
+        # Fail closed before any write: a Zoned episode with no Zone is never persisted.
+        zone = require_episode_zone(spec.group_id)
         await self._with_backoff(
             lambda: self._graphiti.add_episode(
                 name=spec.name,
@@ -257,24 +381,39 @@ class GraphitiMemory:
                 source_description=spec.source_description,
                 reference_time=spec.reference_time,
                 source=EpisodeType.json,
-                group_id=spec.group_id,
+                group_id=zone,
                 entity_types=ENTITY_TYPES,
                 edge_types=EDGE_TYPES,
                 edge_type_map=EDGE_TYPE_MAP,
             ),
             label=spec.name,
         )
-        await self._write_subject_best_effort(spec)
+        await self._write_subject_best_effort(spec, zone)
 
     async def add_episode_bulk(self, specs: list[EpisodeSpec]) -> None:
         """Add one batch of episodes (all sharing a group_id) via Graphiti's bulk path."""
         from graphiti_core.nodes import EpisodeType
         from graphiti_core.utils.bulk_utils import RawEpisode
 
-        from relic.graph.schema import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
+        from relic.graph.schema import (
+            EDGE_TYPE_MAP,
+            EDGE_TYPES,
+            ENTITY_TYPES,
+            ZoneIntegrityError,
+            require_episode_zone,
+        )
 
         if not specs:
             return
+        # Fail closed before any write: every episode in the batch must carry a Zone.
+        zones = [require_episode_zone(spec.group_id) for spec in specs]
+        # A bulk batch maps to a single graphiti.add_episode_bulk group_id, so a mixed-Zone
+        # batch would silently drop all but the first Zone. Refuse it.
+        if len(set(zones)) > 1:
+            raise ZoneIntegrityError(
+                "refusing to write a bulk batch spanning multiple Zones "
+                f"({sorted(set(zones))!r}); each bulk batch must carry exactly one Zone (ADR-0006)"
+            )
         raws = [
             RawEpisode(
                 name=spec.name,
@@ -285,7 +424,7 @@ class GraphitiMemory:
             )
             for spec in specs
         ]
-        group_id = specs[0].group_id
+        group_id = zones[0]
         await self._with_backoff(
             lambda: self._graphiti.add_episode_bulk(
                 raws,
@@ -297,7 +436,7 @@ class GraphitiMemory:
             label=f"bulk[{group_id}]",
         )
         for spec in specs:
-            await self._write_subject_best_effort(spec)
+            await self._write_subject_best_effort(spec, group_id)
 
     async def build_indices(self) -> None:
         await self._graphiti.build_indices_and_constraints()
@@ -353,21 +492,24 @@ class GraphitiMemory:
 
     # -- deterministic Subject write (ADR-0002) --
 
-    async def _write_subject_best_effort(self, spec: EpisodeSpec) -> None:
+    async def _write_subject_best_effort(self, spec: EpisodeSpec, zone: str) -> None:
         """Deterministically write the episode's Subject node + dropped edges (ADR-0002).
 
         Best-effort: the LLM extraction already landed, so a failure here is logged and
         swallowed rather than discarding the episode. Runs for both the sequential and bulk
         write paths so every ingested PR/Issue gets its Subject regardless of how it landed.
+
+        ``zone`` is the normalized Zone the episode was persisted under
+        (``require_episode_zone``), so the Subject writes land in the same Zone.
         """
         try:
-            await self._write_subject(spec)
+            await self._write_subject(spec, zone)
         except Exception as exc:  # noqa: BLE001 - reliability enhancement; never fail the episode
             reason = f"{type(exc).__name__}: {exc}".splitlines()[0]
             log.warning("deterministic subject write failed for %s: %s", spec.name, reason)
             log.debug("subject write traceback for %s", spec.name, exc_info=exc)
 
-    async def _write_subject(self, spec: EpisodeSpec) -> None:
+    async def _write_subject(self, spec: EpisodeSpec, zone: str) -> None:
         """Upsert the Subject (PR/Issue) node + the dropped structural edges from the body.
 
         The plan (which nodes/edges to write) is computed by the pure ``graph.subjects``
@@ -385,24 +527,24 @@ class GraphitiMemory:
         from graphiti_core.edges import EntityEdge, EpisodicEdge
 
         created = spec.reference_time
-        episode_uuid = await self._episode_uuid(spec.name, spec.group_id)
-        subject_uuid = await self._upsert_node(plan.subject, spec.group_id, created)
+        episode_uuid = await self._episode_uuid(spec.name, zone)
+        subject_uuid = await self._upsert_node(plan.subject, zone, created)
 
         new_edge_uuids: list[str] = []
         for planned in plan.edges:
-            target_uuid = await self._upsert_node(planned.target, spec.group_id, created)
+            target_uuid = await self._upsert_node(planned.target, zone, created)
             src, tgt = (
                 (subject_uuid, target_uuid)
                 if planned.direction == "out"
                 else (target_uuid, subject_uuid)
             )
             edge = EntityEdge(
-                uuid=det_uuid(spec.group_id, planned.relation, src, tgt),
+                uuid=det_uuid(zone, planned.relation, src, tgt),
                 source_node_uuid=src,
                 target_node_uuid=tgt,
                 name=planned.relation,
                 fact=planned.fact,
-                group_id=spec.group_id,
+                group_id=zone,
                 created_at=created,
                 episodes=[episode_uuid] if episode_uuid else [],
                 attributes=dict(planned.attributes),
@@ -418,10 +560,10 @@ class GraphitiMemory:
             return
         # MENTIONS episode -> Subject, so subject_presence counts it and provenance resolves.
         await EpisodicEdge(
-            uuid=det_uuid(spec.group_id, "MENTIONS", episode_uuid, subject_uuid),
+            uuid=det_uuid(zone, "MENTIONS", episode_uuid, subject_uuid),
             source_node_uuid=episode_uuid,
             target_node_uuid=subject_uuid,
-            group_id=spec.group_id,
+            group_id=zone,
             created_at=created,
         ).save(self._graphiti.driver)
         # Register the deterministic edges on the Episodic node so REL-118 supersede_episode

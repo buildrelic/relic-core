@@ -51,9 +51,14 @@ def _main(
 
 @app.command()
 def ingest(
-    repo: Annotated[str, typer.Option(help="owner/name to ingest")],
+    repo: Annotated[
+        str | None, typer.Option(help="owner/name to ingest (github sources)")
+    ] = None,
+    source: Annotated[
+        str, typer.Option(help="source to ingest: github (needs --repo) | granola | notion")
+    ] = "github",
     limit: Annotated[
-        int | None, typer.Option(help="cap PRs and issues pulled, most recent first")
+        int | None, typer.Option(help="cap items pulled, most recent first")
     ] = None,
     months: Annotated[int, typer.Option(help="how many months of history to backfill")] = 12,
     bulk: Annotated[
@@ -89,6 +94,7 @@ def ingest(
             _ingest(
                 repo,
                 limit,
+                source=source,
                 months=months,
                 bulk=bulk,
                 fresh=fresh,
@@ -109,7 +115,12 @@ def ingest(
 
 @app.command()
 def load(
-    repo: Annotated[str, typer.Option(help="owner/name whose spooled episodes to extract")],
+    repo: Annotated[
+        str | None, typer.Option(help="owner/name whose spooled episodes to extract (github)")
+    ] = None,
+    source: Annotated[
+        str, typer.Option(help="source to extract: github (needs --repo) | granola | notion")
+    ] = "github",
     limit: Annotated[
         int | None,
         typer.Option(help="extract at most N not-yet-loaded episodes, for case-by-case loading"),
@@ -137,7 +148,9 @@ def load(
     from relic.obs import get_logger
 
     try:
-        asyncio.run(_load(repo, limit, bulk=bulk, fresh=fresh, no_progress=no_progress))
+        asyncio.run(
+            _load(repo, limit, source=source, bulk=bulk, fresh=fresh, no_progress=no_progress)
+        )
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001 - report infra failures concisely, not as a traceback
@@ -341,7 +354,7 @@ async def _extract(
 
     from relic.graph import LoadStats, load_episodes, load_episodes_bulk, open_memory
     from relic.ingest import checkpoint_path, clear, compact, load_done, record_done
-    from relic.obs import stderr_console
+    from relic.obs import load_progress, stderr_console
 
     ledger = checkpoint_path(group_id)
     if fresh:
@@ -384,48 +397,29 @@ async def _extract(
         return await load_episodes(engram, to_load, **common)
 
     # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
-    # and --no-progress; otherwise fall back to the heartbeat log lines.
+    # and --no-progress; otherwise fall back to the heartbeat log lines. The bar wiring
+    # lives in relic.obs; here we only map LoadStats onto its (completed, counts) update.
     verbose = logging.getLogger("relic").getEffectiveLevel() <= logging.DEBUG
-    bar_console = stderr_console()
-    show_bar = bar_console.is_terminal and not no_progress and not verbose
+    show_bar = stderr_console().is_terminal and not no_progress and not verbose
 
     try:
-        if show_bar:
-            from rich.progress import (
-                BarColumn,
-                MofNCompleteColumn,
-                Progress,
-                SpinnerColumn,
-                TextColumn,
-                TimeElapsedColumn,
-                TimeRemainingColumn,
-            )
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TextColumn("{task.fields[counts]}"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                console=bar_console,
-            ) as bar:
-                task = bar.add_task(progress_label, total=len(to_load), counts="")
+        with load_progress(progress_label, len(to_load), enabled=show_bar) as update:
+            on_progress: Callable[[LoadStats], None] | None
+            if update is not None:
+                update_fn = update
 
                 def _on_progress(s: LoadStats) -> None:
-                    bar.update(
-                        task,
-                        completed=s.loaded + s.superseded + s.skipped + s.failed,
-                        counts=(
-                            f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
-                            f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]"
-                        ),
+                    update_fn(
+                        s.loaded + s.superseded + s.skipped + s.failed,
+                        f"[green]{s.loaded}✓[/] [blue]{s.superseded}↻[/] "
+                        f"[yellow]{s.skipped}⤳[/] [red]{s.failed}✗[/]",
                     )
 
-                stats = await _run(_on_progress)
-        else:
-            stats = await _run(None)
+                on_progress = _on_progress
+            else:
+                on_progress = None
+
+            stats = await _run(on_progress)
     finally:
         await engram.close()
 
@@ -444,9 +438,10 @@ async def _extract(
 
 
 async def _ingest(
-    repo: str,
+    repo: str | None,
     limit: int | None = None,
     *,
+    source: str = "github",
     months: int = 12,
     bulk: bool = False,
     fresh: bool = False,
@@ -462,11 +457,40 @@ async def _ingest(
 
     log = get_logger("ingest")
     _quiet_background_errors(log)
+    settings = get_settings()
 
-    if "/" not in repo:
+    # Granola and Notion are non-repo sources: they scope per note-owner / per workspace,
+    # not per repo, so they run their own capture + per-scope extract rather than the
+    # owner/name path below.
+    if source == "granola":
+        await _ingest_granola(
+            limit,
+            months=months,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            no_load=no_load,
+            settings=settings,
+            log=log,
+        )
+        return
+
+    if source == "notion":
+        await _ingest_notion(
+            limit,
+            months=months,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            no_load=no_load,
+            settings=settings,
+            log=log,
+        )
+        return
+
+    if not repo or "/" not in repo:
         err_console.print("[red]--repo must be owner/name[/]")
         raise typer.Exit(code=2)
-    settings = get_settings()
     ingest_start = time.monotonic()
 
     # The graph is only needed for extraction. A capture-only run (--no-load) needs no
@@ -544,10 +568,409 @@ async def _ingest(
         raise typer.Exit(code=1)
 
 
+def _by_scope(episodes: "list[EpisodeSpec]") -> "dict[str, list[EpisodeSpec]]":
+    """Group episodes by their own ``group_id``.
+
+    Granola meetings carry a per-owner scope (``granola__<email>``), and a single grn_ key
+    can return notes owned by different people. The checkpoint and spool dir are per scope,
+    so granola capture and extract walk one scope at a time off this grouping.
+    """
+    from collections import defaultdict
+
+    grouped: dict[str, list[EpisodeSpec]] = defaultdict(list)
+    for spec in episodes:
+        grouped[spec.group_id].append(spec)
+    return dict(grouped)
+
+
+async def _capture_granola(
+    limit: int | None,
+    *,
+    api_key: str,
+    months: int,
+    log: "logging.Logger",
+) -> "tuple[list[EpisodeSpec], float, float]":
+    """Fetch, map, raw-store, and spool Granola meetings: the no-LLM half of a granola ingest.
+
+    Returns ``(episodes, fetch_seconds, prepare_seconds)``. Each meeting carries its own
+    per-owner ``group_id`` (``granola__<email>``), so episodes are spooled per scope — a
+    single grn_ key can return notes owned by different people, and each scope is its own
+    graph partition and checkpoint.
+    """
+    import time
+
+    from relic.ingest import (
+        dump_raw,
+        fetch_meetings,
+        meeting_to_episode,
+        sort_episodes,
+        spool_episodes,
+    )
+
+    fetch_start = time.monotonic()
+    meetings = await fetch_meetings(api_key, months=months, limit=limit)
+    fetch_seconds = time.monotonic() - fetch_start
+    log.info("fetched %d Granola meetings in %.1fs", len(meetings), fetch_seconds)
+
+    prepare_start = time.monotonic()
+    for meeting in meetings:
+        dump_raw(meeting.raw, source="granola", ident=_safe_ident(meeting.id))
+    episodes = sort_episodes([meeting_to_episode(meeting) for meeting in meetings])
+    for scope, specs in _by_scope(episodes).items():
+        spool_episodes(specs, scope)
+        log.debug("spooled %d episodes under data/spool/%s", len(specs), scope)
+    prepare_seconds = time.monotonic() - prepare_start
+    return episodes, fetch_seconds, prepare_seconds
+
+
+async def _extract_scopes(
+    by_scope: "dict[str, list[EpisodeSpec]]",
+    *,
+    source: str,
+    settings: "Settings",
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    limit: int | None,
+    verb: str,
+    log: "logging.Logger",
+) -> "tuple[int, int]":
+    """Extract each scope into its own partition + ledger. Returns ``(loaded, failed)``.
+
+    Shared by the non-repo sources (granola, notion). ``_extract`` checkpoints under the
+    group_id it is handed, so each scope is passed its own key (``granola__<email>`` /
+    ``notion__<workspace>``) and lands in its own ``data/ingest/<scope>.log`` (what
+    ``_connector_status`` reads), instead of being lumped under a single ledger. ``source``
+    is the run-history label ("Granola" / "Notion").
+    """
+    total_loaded = total_failed = 0
+    for scope, specs in sorted(by_scope.items()):
+        stats, _ = await _extract(
+            scope,
+            specs,
+            scope,
+            settings=settings,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            limit=limit,
+            progress_label=f"{verb} {scope}",
+            log=log,
+        )
+        # A non-repo run has no repo; the source label + the per-scope id identify it.
+        _record_run(stats, None, source=source)
+        total_loaded += stats.loaded
+        total_failed += stats.failed
+    return total_loaded, total_failed
+
+
+async def _ingest_granola(
+    limit: int | None,
+    *,
+    months: int,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    no_load: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Standalone Granola ingest: capture meetings, then extract per owner-scope.
+
+    Unlike the github path there is no repo. The grn_ key (a per-user key forwarded by the
+    web app's POST /v1/ingest, else the server's own ``GRANOLA_API_KEY``) is read from
+    settings; each meeting is partitioned by its note owner (``granola__<email>``).
+    """
+    import time
+
+    from relic.graph import falkordb_reachable
+
+    if not settings.granola_api_key:
+        log.error(
+            "Granola ingest needs a grn_ key (set GRANOLA_API_KEY or connect it in the web app)"
+        )
+        raise typer.Exit(code=2)
+
+    ingest_start = time.monotonic()
+    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    episodes, fetch_seconds, prepare_seconds = await _capture_granola(
+        limit, api_key=settings.granola_api_key, months=months, log=log
+    )
+    if not episodes:
+        log.warning("nothing to ingest")
+        return
+
+    if no_load:
+        log.info(
+            "captured %d Granola meetings in %.1fs (fetch %.1fs, map + spool %.1fs); "
+            "extract them with `relic load --source granola`",
+            len(episodes),
+            time.monotonic() - ingest_start,
+            fetch_seconds,
+            prepare_seconds,
+        )
+        return
+
+    by_scope = _by_scope(episodes)
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Granola",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=None,
+        verb="ingesting",
+        log=log,
+    )
+    total_seconds = time.monotonic() - ingest_start
+    log.info(
+        "granola ingest done: %d meetings loaded across %d owner-scope(s) in %.1fs "
+        "(fetch %.1fs, map + spool %.1fs)",
+        loaded,
+        len(by_scope),
+        total_seconds,
+        fetch_seconds,
+        prepare_seconds,
+    )
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
+async def _load_granola(
+    limit: int | None,
+    *,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Extract spooled Granola episodes per owner-scope: the LLM half of a two-phase granola run."""
+    from relic.graph import falkordb_reachable
+    from relic.ingest import read_spool
+
+    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    spool_base = Path("data/spool")
+    scopes = sorted(p.name for p in spool_base.glob("granola__*")) if spool_base.exists() else []
+    by_scope = {scope: read_spool(scope) for scope in scopes}
+    by_scope = {scope: specs for scope, specs in by_scope.items() if specs}
+    if not by_scope:
+        log.warning(
+            "no spooled granola episodes; run `relic ingest --no-load --source granola` first"
+        )
+        return
+    log.info(
+        "read %d spooled meetings across %d owner-scope(s)",
+        sum(len(specs) for specs in by_scope.values()),
+        len(by_scope),
+    )
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Granola",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=limit,
+        verb="extracting",
+        log=log,
+    )
+    log.info("granola load done: %d meetings loaded, %d failed", loaded, failed)
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
+async def _capture_notion(
+    limit: int | None,
+    *,
+    api_key: str,
+    months: int,
+    log: "logging.Logger",
+) -> "tuple[list[EpisodeSpec], float, float]":
+    """Fetch, map, raw-store, and spool Notion pages: the no-LLM half of a notion ingest.
+
+    Returns ``(episodes, fetch_seconds, prepare_seconds)``. Each page carries its own
+    per-workspace ``group_id`` (``notion__<workspace>``), so episodes are spooled per scope
+    (a token nearly always maps to one workspace, but the per-scope grouping keeps the path
+    identical to granola's). Each scope is its own graph partition and checkpoint.
+    """
+    import time
+
+    from relic.ingest import (
+        dump_raw,
+        fetch_pages,
+        page_to_episode,
+        sort_episodes,
+        spool_episodes,
+    )
+
+    fetch_start = time.monotonic()
+    pages = await fetch_pages(api_key, months=months, limit=limit)
+    fetch_seconds = time.monotonic() - fetch_start
+    log.info("fetched %d Notion pages in %.1fs", len(pages), fetch_seconds)
+
+    prepare_start = time.monotonic()
+    for page in pages:
+        dump_raw(page.raw, source="notion", ident=_safe_ident(page.id))
+    episodes = sort_episodes([page_to_episode(page) for page in pages])
+    for scope, specs in _by_scope(episodes).items():
+        spool_episodes(specs, scope)
+        log.debug("spooled %d episodes under data/spool/%s", len(specs), scope)
+    prepare_seconds = time.monotonic() - prepare_start
+    return episodes, fetch_seconds, prepare_seconds
+
+
+async def _ingest_notion(
+    limit: int | None,
+    *,
+    months: int,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    no_load: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Standalone Notion ingest: capture pages, then extract per workspace-scope.
+
+    Unlike the github path there is no repo. The Notion token (a per-user token forwarded by
+    the web app's POST /v1/ingest, else the server's own ``NOTION_API_KEY``) is read from
+    settings; each page is partitioned by its workspace (``notion__<workspace>``).
+    """
+    import time
+
+    from relic.graph import falkordb_reachable
+
+    if not settings.notion_api_key:
+        log.error(
+            "Notion ingest needs an API token (set NOTION_API_KEY or connect it in the web app)"
+        )
+        raise typer.Exit(code=2)
+
+    ingest_start = time.monotonic()
+    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    episodes, fetch_seconds, prepare_seconds = await _capture_notion(
+        limit, api_key=settings.notion_api_key, months=months, log=log
+    )
+    if not episodes:
+        log.warning("nothing to ingest")
+        return
+
+    if no_load:
+        log.info(
+            "captured %d Notion pages in %.1fs (fetch %.1fs, map + spool %.1fs); "
+            "extract them with `relic load --source notion`",
+            len(episodes),
+            time.monotonic() - ingest_start,
+            fetch_seconds,
+            prepare_seconds,
+        )
+        return
+
+    by_scope = _by_scope(episodes)
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Notion",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=None,
+        verb="ingesting",
+        log=log,
+    )
+    total_seconds = time.monotonic() - ingest_start
+    log.info(
+        "notion ingest done: %d pages loaded across %d workspace-scope(s) in %.1fs "
+        "(fetch %.1fs, map + spool %.1fs)",
+        loaded,
+        len(by_scope),
+        total_seconds,
+        fetch_seconds,
+        prepare_seconds,
+    )
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
+async def _load_notion(
+    limit: int | None,
+    *,
+    bulk: bool,
+    fresh: bool,
+    no_progress: bool,
+    settings: "Settings",
+    log: "logging.Logger",
+) -> None:
+    """Extract spooled Notion episodes per workspace-scope: the LLM half of a notion run."""
+    from relic.graph import falkordb_reachable
+    from relic.ingest import read_spool
+
+    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
+        log.error(
+            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
+            settings.falkordb_host,
+            settings.falkordb_port,
+        )
+        raise typer.Exit(code=1)
+
+    spool_base = Path("data/spool")
+    scopes = sorted(p.name for p in spool_base.glob("notion__*")) if spool_base.exists() else []
+    by_scope = {scope: read_spool(scope) for scope in scopes}
+    by_scope = {scope: specs for scope, specs in by_scope.items() if specs}
+    if not by_scope:
+        log.warning(
+            "no spooled notion episodes; run `relic ingest --no-load --source notion` first"
+        )
+        return
+    log.info(
+        "read %d spooled pages across %d workspace-scope(s)",
+        sum(len(specs) for specs in by_scope.values()),
+        len(by_scope),
+    )
+    loaded, failed = await _extract_scopes(
+        by_scope,
+        source="Notion",
+        settings=settings,
+        bulk=bulk,
+        fresh=fresh,
+        no_progress=no_progress,
+        limit=limit,
+        verb="extracting",
+        log=log,
+    )
+    log.info("notion load done: %d pages loaded, %d failed", loaded, failed)
+    if loaded == 0 and failed:
+        raise typer.Exit(code=1)
+
+
 async def _load(
-    repo: str,
+    repo: str | None,
     limit: int | None = None,
     *,
+    source: str = "github",
     bulk: bool = False,
     fresh: bool = False,
     no_progress: bool = False,
@@ -561,11 +984,23 @@ async def _load(
 
     log = get_logger("load")
     _quiet_background_errors(log)
+    settings = get_settings()
 
-    if "/" not in repo:
+    if source == "granola":
+        await _load_granola(
+            limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
+        )
+        return
+
+    if source == "notion":
+        await _load_notion(
+            limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
+        )
+        return
+
+    if not repo or "/" not in repo:
         err_console.print("[red]--repo must be owner/name[/]")
         raise typer.Exit(code=2)
-    settings = get_settings()
     load_start = time.monotonic()
 
     if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
@@ -851,115 +1286,23 @@ def _make_recall_fn(
     return recall_fn
 
 
-# A coding session is captured as one Conversation episode. Clip to the most recent
-# chars, where the decisions land: 200k would be a single huge add_episode call.
-_MAX_SESSION_CHARS = 24_000
-
-
-def _distill_claude_transcript(raw: str) -> str:
-    """Turn a Claude Code transcript (JSONL) into clean User/Assistant prose.
-
-    Keeps real user prompts and assistant text; drops thinking, tool calls, tool
-    results, and the bookkeeping line types, so extraction sees a conversation rather
-    than tool-call noise (the engram ontology has no Decision/ActionItem types yet, so
-    clean prose is what gives it a chance). Falls back to the raw text when the input
-    is not the expected JSONL (an inline transcript). Clipped to the recent tail.
-    """
-    import json
-
-    turns: list[str] = []
-    parsed_any = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        parsed_any = True
-        if obj.get("type") not in ("user", "assistant"):
-            continue
-        msg = obj.get("message") or {}
-        content = msg.get("content")
-        if isinstance(content, str):
-            text = content.strip()
-        elif isinstance(content, list):
-            text = "\n".join(
-                b["text"]
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-            ).strip()
-        else:
-            text = ""
-        if text:
-            who = "User" if msg.get("role") == "user" else "Assistant"
-            turns.append(f"{who}: {text}")
-    distilled = "\n\n".join(turns) if parsed_any else raw
-    return distilled[-_MAX_SESSION_CHARS:]
-
-
-def _resolve_session_transcript(payload: dict[str, Any]) -> str:
-    """Read and distill the session text from a capture payload.
-
-    Prefer the transcript file the hook points at, so the size/curation policy lives
-    server-side (tunable without reinstalling hooks) and the HTTP payload stays small;
-    fall back to an inline transcript.
-    """
-    import os
-
-    raw = ""
-    path = str(payload.get("transcript_path", "")).strip()
-    if path and os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                raw = fh.read()
-        except OSError:
-            raw = ""
-    if not raw:
-        raw = str(payload.get("transcript", ""))
-    return _distill_claude_transcript(raw)
-
-
 async def _write_session_episode(
     engram: "GraphitiMemory", group: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Write one finished session into ``group`` as a Conversation episode.
+    """Write one finished session into ``group`` as an AgentSession episode.
 
-    The session is distilled to clean prose and run through the same loader ingest uses,
-    so existing extraction turns it into typed facts with no new write path. Idempotent
-    per session via the group's checkpoint ledger: the episode name is the session id,
-    so a repeated SessionEnd (Claude Code can fire it more than once) is skipped, not
-    re-extracted into a fork.
+    Composition only: ``relic.ingest.session_to_episode`` owns turning the capture payload
+    (transcript distillation included) into the ``EpisodeSpec``; this runs it through the
+    same loader ingest uses. Idempotent per session via the group's checkpoint ledger -- the
+    episode name is the session id, so a repeated SessionEnd is skipped, not re-extracted.
     """
-    from datetime import datetime
-
-    from relic.contracts import ConversationEpisodeBody, EpisodeSpec
     from relic.graph import load_episodes
-    from relic.ingest import checkpoint_path, load_done, record_done
+    from relic.ingest import checkpoint_path, load_done, record_done, session_to_episode
 
     session_id = str(payload.get("session_id", "")).strip()
-    summary = payload.get("summary") or None
-    transcript = _resolve_session_transcript(payload)
-
     ledger = checkpoint_path(group)
     done = load_done(ledger)
-
-    body = ConversationEpisodeBody(
-        url=f"session://{session_id}",
-        medium="other",
-        title=f"Coding session {session_id[:8]}",
-        occurred_at=datetime.now(UTC).isoformat(),
-        transcript=transcript or None,
-        summary=summary,
-    )
-    spec = EpisodeSpec(
-        name=f"Session {session_id}",
-        body=body.model_dump_json(),
-        source_description="Claude Code session (relic daemon)",
-        reference_time=datetime.now(UTC),
-        group_id=group,
-    )
+    spec = session_to_episode(payload, group)
     stats = await load_episodes(
         engram,
         [spec],
@@ -1207,11 +1550,13 @@ def _ensure_hook(hooks: dict[str, Any], event: str, command: str, *, marker: str
 _RUNS_LEDGER = Path("data/ingest/runs.jsonl")
 
 
-def _record_run(stats: "LoadStats", repo: str, *, source: str = "GitHub") -> None:
+def _record_run(stats: "LoadStats", repo: str | None, *, source: str = "GitHub") -> None:
     """Append a run record to the run-history ledger, for the web app's Ingest view.
 
     Called after extraction completes (so a capture-only --no-load run records
     nothing). Shapes the LoadStats into the JSON the web app's adapter expects.
+    ``repo`` is ``None`` for a non-repo source (granola): the ``source`` label and the
+    per-scope ``id`` carry the identity, and the record's ``repo`` is null.
     """
     import json
     from datetime import UTC, datetime, timedelta
@@ -1263,13 +1608,35 @@ def _connector_status() -> dict[str, Any]:
 
     github_prs = 0
     linear_issues = 0
+    granola_meetings = 0
+    notion_pages = 0
     github_repos: list[str] = []
     linear_repos: list[str] = []
     github_mtime = 0.0
     linear_mtime = 0.0
+    granola_mtime = 0.0
+    notion_mtime = 0.0
     for ledger in ledgers:
-        repo = ledger.stem.replace("__", "/")
+        stem = ledger.stem
         mtime = ledger.stat().st_mtime
+        # Granola scopes are per note-owner (granola__<email>), not repos. Count their
+        # meetings and move on, so a granola ledger never gets slugified into a fake
+        # "granola/<email>" repo on the github/linear cards.
+        if stem.startswith("granola__"):
+            meetings = sum(1 for name in load_done(ledger) if name.startswith("Meeting "))
+            if meetings:
+                granola_meetings += meetings
+                granola_mtime = max(granola_mtime, mtime)
+            continue
+        # Notion scopes are per workspace (notion__<workspace>), not repos. Same treatment:
+        # count pages and move on so the ledger never becomes a fake repo on another card.
+        if stem.startswith("notion__"):
+            pages = sum(1 for name in load_done(ledger) if name.startswith("Notion "))
+            if pages:
+                notion_pages += pages
+                notion_mtime = max(notion_mtime, mtime)
+            continue
+        repo = stem.replace("__", "/")
         has_github = False
         has_linear = False
         for name in load_done(ledger):
@@ -1309,17 +1676,38 @@ def _connector_status() -> dict[str, Any]:
                 "lastSyncAt": _iso(linear_mtime),
                 "repos": linear_repos,
             },
+            {
+                "source": "granola",
+                "connected": bool(settings.granola_api_key) or granola_meetings > 0,
+                "itemCount": granola_meetings,
+                "itemLabel": "meetings",
+                "lastSyncAt": _iso(granola_mtime),
+                "repos": [],
+            },
+            {
+                "source": "notion",
+                "connected": bool(settings.notion_api_key) or notion_pages > 0,
+                "itemCount": notion_pages,
+                "itemLabel": "pages",
+                "lastSyncAt": _iso(notion_mtime),
+                "repos": [],
+            },
         ]
     }
 
 
-def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
+def _ingest_runs(repo: str | None, limit: int, source: str | None = None) -> dict[str, Any]:
     """Ingest run history plus totals.
 
     Run records are appended to data/ingest/runs.jsonl as ingests complete; this
-    returns the most recent ``limit`` (filtered by repo when given), newest first.
-    ``totals`` is synthesized from the checkpoints so the page has live numbers
-    even before the first recorded run.
+    returns the most recent ``limit`` (filtered by repo and/or source when given),
+    newest first. ``totals`` is synthesized from the checkpoints so the page has live
+    numbers even before the first recorded run.
+
+    ``source`` mirrors ``repo`` for non-repo connectors: a granola run is recorded with
+    ``repo=None`` and ``source="Granola"``, so a per-repo call would never surface it. The
+    web app fans out one call per connected repo (filtered by ``repo``) plus one per non-repo
+    source (filtered by ``source``); the match is case-insensitive against the stored label.
     """
     import json
     from datetime import datetime
@@ -1327,6 +1715,7 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     from relic.config import get_settings
     from relic.ingest import checkpoint_path, load_done, repo_group_id
 
+    src = source.lower() if source else None
     runs: list[dict[str, Any]] = []
     runs_path = _RUNS_LEDGER
     if runs_path.exists():
@@ -1340,15 +1729,24 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
                 continue
             if repo and record.get("repo") != repo:
                 continue
+            if src and (record.get("source") or "").lower() != src:
+                continue
             runs.append(record)
     runs = runs[-limit:][::-1]
 
-    # totals: when a repo is given, scope to that repo's ledger only. the web app
-    # fans out one /v1/ingest/runs call per connected repo and sums totals.memories,
-    # so a global total here would overcount once more than one repo is connected.
+    # totals: scope to the same partition as the filter, so the web app can sum
+    # totals.memories across its per-repo and per-source calls without overcounting. A
+    # repo scopes to its one ledger; the granola source scopes to its per-owner ledgers
+    # (granola__*.log); an unfiltered call counts everything.
     if repo:
         repo_ledger = checkpoint_path(repo_group_id(repo))
         ledgers = [repo_ledger] if repo_ledger.exists() else []
+    elif src == "granola":
+        base = Path("data/ingest")
+        ledgers = sorted(base.glob("granola__*.log")) if base.exists() else []
+    elif src == "notion":
+        base = Path("data/ingest")
+        ledgers = sorted(base.glob("notion__*.log")) if base.exists() else []
     else:
         base = Path("data/ingest")
         ledgers = sorted(base.glob("*.log")) if base.exists() else []
@@ -1360,7 +1758,14 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
 
     settings = get_settings()
     sources_connected = sum(
-        1 for key in (settings.github_token, settings.linear_api_key) if key
+        1
+        for key in (
+            settings.github_token,
+            settings.linear_api_key,
+            settings.granola_api_key,
+            settings.notion_api_key,
+        )
+        if key
     ) or (1 if total else 0)
     last_run = datetime.fromtimestamp(last_mtime, tz=UTC).isoformat() if last_mtime else None
     return {
@@ -1373,8 +1778,10 @@ def _ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
     }
 
 
-# Repo -> the running `relic ingest` subprocess, so a second trigger for the same
-# repo while one is in flight is a conflict, not a duplicate run.
+# Scope key -> the running `relic ingest` subprocess, so a second trigger for the same
+# scope while one is in flight is a conflict, not a duplicate run. The key is the repo for
+# github, or "granola:<hash of grn_ key>" for granola, whose owner-email scope isn't known
+# until the notes are fetched.
 _INGEST_PROCS: dict[str, Any] = {}
 
 # When the parent forwards a user token in GITHUB_TOKEN, it stashes its own server
@@ -1399,28 +1806,71 @@ def _resolve_server_token() -> str | None:
     return get_settings().github_token or None
 
 
-def _trigger_ingest(repo: str, token: str | None = None) -> dict[str, Any]:
-    """Kick off a background ingest for ``repo`` and return its status.
+def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> dict[str, Any]:
+    """Kick off a background ingest and return its status.
 
-    Spawns `relic ingest --repo <repo>` as a subprocess, isolated from the
-    server's event loop. The checkpoint makes it effectively incremental: a
-    re-run only extracts episodes that are new, so a webhook can call this on
-    every push and only the new PR or issue gets loaded. A single-item fetch is a
-    later optimization that would avoid re-fetching the whole repo each time.
+    Spawns `relic ingest` as a subprocess, isolated from the server's event loop. The
+    checkpoint makes it effectively incremental: a re-run only extracts episodes that are
+    new, so a webhook or cron can call this repeatedly and only the new items get loaded.
 
-    ``token`` is the connecting user's GitHub token, so ingest reads their repos
-    and not just ours. It goes to the child through its environment, never argv,
-    so it does not leak to the process list. The child's settings.github_token
-    picks it up; no token means the child inherits the server's own credentials
-    (its GITHUB_TOKEN, else its `gh auth` login).
+    For ``source == "github"`` ``repo`` is required (owner/name) and the in-flight guard
+    keys on it. For the non-repo sources (``granola``, ``notion``) there is no repo: the
+    graph scope (``granola__<owner-email>`` / ``notion__<workspace>``) isn't knowable until
+    the data is fetched, so the guard keys on a hash of the source token instead (one token
+    ≈ one user/workspace), and the run spawns `relic ingest --source <source>`.
 
-    When a user token is forwarded, the server's own GITHUB_TOKEN is stashed in
-    RELIC_SERVER_GITHUB_TOKEN so the child can fall back to it if the user token is
-    expired or revoked (a runtime auth failure that format validation can't catch).
+    ``token`` is the connecting user's secret for that source (a GitHub OAuth token, or a
+    granola grn_ key). It reaches the child through its environment, never argv, so it does
+    not leak to the process list; the child's settings pick it up. No token means the child
+    inherits the server's own credentials for that source.
+
+    When a github user token is forwarded, the server's own GITHUB_TOKEN is stashed in
+    RELIC_SERVER_GITHUB_TOKEN so the child can fall back to it if the user token is expired
+    or revoked (a runtime auth failure format validation can't catch). Granola has no cheap
+    liveness probe, so a dead grn_ key fails its run rather than silently falling back.
     """
+    import hashlib
     import os
     import subprocess
     import sys
+
+    if source == "granola":
+        # No repo, and the owner-email scope is unknown until fetch, so key the in-flight
+        # guard on the grn_ key itself. A hash, never the raw key, so the lock id (which can
+        # surface in logs) can't leak the secret; no user key falls back to a server bucket.
+        key = "granola:" + (hashlib.sha256(token.encode()).hexdigest()[:16] if token else "server")
+        running = _INGEST_PROCS.get(key)
+        if running is not None and running.poll() is None:
+            return {"status": "already_running", "source": "granola"}
+        # GRANOLA_API_KEY carries the user grn_ key (settings.granola_api_key reads it); with
+        # no user key, env=None lets the child inherit the server's own GRANOLA_API_KEY.
+        env = {**os.environ, "GRANOLA_API_KEY": token} if token else None
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-m", "relic", "ingest", "--source", "granola"], env=env
+        )
+        _INGEST_PROCS[key] = proc
+        return {"status": "running", "source": "granola"}
+
+    if source == "notion":
+        # No repo, and the workspace scope is unknown until fetch, so key the in-flight guard
+        # on the token itself (one token ~ one workspace). A hash, never the raw token, so the
+        # lock id (which can surface in logs) can't leak the secret; no user token falls back
+        # to a server bucket.
+        key = "notion:" + (hashlib.sha256(token.encode()).hexdigest()[:16] if token else "server")
+        running = _INGEST_PROCS.get(key)
+        if running is not None and running.poll() is None:
+            return {"status": "already_running", "source": "notion"}
+        # NOTION_API_KEY carries the user token (settings.notion_api_key reads it); with no
+        # user token, env=None lets the child inherit the server's own NOTION_API_KEY.
+        env = {**os.environ, "NOTION_API_KEY": token} if token else None
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-m", "relic", "ingest", "--source", "notion"], env=env
+        )
+        _INGEST_PROCS[key] = proc
+        return {"status": "running", "source": "notion"}
+
+    if not repo:
+        return {"status": "error", "error": "repo is required for the github source"}
 
     running = _INGEST_PROCS.get(repo)
     if running is not None and running.poll() is None:
@@ -1472,11 +1922,11 @@ def serve_http(
     async def connectors() -> dict[str, Any]:
         return _connector_status()
 
-    async def ingest_runs(repo: str | None, limit: int) -> dict[str, Any]:
-        return _ingest_runs(repo, limit)
+    async def ingest_runs(repo: str | None, limit: int, source: str | None) -> dict[str, Any]:
+        return _ingest_runs(repo, limit, source)
 
-    async def ingest_trigger(repo: str, token: str | None) -> dict[str, Any]:
-        return _trigger_ingest(repo, token)
+    async def ingest_trigger(source: str, repo: str | None, token: str | None) -> dict[str, Any]:
+        return _trigger_ingest(source, repo, token)
 
     api = build_http_app(
         connectors=connectors,
@@ -1618,6 +2068,54 @@ async def _recall(query: str, repo: str | None, num_results: int) -> None:
     finally:
         await engram.close()
     print(format_answer(answer))
+
+
+@app.command("audit-zones")
+def audit_zones_command(
+    repo: Annotated[
+        str | None,
+        typer.Option(help="owner/name whose database to audit, defaults to TARGET_REPO"),
+    ] = None,
+    limit: Annotated[int, typer.Option(help="max violations to report per kind")] = 1000,
+) -> None:
+    """Audit Zone integrity (ADR-0006): is every Zoned node and edge tagged with a Zone?
+
+    Exits non-zero if any violation is found, so it can gate CI. A clean report is the
+    proof that the access boundary is structurally sound.
+    """
+    import asyncio
+
+    asyncio.run(_audit_zones(repo, limit))
+
+
+async def _audit_zones(repo: str | None, limit: int) -> None:
+    from relic.config import get_settings
+    from relic.graph import audit_zone_integrity, open_memory
+    from relic.ingest import repo_group_id
+
+    settings = get_settings()
+    repo = repo or settings.target_repo
+    group_id = repo_group_id(repo) if repo else None
+    engram = open_memory(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password,
+        database=group_id or settings.falkordb_database,
+        api_key=settings.openai_api_key,
+    )
+    try:
+        report = await audit_zone_integrity(engram, limit=limit)
+    finally:
+        await engram.close()
+    if report.is_clean:
+        console.print("[green]Zone integrity: clean[/] — every Zoned node and edge carries a Zone.")
+        return
+    console.print(f"[red]Zone integrity: {len(report.violations)} violation(s)[/]")
+    for violation in report.violations:
+        console.print(f"  [yellow]{violation.kind}[/] {violation.uuid}: {violation.detail}")
+    if report.truncated:
+        console.print("[yellow]…report truncated at the row limit; more violations may exist.[/]")
+    raise typer.Exit(code=1)
 
 
 @app.command("eval")

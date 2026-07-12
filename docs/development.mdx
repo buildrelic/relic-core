@@ -111,20 +111,26 @@ FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
 | [`test_cli_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_load.py) | the `load` command and `ingest --no-load`: the capture/load split, gates, and exit codes (graph stubbed) |
 | [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-repo checkpoint ledger: append, load, skip, and `--fresh` clear |
 | [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, resume skipping |
+| [`test_graph_operations.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_graph_operations.py) | `recall`, `reviewers_of`, and `graph_stats` against a real seeded FalkorDB; gated on `RELIC_LIVE_TESTS=1` and a reachable FalkorDB (real LLM calls) |
 | [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
 | [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
+| [`test_schema.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_schema.py) | the flat Graphiti-facing ontology (`relic.graph.schema`): entity/edge registration invariants and the AgentSession artifact type wiring |
+| [`test_field_map.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_field_map.py) | the body→flat-node correspondence (`relic.graph.field_map`): every node field has a body source, every mapped body path resolves |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
 | [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |
 | [`test_catalog.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_catalog.py) | the markdown catalog index |
 | [`test_emit.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_emit.py) | emit, prune, catalog reconciliation |
 | [`test_serve.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve.py) | MCP server: tools, resources, search |
 | [`test_mcp_e2e.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mcp_e2e.py) | the MCP server end to end |
-| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting |
+| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting, and the current-by-default filter (ADR-0006) |
+| [`test_scoped_memory.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scoped_memory.py) | `ScopedMemory` Zone enforcement: nonexistent out-of-Zone reads, global-spine passthrough, empty-scope fail-closed (ADR-0006) |
+| [`test_zone_integrity.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_zone_integrity.py) | write-time `require_episode_zone` refusal, mixed-Zone bulk refusal, and `audit_zone_integrity` over the introspection hatch (ADR-0006) |
 | [`test_falkordb_query.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_falkordb_query.py) | the query path and Cypher fallback |
 | [`test_scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scorecard.py) | eval scoring and summary |
 | [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report |
 | [`test_config.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_config.py) | settings: secret sanitization and the deprecated SEMAPHORE_LIMIT fallback |
 | [`test_obs.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs.py) | logging setup: stderr routing, scoped to the `relic` logger, idempotent |
+| [`test_obs_progress.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs_progress.py) | `relic.obs.load_progress`: disabled yields a no-op, enabled yields an `update(completed, counts)` callback |
 | [`test_cli.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli.py), [`test_cli_skills.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_skills.py) | CLI wiring |
 | [`test_pipeline_slice.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_pipeline_slice.py) | draft to verify to emit to serve, end to end |
 

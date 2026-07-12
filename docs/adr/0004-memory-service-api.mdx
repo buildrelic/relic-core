@@ -1,0 +1,116 @@
+---
+title: "Memory service API: narrow network surface over a tenant-scoped seam"
+description: "The shape the Memory seam and its eventual network service take so that hosting is an adapter, not a rewrite: tenant-scoped operations, database-per-group isolation, a connection model, a jobs write-model, and a deliberately narrow network surface."
+icon: "server"
+---
+
+<Info>
+**Status:** proposed (2026-06-28). The product is local-first today; this record
+fixes the decisions that are expensive to retrofit once we host in production. It
+builds on the Memory seam ([ADR-0003](/adr/0003-memory-seam)) and changes no network
+code yet — it shapes the in-process seam and names the network surface it will grow.
+
+**Partially superseded by [ADR-0005](/adr/0005-tenant-zone-access-model) (2026-06-28).**
+The **isolation decisions below are superseded**: the boundary moves up from
+database-per-group (repo) to **database-per-tenant**, with access governed *inside*
+the graph by **Zones** rather than by physical separation, and **`group_id` now means
+Zone, not repo**. Tenancy/isolation in Decision 2 and the "no cross-repo recall"
+scoping no longer hold as written. The rest of this record stands: reads-sync /
+writes-as-jobs (Decision 3), the connection model (Decision 4), the narrow network
+surface (Decision 5), session-capture-as-a-job (Decision 6), and the control-plane
+ownership check — which ADR-0005 generalizes from repo-ownership to Zone-membership.
+</Info>
+
+## Context
+
+Today everything runs on one machine: FalkorDB, the LLM keys, the composition root
+(`relic.cli`), and the serve surfaces (`daemon_app`, `http_server`, `mcp_server`).
+The serve surfaces never touch FalkorDB — they inject narrow functions (`RecallFn`,
+`CaptureFn`, `IngestTriggerFn`) and the composition root builds a `GraphitiMemory`
+(the seam) behind them. The seam *is* the API to interact with FalkorDB.
+
+We will host in production eventually, multi-tenant. The goal of this record is **not**
+to build the network service now — it is to shape the seam so the eventual service is
+a thin adapter. The seam stays in-process and injected; only its *shape* is fixed to
+be hosting-ready.
+
+## Decisions
+
+1. **Grow the in-process seam now; defer the network layer.** No new transport, auth,
+   or serialization until a real off-box caller exists. But three shape choices are
+   made now because they are expensive to retrofit: operations are **tenant-scoped**,
+   value types stay **serializable** (already true — `MemoryEdge`/`MemoryEpisode`), and
+   operations are **stateless per call**.
+
+2. **Tenancy and isolation.** A **tenant** is an organization that owns many **groups**
+   (a group is a repo: `group_id = owner__name`). One shared FalkorDB instance,
+   **database-per-group** (Graphiti already routes each `group_id` to its own FalkorDB
+   database). The security boundary is the **tenant → group ownership check**, enforced
+   by the API against a control-plane store. There is **no cross-repo recall** — recall
+   is scoped to one group — so database-per-group costs nothing and gives per-repo
+   isolation for free. Instance-per-tenant is reserved for a future hard-isolation tier
+   (a deployment swap behind the same API).
+
+3. **Reads sync, writes are jobs.** Read operations (recall, search, structured
+   queries) are fast and stay synchronous request/response. Writes (ingest, capture)
+   are LLM-bound (~99.5% of wall-clock) and run as **durable jobs** behind a
+   `JobRunner` port: submit returns a `job_id`; status is pollable; cancel is
+   supported. Locally the runner is an in-process background task; hosted, it is a
+   durable queue drained by a separate **worker tier**. The API verbs do not change
+   between the two.
+
+4. **Connections.** Requests are **stateless**. The process holds **one shared graph
+   handle** with shared LLM/embedder/reranker clients and one FalkorDB connection
+   pool, plus a small **per-group driver cache** (Graphiti's `clone(database=group_id)`
+   reuses the underlying FalkorDB client, so it is cheap). Because reads do **not**
+   auto-route by `group_id` (verified against `graphiti-core` 0.29.x — only writes
+   clone per group), the seam owns **per-group read routing**: it resolves the group's
+   driver and targets `database=group_id`.
+
+5. **Narrow network surface over a rich seam.** The network exposes only what an
+   off-box client needs — `recall`, `ingest` (job), `capture` (job), `jobs/{id}`,
+   `groups`/admin, `health`/coarse `stats`. The **rich** operations (`neighbors`,
+   `as_of`, `entities_by_type`, `detect_procedures`, entity resolution, snapshot) stay
+   **seam-internal**, called in-process by the daemon, the Phase-4 compiler, the job
+   worker, and eval tools. A seam op is promoted to an endpoint only when a concrete
+   external consumer appears.
+
+6. **AgentSession capture is a write job.** A captured coding session lands via
+   `POST /v1/capture → 202 {job_id}`, backed by the `add_episode` seam method, as the
+   new `AgentSession` artifact type. The ontology for `AgentSession` (node + `TOUCHED`/
+   `REFERENCES`/`RECORDS` edges, with deterministic structural links) is recorded in
+   the [ADR-0001 amendment](/adr/0001-engram-graph-ontology).
+
+## Considered options
+
+- **Generic graph API over the network** (rejected): exposing the rich seam as
+  endpoints forces in-process consumers (the compiler, maintenance) through a needless
+  network hop, and makes every operation attack surface plus a forever compatibility
+  contract, for callers that do not exist.
+- **One database per tenant, or one FalkorDB instance per tenant** (deferred):
+  database-per-group preserves Graphiti's partitioning and per-repo isolation;
+  per-tenant isolation is held for a future enterprise tier.
+- **In-process background tasks for writes** (rejected for hosting): they die with the
+  process and cannot scale independently of the API — hence the `JobRunner` port.
+- **A `GraphitiMemory` per group, pooled** (rejected): duplicates the expensive LLM
+  clients per group; one shared handle plus a per-group *driver* cache is lighter.
+
+## Consequences
+
+- Seam operations carry a `group_id` (tenant scope) **now**, even while running
+  single-tenant locally — the change that cannot be added cheaply later.
+- The seam gains **per-group read routing** (today reads use the bound database).
+- The write side of the API is **job-oriented** (`submit → job_id → poll/cancel`),
+  not a fire-and-forget boolean.
+
+## Deferred (decide at hosting time)
+
+- **Per-tenant auth.** Today: one server-to-server bearer token. Hosted: per-tenant
+  API keys / OAuth, gating the ownership check.
+- **LLM key ownership.** Platform-keys vs BYOK (cost and security). Note GitHub tokens
+  are already BYO-passthrough on ingest.
+- **The graph-view endpoint exception.** Promote `neighbors`/`structure` to read-only
+  endpoints (`GET /v1/groups/{g}/graph`) only if/when the web graph view ships.
+- **Hosted transcript privacy.** Session transcripts can carry secrets and proprietary
+  code; capturing them into a multi-tenant store needs a redaction / isolation /
+  opt-in decision.

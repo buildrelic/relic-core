@@ -14,9 +14,12 @@ module to emit under ``relic.ingest``.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from rich.console import Console
 
 _NAMESPACE = "relic"
@@ -38,6 +41,48 @@ def stderr_console() -> Console:
 
         _stderr_console = Console(stderr=True)
     return _stderr_console
+
+
+@contextmanager
+def load_progress(
+    label: str, total: int, *, enabled: bool
+) -> Iterator[Callable[[int, str], None] | None]:
+    """A live progress bar on the shared stderr console, or a no-op when disabled.
+
+    Yields ``update(completed, counts)`` while a bar is shown, or ``None`` when disabled so
+    the caller falls back to heartbeat logs. Owning the Rich ``Progress`` wiring here keeps
+    the ingest composition function as composition, not bar construction; the caller maps
+    its own stats onto ``(completed, counts)``.
+    """
+    if not enabled:
+        yield None
+        return
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("{task.fields[counts]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=stderr_console(),
+    ) as bar:
+        task = bar.add_task(label, total=total, counts="")
+
+        def update(completed: int, counts: str) -> None:
+            bar.update(task, completed=completed, counts=counts)
+
+        yield update
 
 
 def configure_logging(*, verbose: bool = False) -> None:

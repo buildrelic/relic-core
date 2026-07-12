@@ -67,6 +67,9 @@ reportMissingModuleSource = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+markers = [
+    "e2e: full-loop tests against live FalkorDB + OpenAI; run via `just loop-smoke` (self-skipping without keys/db)",
+]
 
 # import-linter is belt-and-suspenders: the package dependency graph already
 # prevents cross-subsystem imports by construction, but these contracts catch an

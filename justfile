@@ -59,9 +59,16 @@ lint:
 types:
     uv run python -m pyright
 
-# Run the test suite.
+# Run the test suite. The e2e loop smoke is excluded (slow, spends OpenAI tokens);
+# run it deliberately with `just loop-smoke`.
 test:
-    uv run python -m pytest
+    uv run python -m pytest -m "not e2e"
+
+# End-to-end closed-loop smoke against a real FalkorDB: ingest a fixture repo,
+# daemon inject (cited recall) and capture (write-back + readback), tear down.
+# Needs OPENAI_API_KEY; uses a throwaway per-run graph, never touches shared ones.
+loop-smoke: up
+    uv run python -m pytest -m e2e -rs tests/test_loop_smoke.py
 
 # Enforce the subsystem import boundaries (import-linter contracts in pyproject).
 imports:

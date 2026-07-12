@@ -505,6 +505,12 @@ class ConversationEpisodeBody(BaseModel):
     title: str | None = None  # channel name or meeting title
     channel: str | None = None
     occurred_at: str | None = None
+    # When the source artifact was last edited (Granola's updated_at, Slack's edit time).
+    # The freshness signal: the loader's supersession token is a fingerprint of the body
+    # bytes, so carrying the edit time here makes any source edit move the token — even
+    # one the clipped summary/transcript don't surface — while an unchanged re-capture
+    # still maps to identical bytes and is skipped.
+    last_edited_at: str | None = None
     participants: list[PersonRef] = Field(default_factory=list)
     messages: list[MessageEntry] = Field(default_factory=list)  # chat mediums
     transcript: str | None = None  # meeting mediums, clipped

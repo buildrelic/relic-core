@@ -51,15 +51,11 @@ def _main(
 
 @app.command()
 def ingest(
-    repo: Annotated[
-        str | None, typer.Option(help="owner/name to ingest (github sources)")
-    ] = None,
+    repo: Annotated[str | None, typer.Option(help="owner/name to ingest (github sources)")] = None,
     source: Annotated[
         str, typer.Option(help="source to ingest: github (needs --repo) | granola | notion")
     ] = "github",
-    limit: Annotated[
-        int | None, typer.Option(help="cap items pulled, most recent first")
-    ] = None,
+    limit: Annotated[int | None, typer.Option(help="cap items pulled, most recent first")] = None,
     months: Annotated[int, typer.Option(help="how many months of history to backfill")] = 12,
     bulk: Annotated[
         bool,
@@ -370,11 +366,17 @@ async def _extract(
     else:
         to_load, skip = episodes, done
 
+    # Open the engram at the group's own graph, matching where the writes land (graphiti
+    # keys the graph by each episode's group_id) and how every read path opens it. Opening
+    # the default graph here would break REL-118 supersession on a fresh process: the
+    # loader supersedes *before* the first add, so the removal MATCH would run against the
+    # default graph (where the episodes never lived), silently remove nothing, and the
+    # re-add would fork a duplicate episode in the group's graph.
     engram = open_memory(
         host=settings.falkordb_host,
         port=settings.falkordb_port,
         password=settings.falkordb_password,
-        database=settings.falkordb_database,
+        database=group_id,
         api_key=settings.openai_api_key,
         max_coroutines=settings.graphiti_max_coroutines,
     )

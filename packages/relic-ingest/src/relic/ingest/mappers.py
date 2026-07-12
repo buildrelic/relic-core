@@ -19,6 +19,7 @@ from relic.contracts.episode_body import (
     CommitEntry,
     ConversationEpisodeBody,
     DiffStats,
+    DocEpisodeBody,
     FileEntry,
     IssueEpisodeBody,
     IssueSection,
@@ -234,6 +235,9 @@ _DECIDED_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 # assembly. Both stay under the shared _MAX_BODY_CHARS ceiling via _fit_conversation_budget.
 _MAX_SUMMARY_CHARS = 4000
 _MAX_TRANSCRIPT_CHARS = 14000
+# Doc bodies: the flattened page text is the whole mined signal, so it gets the bulk of
+# the shared _MAX_BODY_CHARS ceiling; _fit_doc_budget trims after assembly.
+_MAX_DOC_BODY_CHARS = 14000
 
 _FENCE_RE = re.compile(r"`{3,}")
 _ZWSP = chr(0x200B)  # zero-width space, woven between backticks to break a fence run
@@ -578,30 +582,48 @@ def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
     )
 
 
-def page_to_episode(page: PageRec) -> EpisodeSpec:
-    """Map a Notion page to a Conversation episode (``medium="other"``).
+def _fit_doc_budget(body: DocEpisodeBody) -> DocEpisodeBody:
+    """Trim an assembled doc body to the token-proxy ceiling, deterministically.
 
-    Rides the existing conversation path rather than inventing a Document type (a proper
-    ``DocumentEpisodeBody`` is a deliberate follow-up): the Notion url lands in ``url`` (the
-    anchor recall cites), the creator + last editor become ``participants``, and the
-    flattened page text is the ``summary`` the extractor mines. ``messages`` stays empty (a
-    page is not a chat). The title is fence-defused, the text is clipped, and the assembled
-    body is trimmed to the per-episode token budget. The scope (``group_id``) is per Notion
-    workspace — a real identity, so it takes no faked ``RepoBundle``.
+    The page text is by far the largest field (title, url, and authors are small and
+    already bounded), so it is halved until the serialized body fits. Unlike a meeting
+    transcript it is never dropped entirely: the text *is* the document, so a doc body
+    keeps at least a head of it.
+    """
+    while len(body.model_dump_json()) > _MAX_BODY_CHARS and body.body and len(body.body) > 500:
+        body.body = body.body[: len(body.body) // 2] + "..."
+    return body
+
+
+def page_to_episode(page: PageRec) -> EpisodeSpec:
+    """Map a Notion page to a Doc episode (``doc_type="other"``).
+
+    A page is a document, not a chat, so it rides ``DocEpisodeBody`` (retiring the
+    REL-123 conversation stopgap): the Notion url stays the top-level ``url`` — the
+    anchor recall cites (``recall._extract_url`` falls back to a top-level url) — the
+    creator + last editor become ``authors``, and the flattened page text is the
+    ``body`` the extractor mines. ``doc_type`` stays the default ``"other"`` until a
+    classifier gives a better label. The title is fence-defused, the text is clipped,
+    and the assembled body is trimmed to the per-episode token budget. The scope
+    (``group_id``) is per Notion workspace — a real identity, so it takes no faked
+    ``RepoBundle``.
     """
     n_people = len(page.participants)
     context = "notion page"
     if n_people:
         context += f", {n_people} editor{'s' if n_people != 1 else ''}"
-    body = ConversationEpisodeBody(
+    body = DocEpisodeBody(
         context=context,
         url=page.url,
-        medium="other",
-        title=_defuse_fences(page.title) if page.title else None,
-        # A page has no single "occurred" moment; anchor conversation-time to its last edit.
-        occurred_at=page.last_edited_at or page.created_at,
-        participants=[PersonRef(login=name) for name in page.participants],
-        summary=_clip(page.text, _MAX_SUMMARY_CHARS),
+        # The body requires a title; an untitled page degrades to "" rather than
+        # inventing one the extractor might mint an entity from.
+        title=_defuse_fences(page.title) if page.title else "",
+        authors=[PersonRef(login=name) for name in page.participants],
+        # A page has no single "occurred" moment; anchor doc-time to its last edit.
+        last_edited_at=page.last_edited_at or page.created_at,
+        body=_clip(page.text, _MAX_DOC_BODY_CHARS),
+        # version stays None on purpose: Notion exposes no immutable snapshot key, and
+        # freshness/supersession is the checkpoint layer's job (REL-118), not the mapper's.
     )
     # Anchor to when the page was last edited, falling back to when it was created, then
     # the epoch if even that is missing.
@@ -613,7 +635,7 @@ def page_to_episode(page: PageRec) -> EpisodeSpec:
         # Re-ingesting an edited page needs episode supersession at the loader/checkpoint
         # layer, not a mapper rename.
         name=f"Notion {page.id}",
-        body=_fit_conversation_budget(body).model_dump_json(),
+        body=_fit_doc_budget(body).model_dump_json(),
         source_description="notion page",
         reference_time=_parse_aware(ref) if ref else _EPOCH,
         group_id=notion_group_id(page.workspace_id),

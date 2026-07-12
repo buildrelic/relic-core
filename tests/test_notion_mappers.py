@@ -1,4 +1,4 @@
-"""Notion mapper: PageRec -> Conversation EpisodeSpec (medium="other"), scope, body budget.
+"""Notion mapper: PageRec -> Doc EpisodeSpec (doc_type="other"), scope, body budget.
 
 Builds PageRec records directly (no fetch) and asserts the EpisodeSpec envelope and the
 parsed body, mirroring test_granola_mappers.py / test_slack_mappers.py.
@@ -52,31 +52,38 @@ def test_page_to_episode_shape_and_scope() -> None:
 
     body = json.loads(spec.body)
     assert body["schema_version"] == 2
-    assert body["source_type"] == "conversation"
-    assert body["medium"] == "other"
-    assert body["url"] == "https://www.notion.so/Relic-architecture-notes-1a2b3c"  # citation
+    assert body["source_type"] == "doc"
+    assert body["doc_type"] == "other"
+    # citation anchor stays the top-level url (recall._extract_url falls back to it)
+    assert body["url"] == "https://www.notion.so/Relic-architecture-notes-1a2b3c"
     assert body["title"] == "Relic architecture notes"
-    assert [p["login"] for p in body["participants"]] == ["Zidan Kazi", "Paris Phan"]
-    assert body["summary"] == "## Decisions\n- ship the notion connector"
-    assert body["messages"] == []  # a page is not a chat
+    assert [p["login"] for p in body["authors"]] == ["Zidan Kazi", "Paris Phan"]
+    assert body["body"] == "## Decisions\n- ship the notion connector"
+    assert body["last_edited_at"] == "2026-06-22T15:48:02.000Z"
+    # no immutable snapshot key from Notion; supersession is the checkpoint layer's job
+    assert body["version"] is None
 
 
 def test_reference_time_falls_back_to_created_at() -> None:
     spec = page_to_episode(_page(last_edited_at=None))
     assert spec.reference_time == datetime(2026, 6, 22, 15, 0, 11, tzinfo=UTC)
+    # last_edited_at in the body follows the same fallback
+    assert json.loads(spec.body)["last_edited_at"] == "2026-06-22T15:00:11.000Z"
 
 
 def test_untitled_page_still_validates() -> None:
+    # the doc body requires a title, so an untitled page degrades to "" rather than
+    # failing to construct (or inventing a title).
     body = json.loads(page_to_episode(_page(title=None)).body)
-    assert body["title"] is None
+    assert body["title"] == ""
 
 
 def test_long_text_is_trimmed_to_budget() -> None:
     spec = page_to_episode(_page(text="word " * 20000))
-    # The whole serialized body stays under the per-episode token-proxy ceiling (the flattened
-    # text lands in summary, which the mapper clips before assembly).
+    # The whole serialized body stays under the per-episode token-proxy ceiling (the
+    # flattened text lands in body, clipped before assembly then halved to fit).
     assert len(spec.body) <= _MAX_BODY_CHARS
-    assert json.loads(spec.body)["summary"]  # some text survives the clip
+    assert json.loads(spec.body)["body"]  # some text survives the clip, never dropped
 
 
 def test_missing_url_still_validates() -> None:
@@ -88,5 +95,5 @@ def test_missing_url_still_validates() -> None:
 
 def test_no_participants_context_is_bare() -> None:
     body = json.loads(page_to_episode(_page(participants=[])).body)
-    assert body["participants"] == []
+    assert body["authors"] == []
     assert body["context"] == "notion page"  # no ", N editors" suffix

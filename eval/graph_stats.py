@@ -164,6 +164,55 @@ def _safe_json(content: Any) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
+# Edges whose expected count is exactly derivable from the episode body (REL-94: the
+# "exact body data" fields). coverage = actual edges / expected, the per-field fumble
+# measurement that justifies (or spares) a deterministic escape hatch.
+_COVERAGE_EDGES: tuple[str, ...] = (
+    "AUTHORED",
+    "REVIEWED",
+    "REQUESTED_REVIEW",
+    "TOUCHES_PATH",
+    "CLOSES",
+    "ASSIGNED_TO",
+    "PARENT_OF",
+)
+
+
+def _tally_expected_edges(body: dict[str, Any], expected: dict[str, int]) -> None:
+    """Add one episode body's exactly-derivable edge counts to ``expected``.
+
+    Mirrors the episode-body contract (relic.contracts.episode_body): each count is
+    data the body states outright, so a shortfall in the graph is an extraction
+    fumble, not ambiguity. Distinct logins for people-edges (re-reviews collapse onto
+    one Person->PR edge); person-kind requested reviewers only (team requests have no
+    Person node to anchor).
+    """
+    pr = body.get("pull_request") or {}
+    if pr:
+        author_login = ((pr.get("author") or {}).get("login") or "").strip()
+        expected["AUTHORED"] += (1 if author_login else 0) + len(pr.get("co_authors") or [])
+        expected["REVIEWED"] += len(
+            {
+                login
+                for r in body.get("reviews") or []
+                if (login := ((r.get("reviewer") or {}).get("login") or "").strip())
+            }
+        )
+        expected["REQUESTED_REVIEW"] += len(
+            {
+                name
+                for rr in body.get("requested_reviewers") or []
+                if rr.get("kind") == "user" and (name := (rr.get("name") or "").strip())
+            }
+        )
+        expected["TOUCHES_PATH"] += len(body.get("files") or [])
+        expected["CLOSES"] += len(body.get("linked_issues") or [])
+    issue = body.get("issue") or {}
+    if issue:
+        expected["ASSIGNED_TO"] += len(issue.get("assignees") or [])
+        expected["PARENT_OF"] += 1 if issue.get("parent") else 0
+
+
 async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any]:
     """Does the episode's Subject node materialize, and do its edges attach to it (REL-99)?
 
@@ -198,7 +247,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
     }
 
     by_type: dict[str, dict[str, int]] = {}
-    expected: dict[str, int] = {"TOUCHES_PATH": 0, "CLOSES": 0}
+    expected: dict[str, int] = dict.fromkeys(_COVERAGE_EDGES, 0)
     for ep in episodes:
         body = _safe_json(ep.get("content"))
         source_type = body.get("source_type", "?") if body else "?"
@@ -208,8 +257,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
         if subject_label and ep["id"] in subjects[subject_label]:
             bucket["with_subject"] += 1
         if body:
-            expected["TOUCHES_PATH"] += len(body.get("files") or [])
-            expected["CLOSES"] += len(body.get("linked_issues") or [])
+            _tally_expected_edges(body, expected)
 
     presence = {
         st: {
@@ -272,7 +320,7 @@ async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any
             "actual_edges": actual.get(rel, 0),
             "coverage": (round(actual.get(rel, 0) / expected[rel], 3) if expected[rel] else None),
         }
-        for rel in ("TOUCHES_PATH", "CLOSES")
+        for rel in _COVERAGE_EDGES
     }
 
     return {"subject_presence": presence, "edge_anchoring": anchoring, "coverage": coverage}

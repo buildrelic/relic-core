@@ -143,6 +143,22 @@ def _plan_pull_request(body: dict[str, Any]) -> SubjectPlan | None:
     edges: list[PlannedEdge] = [
         PlannedEdge("IN_REPO", "out", repo_node, f"{pr_name} is in repo {repo.full_name}")
     ]
+    # REL-94 escape hatches: exact body data the LLM measurably fumbles (see the
+    # REL-94 PR for the measured coverage that justifies each field). These are edges
+    # the extractor often *does* make, so the adapter skips a planned edge when an
+    # equivalent one already exists rather than doubling the fact.
+    if pr.author and pr.author.login:
+        author = PlannedNode(
+            label="Person",
+            name=pr.author.login,
+            attributes=_clean(
+                {"github_login": pr.author.login, "profile_url": pr.author.profile_url}
+            ),
+        )
+        edges.append(PlannedEdge("AUTHORED", "in", author, f"{pr.author.login} authored {pr_name}"))
+    for f in pr_body.files:
+        file_node = PlannedNode(label="File", name=f.path)
+        edges.append(PlannedEdge("TOUCHES_PATH", "out", file_node, f"{pr_name} touches {f.path}"))
     for li in pr_body.linked_issues:
         issue_node = PlannedNode(
             label="Issue", name=li.identifier, attributes={"identifier": li.identifier}

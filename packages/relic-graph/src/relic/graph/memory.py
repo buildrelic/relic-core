@@ -538,6 +538,13 @@ class GraphitiMemory:
                 if planned.direction == "out"
                 else (target_uuid, subject_uuid)
             )
+            # REL-94: some planned edges (AUTHORED, TOUCHES_PATH) are ones the LLM often
+            # *does* extract, unlike the REL-99 set it almost never makes. When any edge
+            # of this relation already links these endpoints -- the extractor's, or ours
+            # from a prior ingest -- skip the write instead of doubling the fact and
+            # splitting its episode support.
+            if await self._edge_exists(planned.relation, src, tgt, zone):
+                continue
             edge = EntityEdge(
                 uuid=det_uuid(zone, planned.relation, src, tgt),
                 source_node_uuid=src,
@@ -575,6 +582,19 @@ class GraphitiMemory:
                 uuid=episode_uuid,
                 new=new_edge_uuids,
             )
+
+    async def _edge_exists(self, relation: str, src: str, tgt: str, group_id: str) -> bool:
+        """True if any ``relation`` edge already links ``src -> tgt`` in this Zone."""
+        rows, _, _ = await self._graphiti.driver.execute_query(
+            "MATCH (:Entity {uuid: $src})-[r:RELATES_TO {name: $rel, group_id: $g}]->"
+            "(:Entity {uuid: $tgt}) RETURN r.uuid AS uuid LIMIT 1",
+            src=src,
+            tgt=tgt,
+            rel=relation,
+            g=group_id,
+            routing_="r",
+        )
+        return bool(rows)
 
     async def _episode_uuid(self, name: str, group_id: str) -> str | None:
         """The uuid of the just-added Episodic for ``(name, group_id)``, or None if absent."""

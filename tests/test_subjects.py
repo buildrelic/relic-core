@@ -81,6 +81,34 @@ def test_pull_request_dropped_edges() -> None:
     assert sum(1 for e in plan.edges if e.relation == "REQUESTED_REVIEW") == 1
 
 
+def test_pull_request_author_and_file_edges() -> None:
+    # REL-94 escape hatches: AUTHORED from the body's author login, TOUCHES_PATH from
+    # its file paths -- exact body data, measured as fumbled by the extractor.
+    plan = plan_subject_writes(
+        _spec(_pr_body(files=[{"path": "src/auth/login.py"}, {"path": "docs/auth.md"}]))
+    )
+    assert plan is not None
+
+    authored = [e for e in plan.edges if e.relation == "AUTHORED"]
+    assert len(authored) == 1
+    assert authored[0].direction == "in"  # Person -> PR
+    assert authored[0].target.label == "Person"
+    assert authored[0].target.name == "alice"
+    assert authored[0].target.attributes["github_login"] == "alice"
+
+    touches = [e for e in plan.edges if e.relation == "TOUCHES_PATH"]
+    assert [e.target.name for e in touches] == ["src/auth/login.py", "docs/auth.md"]
+    assert all(e.direction == "out" and e.target.label == "File" for e in touches)
+
+
+def test_pull_request_ghost_author_plans_no_authored_edge() -> None:
+    # A ghost/deleted opener has author: null -- no Person identity, no edge.
+    ghost_pr = {**_pr_body()["pull_request"], "author": None}
+    plan = plan_subject_writes(_spec(_pr_body(pull_request=ghost_pr)))
+    assert plan is not None
+    assert all(e.relation != "AUTHORED" for e in plan.edges)
+
+
 def test_pull_request_without_linked_issues_has_no_closes() -> None:
     plan = plan_subject_writes(_spec(_pr_body(linked_issues=[])))
     assert plan is not None

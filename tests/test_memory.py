@@ -387,6 +387,49 @@ async def test_existing_nodes_are_reused_not_clobbered() -> None:
     assert in_repo["target_uuid"] == "existing-demo/repo"
 
 
+async def test_authored_edge_is_planned_for_the_body_author() -> None:
+    # REL-94: AUTHORED is written deterministically from the body's author login.
+    graphiti = _SubjectWriteGraphiti()
+
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    edges = {e["name"]: e for e in _edge_saves(graphiti.driver)}
+    assert "AUTHORED" in edges
+    subject_uuid = edges["IN_REPO"]["source_uuid"]
+    assert edges["AUTHORED"]["target_uuid"] == subject_uuid  # Person -> PR
+
+
+async def test_existing_equivalent_edge_skips_the_deterministic_write() -> None:
+    # REL-94: AUTHORED/TOUCHES_PATH are edges the LLM often *does* extract. When one
+    # already links the same endpoints, the planned edge is skipped -- no doubled fact,
+    # no split episode support -- and it is not registered on e.entity_edges either.
+    class _EdgeAwareDriver(_RecordingDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.existing_relations = {"AUTHORED"}
+
+        async def execute_query(self, query, **kwargs):  # noqa: ANN001, ANN202
+            if "RELATES_TO {name: $rel" in query:
+                self.calls.append((query, kwargs))
+                if kwargs.get("rel") in self.existing_relations:
+                    return [{"uuid": "llm-edge-1"}], None, None
+                return [], None, None
+            return await super().execute_query(query, **kwargs)
+
+    graphiti = _SubjectWriteGraphiti()
+    graphiti.driver = _EdgeAwareDriver()
+
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    edges = {e["name"] for e in _edge_saves(graphiti.driver)}
+    assert "AUTHORED" not in edges  # skipped: the extractor already made it
+    assert {"IN_REPO", "CLOSES", "REQUESTED_REVIEW"} <= edges  # the rest still land
+    registered = next(
+        (k["new"] for _q, k in graphiti.driver.calls if "entity_edges" in _q), []
+    )
+    assert "llm-edge-1" not in registered  # the LLM's edge is not claimed by this episode
+
+
 async def test_subject_write_failure_is_swallowed() -> None:
     class _ExplodingDriver(_RecordingDriver):
         async def execute_query(self, query, **kwargs):  # noqa: ANN001, ANN202

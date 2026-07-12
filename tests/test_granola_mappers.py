@@ -32,6 +32,7 @@ def _meeting(**overrides: object) -> MeetingRec:
         "transcript": "Zidan: ship it\nParis: lgtm",
         "occurred_at": "2026-06-22T15:00:00Z",
         "created_at": "2026-06-22T15:00:11Z",
+        "updated_at": "2026-06-22T15:48:02Z",
     }
     base.update(overrides)
     return MeetingRec(**base)  # type: ignore[arg-type]
@@ -62,6 +63,7 @@ def test_meeting_to_episode_shape_and_scope() -> None:
     assert [p["login"] for p in body["participants"]] == ["Zidan Kazi", "Paris Phan"]
     assert body["summary"] == "## Decisions\n- ship the connector"
     assert body["transcript"] == "Zidan: ship it\nParis: lgtm"
+    assert body["last_edited_at"] == "2026-06-22T15:48:02Z"  # the freshness token (REL-118)
 
 
 def test_reference_time_falls_back_to_created_at() -> None:
@@ -76,6 +78,21 @@ def test_long_transcript_is_trimmed_to_budget() -> None:
     body = json.loads(spec.body)
     # The summary (the mined signal) survives even when the transcript is shed.
     assert body["summary"] == "## Decisions\n- ship the connector"
+
+
+def test_edited_note_moves_the_freshness_token() -> None:
+    # REL-118 edit-reingest: the loader supersedes on a changed body fingerprint
+    # (relic.graph.load._content_token). An edit bumps the note's updated_at, which
+    # rides in the body, so the token moves even when the clipped summary/transcript
+    # are unchanged; a no-op re-capture maps to identical bytes and is skipped.
+    from relic.graph.load import _content_token
+
+    v1 = meeting_to_episode(_meeting())
+    edited = meeting_to_episode(_meeting(updated_at="2026-06-23T09:00:00Z"))
+    recaptured = meeting_to_episode(_meeting())
+    assert edited.name == v1.name  # same dedup key: supersede, never fork
+    assert _content_token(edited) != _content_token(v1)
+    assert _content_token(recaptured) == _content_token(v1)
 
 
 def test_missing_url_still_validates() -> None:
@@ -100,3 +117,4 @@ def test_fixtures_round_trip_with_citation_and_owner_scope() -> None:
         assert body["url"].startswith("https://notes.granola.ai/d/")
         assert body["participants"]  # attendees normalized onto the body
         assert body["transcript"]  # speaker-attributed segments flattened to prose
+        assert body["last_edited_at"] == note["updated_at"]  # freshness survives the full path

@@ -550,6 +550,12 @@ def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
     mines. Every free-text field is fence-defused and clipped, and the assembled body
     is trimmed to the per-episode token budget. The scope (``group_id``) is per
     note-owner — a real identity, so it takes no faked ``RepoBundle``.
+
+    The note's ``updated_at`` rides in the body as ``last_edited_at``: the loader's
+    supersession token fingerprints the body bytes (the same way a GitHub PR's body
+    carries its own mutability signals), so a re-captured edited note supersedes its
+    stale episode instead of being skipped — even when the edit falls beyond the
+    summary/transcript clip caps.
     """
     n_people = len(meeting.participants)
     context = "meeting"
@@ -561,6 +567,9 @@ def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
         medium="meeting",
         title=_defuse_fences(meeting.title) if meeting.title else None,
         occurred_at=meeting.occurred_at,
+        # The freshness token: any Granola edit bumps updated_at, which moves the
+        # loader's body fingerprint and supersedes the stale episode.
+        last_edited_at=meeting.updated_at,
         participants=[PersonRef(login=name) for name in meeting.participants],
         transcript=_clip(meeting.transcript, _MAX_TRANSCRIPT_CHARS),
         summary=_clip(meeting.summary, _MAX_SUMMARY_CHARS),
@@ -569,11 +578,11 @@ def meeting_to_episode(meeting: MeetingRec) -> EpisodeSpec:
     # then the epoch if even that is missing.
     ref = meeting.occurred_at or meeting.created_at
     return EpisodeSpec(
-        # The stable note id is the dedup key, so a re-presented meeting is skipped, not
-        # re-extracted. Deliberately NO updated_at folded in: a version in the name forks
-        # the graph (Graphiti mints a fresh Episodic uuid per add) instead of updating in
-        # place. Re-ingesting an edited note (regenerated summary, late edits) needs
-        # episode supersession at the loader/checkpoint layer, not a mapper rename.
+        # The stable note id is the dedup key. Deliberately NO updated_at folded into the
+        # name: a version in the name forks the graph (Graphiti mints a fresh Episodic
+        # uuid per add) instead of updating in place. Freshness rides in the *body*
+        # instead (last_edited_at above), where the loader's fingerprint picks it up and
+        # supersedes the prior episode for this same name.
         name=f"Meeting {meeting.id}",
         body=_fit_conversation_budget(body).model_dump_json(),
         source_description="granola meeting",

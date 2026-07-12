@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     semaphore_limit: int = 10  # deprecated: use fetch_concurrency / graphiti_max_coroutines
     fetch_concurrency: int = 10  # concurrent GitHub hydration requests (rate-limit safe)
     graphiti_max_coroutines: int = 20  # graphiti internal LLM concurrency during load
+    # Concurrent episode extractions when the loader drains a spool (`relic load` /
+    # `relic ingest` on the sequential path). 1 keeps the deterministic oldest-first feed;
+    # raising it overlaps the LLM-bound extraction I/O across episodes. Distinct from
+    # graphiti_max_coroutines, which bounds the LLM fan-out *inside* one episode.
+    load_concurrency: int = 1
     bulk_load: bool = False  # route the load through add_episode_bulk (see `relic ingest --bulk`)
     bulk_batch_size: int = 10  # episodes per add_episode_bulk call; smaller = less TPM burst
 

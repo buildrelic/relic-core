@@ -312,6 +312,126 @@ async def test_on_loaded_records_content_token() -> None:
     assert recorded == [("PR demo/repo#1", _content_token(spec))]
 
 
+# --- bounded concurrency: overlap the LLM-bound episode adds -------------------
+#
+# concurrency=1 (the default, covered by every test above) keeps the strictly
+# sequential feed; these pin the fan-out mode: the bound is respected, adds genuinely
+# overlap, per-episode semantics (checkpoint writes, failure isolation) are unchanged,
+# and supersessions complete before the first brand-new add.
+
+
+class _TrackingMemory(FakeMemory):
+    """FakeMemory whose add_episode yields to the loop and records the in-flight high-water.
+
+    The sleep(0) forces a real suspension per add, so overlap is observable: a sequential
+    drain never has two adds in flight, a concurrent one does, and the semaphore bound is
+    the measured ceiling.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def add_episode(self, spec: EpisodeSpec) -> None:
+        import asyncio
+
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            await super().add_episode(spec)
+        finally:
+            self.in_flight -= 1
+
+
+async def test_concurrent_load_overlaps_within_the_bound() -> None:
+    memory = _TrackingMemory()
+    specs = [_spec(f"PR demo/repo#{i}") for i in range(6)]
+
+    stats = await load_episodes(
+        memory, specs, group_id="demo__repo", progress=False, concurrency=3
+    )
+
+    assert stats.loaded == 6
+    assert stats.failed == 0
+    assert sorted(memory.added) == sorted(s.name for s in specs)  # order may interleave
+    assert memory.max_in_flight <= 3  # the bound is a hard ceiling
+    assert memory.max_in_flight >= 2  # and adds genuinely overlapped
+
+
+async def test_sequential_default_never_overlaps() -> None:
+    memory = _TrackingMemory()
+    specs = [_spec(f"PR demo/repo#{i}") for i in range(4)]
+
+    await load_episodes(memory, specs, group_id="demo__repo", progress=False)
+
+    assert memory.max_in_flight == 1
+    assert memory.added == [s.name for s in specs]  # feed order preserved
+
+
+async def test_concurrent_checkpoint_writes_stay_per_episode() -> None:
+    # on_loaded (the checkpoint write) must fire once per landed episode with its own
+    # token, not batch-granularly, so a crash mid-drain resumes per episode.
+    memory = _TrackingMemory()
+    specs = [_spec(f"PR demo/repo#{i}", body=f'{{"i": {i}}}') for i in range(5)]
+    recorded: list[tuple[str, str | None]] = []
+
+    await load_episodes(
+        memory,
+        specs,
+        group_id="demo__repo",
+        on_loaded=lambda name, token: recorded.append((name, token)),
+        progress=False,
+        concurrency=4,
+    )
+
+    assert sorted(recorded) == sorted((s.name, _content_token(s)) for s in specs)
+
+
+async def test_concurrent_failure_stays_isolated() -> None:
+    memory = _TrackingMemory(fail_on={"PR demo/repo#2"})
+    specs = [_spec(f"PR demo/repo#{i}") for i in range(5)]
+    seen: list[tuple[int, int, int]] = []
+
+    stats = await load_episodes(
+        memory,
+        specs,
+        group_id="demo__repo",
+        on_progress=lambda s: seen.append((s.loaded, s.skipped, s.failed)),
+        progress=False,
+        concurrency=3,
+    )
+
+    assert stats.loaded == 4
+    assert stats.failed == 1
+    assert [name for name, _ in stats.failures] == ["PR demo/repo#2"]
+    assert seen[-1] == (4, 0, 1)  # the bar still reaches the episode total
+
+
+async def test_concurrent_supersessions_complete_before_new_adds() -> None:
+    # A refreshed body must replace its stale node before any brand-new episode extracts,
+    # mirroring the sequential path's supersede-first ordering across the fan-out.
+    memory = _TrackingMemory(supersede_counts={"Meeting x": 1})
+    changed = _spec("Meeting x", body='{"summary": "v2"}')
+    fresh = [_spec(f"PR demo/repo#{i}") for i in range(3)]
+
+    stats = await load_episodes(
+        memory,
+        [changed, *fresh],
+        group_id="demo__repo",
+        skip={"Meeting x": "stale-token"},
+        progress=False,
+        concurrency=4,
+    )
+
+    assert stats.superseded == 1
+    assert stats.loaded == 3
+    assert memory.superseded == ["Meeting x"]
+    assert memory.added[0] == "Meeting x"  # the supersede wave landed before any new add
+
+
 async def test_bulk_supersede_runs_serially_before_batches() -> None:
     memory = FakeMemory(supersede_counts={"Meeting x": 1})
     changed = _spec("Meeting x", body='{"summary": "v2"}')

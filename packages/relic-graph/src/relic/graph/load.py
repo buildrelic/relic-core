@@ -1,8 +1,12 @@
 """Land structured episodes into the memory graph through the Memory seam.
 
-Episodes are added sequentially: each is awaited before the next so its extracted
-entities are resolvable when later episodes reference them. Each episode lands under its
-repo's group_id, partitioning the graph per source.
+Episodes are added sequentially by default: each is awaited before the next so its
+extracted entities are resolvable when later episodes reference them. Extraction is
+I/O-wait bound on LLM calls (99.5% of a 40-episode run's wall clock), so ``concurrency``
+opts a drain into a bounded fan-out: up to N episodes extract at once, trading the
+strict feed order (in-flight episodes race entity resolution, the same class of
+trade-off the bulk path accepts) for wall clock. Each episode lands under its repo's
+group_id, partitioning the graph per source.
 
 The loop is resilient and observable. An episode that fails (a terminal rate limit, a
 malformed entity) is caught, counted, and logged, and the run carries on: one bad PR
@@ -19,6 +23,7 @@ in ``GraphitiMemory`` (ADR-0003).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Callable, Iterator
@@ -168,8 +173,9 @@ async def load_episodes(
     on_loaded: Callable[[str, str | None], None] | None = None,
     on_progress: Callable[[LoadStats], None] | None = None,
     progress: bool = True,
+    concurrency: int = 1,
 ) -> LoadStats:
-    """Add each episode through the Memory seam, one at a time.
+    """Add each episode through the Memory seam, at most ``concurrency`` at a time.
 
     ``skip`` maps episode names already landed to their freshness token (from a
     checkpoint): an unchanged token is counted as skipped, not re-added; a changed token
@@ -179,6 +185,16 @@ async def load_episodes(
     is known and after every episode is finalized, so a caller can drive a progress bar (the
     count to render is ``loaded + superseded + skipped + failed``). A failed episode is
     logged and counted, and the loop continues.
+
+    ``concurrency=1`` (the default) keeps the strictly sequential, oldest-first feed: an
+    entity an early episode introduces is resolved when a later one references it. A
+    higher value overlaps the LLM-bound extraction I/O of up to that many episodes.
+    Per-episode semantics are unchanged either way — ``on_loaded`` still fires per episode
+    as it lands (checkpoint writes stay per-episode), failures stay isolated, and every
+    supersession completes before the first brand-new add so a refreshed body never races
+    the batch that might reference it. The trade-off is entity resolution across in-flight
+    episodes (two episodes introducing the same new entity can miss each other's dedup),
+    the same class of trade-off :func:`load_episodes_bulk` accepts per batch.
     """
     skip_map = _as_skip_map(skip)
     stats = LoadStats(group_id=group_id, attempted=len(episodes))
@@ -191,23 +207,38 @@ async def load_episodes(
     total = len(to_add) + len(supersede)
     heartbeat = max(1, total // 10) if progress else 0
     start = time.monotonic()
-    index = 0
+    finalized = 0
+
+    async def _finalize_one(spec: EpisodeSpec, *, remove_first: bool) -> None:
+        # The shared per-episode unit for both drain modes: add (or supersede), then tick
+        # the bar and the heartbeat. The bookkeeping after the await is synchronous, so
+        # concurrent finalizers never interleave inside it.
+        nonlocal finalized
+        await _add_one(memory, spec, stats, on_loaded, remove_first=remove_first)
+        finalized += 1
+        if on_progress is not None:
+            on_progress(stats)
+        if heartbeat and finalized % heartbeat == 0:
+            log.info("loaded %d/%d episodes", finalized, total)
+
     # Supersede first (remove the prior episode, then re-add) so a refreshed body replaces
     # its stale node in place; then add the brand-new episodes.
-    for spec in supersede:
-        index += 1
-        await _add_one(memory, spec, stats, on_loaded, remove_first=True)
-        if on_progress is not None:
-            on_progress(stats)
-        if heartbeat and index % heartbeat == 0:
-            log.info("loaded %d/%d episodes", index, total)
-    for spec in to_add:
-        index += 1
-        await _add_one(memory, spec, stats, on_loaded)
-        if on_progress is not None:
-            on_progress(stats)
-        if heartbeat and index % heartbeat == 0:
-            log.info("loaded %d/%d episodes", index, total)
+    if concurrency <= 1:
+        for spec in supersede:
+            await _finalize_one(spec, remove_first=True)
+        for spec in to_add:
+            await _finalize_one(spec, remove_first=False)
+    else:
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _bounded(spec: EpisodeSpec, *, remove_first: bool) -> None:
+            async with semaphore:
+                await _finalize_one(spec, remove_first=remove_first)
+
+        # gather (not a TaskGroup) on purpose: _add_one catches per-episode failures, so
+        # nothing raises, and one bad episode must never cancel its siblings.
+        await asyncio.gather(*(_bounded(s, remove_first=True) for s in supersede))
+        await asyncio.gather(*(_bounded(s, remove_first=False) for s in to_add))
 
     stats.duration_s = time.monotonic() - start
     return stats

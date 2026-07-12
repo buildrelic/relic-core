@@ -135,6 +135,14 @@ def load(
     no_progress: Annotated[
         bool, typer.Option("--no-progress", help="disable the live progress bar")
     ] = False,
+    concurrency: Annotated[
+        int | None,
+        typer.Option(
+            "--concurrency",
+            help="episodes extracting at once on the sequential path "
+            "(default LOAD_CONCURRENCY; 1 = strictly sequential)",
+        ),
+    ] = None,
 ) -> None:
     """Extract spooled episodes into the graph: the LLM-heavy half of ingest, on demand.
 
@@ -149,7 +157,15 @@ def load(
 
     try:
         asyncio.run(
-            _load(repo, limit, source=source, bulk=bulk, fresh=fresh, no_progress=no_progress)
+            _load(
+                repo,
+                limit,
+                source=source,
+                bulk=bulk,
+                fresh=fresh,
+                no_progress=no_progress,
+                concurrency=concurrency,
+            )
         )
     except typer.Exit:
         raise
@@ -342,12 +358,15 @@ async def _extract(
     limit: int | None,
     progress_label: str,
     log: "logging.Logger",
+    concurrency: int | None = None,
 ) -> "tuple[LoadStats, bool]":
     """Run Graphiti extraction over episodes: the LLM-heavy half. Returns (stats, used_bulk).
 
     ``fresh`` clears the checkpoint first so every episode reloads. ``limit`` caps how
     many not-yet-loaded episodes extract this run, for case-by-case loading; ``None``
-    loads all pending (the loader skips checkpointed names internally).
+    loads all pending (the loader skips checkpointed names internally). ``concurrency``
+    bounds how many episodes extract at once on the sequential path (``None`` falls back
+    to ``settings.load_concurrency``); the bulk path has its own batch fan-out.
     """
     import logging
     from collections.abc import Callable
@@ -379,6 +398,7 @@ async def _extract(
         max_coroutines=settings.graphiti_max_coroutines,
     )
     use_bulk = bulk or settings.bulk_load
+    episode_concurrency = concurrency if concurrency is not None else settings.load_concurrency
 
     async def _run(on_progress: Callable[[LoadStats], None] | None) -> LoadStats:
         # progress=on_progress is None: the bar replaces the "loaded x/y" heartbeat logs
@@ -394,7 +414,7 @@ async def _extract(
             return await load_episodes_bulk(
                 engram, to_load, batch_size=settings.bulk_batch_size, **common
             )
-        return await load_episodes(engram, to_load, **common)
+        return await load_episodes(engram, to_load, concurrency=episode_concurrency, **common)
 
     # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
     # and --no-progress; otherwise fall back to the heartbeat log lines. The bar wiring
@@ -634,6 +654,7 @@ async def _extract_scopes(
     limit: int | None,
     verb: str,
     log: "logging.Logger",
+    concurrency: int | None = None,
 ) -> "tuple[int, int]":
     """Extract each scope into its own partition + ledger. Returns ``(loaded, failed)``.
 
@@ -656,6 +677,7 @@ async def _extract_scopes(
             limit=limit,
             progress_label=f"{verb} {scope}",
             log=log,
+            concurrency=concurrency,
         )
         # A non-repo run has no repo; the source label + the per-scope id identify it.
         _record_run(stats, None, source=source)
@@ -752,6 +774,7 @@ async def _load_granola(
     no_progress: bool,
     settings: "Settings",
     log: "logging.Logger",
+    concurrency: int | None = None,
 ) -> None:
     """Extract spooled Granola episodes per owner-scope: the LLM half of a two-phase granola run."""
     from relic.graph import falkordb_reachable
@@ -789,6 +812,7 @@ async def _load_granola(
         limit=limit,
         verb="extracting",
         log=log,
+        concurrency=concurrency,
     )
     log.info("granola load done: %d meetings loaded, %d failed", loaded, failed)
     if loaded == 0 and failed:
@@ -923,6 +947,7 @@ async def _load_notion(
     no_progress: bool,
     settings: "Settings",
     log: "logging.Logger",
+    concurrency: int | None = None,
 ) -> None:
     """Extract spooled Notion episodes per workspace-scope: the LLM half of a notion run."""
     from relic.graph import falkordb_reachable
@@ -960,6 +985,7 @@ async def _load_notion(
         limit=limit,
         verb="extracting",
         log=log,
+        concurrency=concurrency,
     )
     log.info("notion load done: %d pages loaded, %d failed", loaded, failed)
     if loaded == 0 and failed:
@@ -974,6 +1000,7 @@ async def _load(
     bulk: bool = False,
     fresh: bool = False,
     no_progress: bool = False,
+    concurrency: int | None = None,
 ) -> None:
     import time
 
@@ -988,13 +1015,25 @@ async def _load(
 
     if source == "granola":
         await _load_granola(
-            limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
+            limit,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            settings=settings,
+            log=log,
+            concurrency=concurrency,
         )
         return
 
     if source == "notion":
         await _load_notion(
-            limit, bulk=bulk, fresh=fresh, no_progress=no_progress, settings=settings, log=log
+            limit,
+            bulk=bulk,
+            fresh=fresh,
+            no_progress=no_progress,
+            settings=settings,
+            log=log,
+            concurrency=concurrency,
         )
         return
 
@@ -1031,6 +1070,7 @@ async def _load(
         limit=limit,
         progress_label=f"extracting {repo}",
         log=log,
+        concurrency=concurrency,
     )
     _record_run(stats, repo)
 

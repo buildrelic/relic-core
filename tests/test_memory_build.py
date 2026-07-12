@@ -153,7 +153,6 @@ def test_ontology_registers_the_rel93_in_scope_types() -> None:
         "Repo",
         "PullRequest",
         "Issue",
-        "Label",
         "File",
         "AgentSession",
     }
@@ -164,7 +163,6 @@ def test_ontology_registers_the_rel93_in_scope_types() -> None:
         "TOUCHES_PATH",
         "TOUCHED",
         "REFERENCES",
-        "HAS_LABEL",
         "IN_REPO",
         "ASSIGNED_TO",
         "PARENT_OF",
@@ -179,6 +177,10 @@ def test_ontology_omits_removed_and_unfed_types() -> None:
     assert "Review" not in ENTITY_TYPES  # Review is the REVIEWED edge, not a node
     assert "Procedure" not in ENTITY_TYPES  # detector/compiler is a separate track
     assert "Project" not in ENTITY_TYPES  # deferred: issue body carries no project field
+    # Label/HAS_LABEL removed: the LLM fumbles labels (no node, HAS_LABEL mis-anchored to
+    # Repo), and the value isn't worth a node today (REL-99 probe). Reintroduce if needed.
+    assert "Label" not in ENTITY_TYPES
+    assert "HAS_LABEL" not in EDGE_TYPES
     assert "REPORTS_TO" not in EDGE_TYPES  # deferred: no connector feeds org structure
     assert "IN_PROJECT" not in EDGE_TYPES
     assert ("Issue", "Repo") not in EDGE_TYPE_MAP  # issue body carries no repo (group_id does)

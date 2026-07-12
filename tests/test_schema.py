@@ -61,7 +61,7 @@ def test_zoned_and_global_tiers_partition_entity_types() -> None:
     # A new node type must be classified deliberately, so a gap fails here.
     assert set(ENTITY_TYPES) == GLOBAL_ENTITY_TYPES | ZONED_ENTITY_TYPES
     assert not (GLOBAL_ENTITY_TYPES & ZONED_ENTITY_TYPES)
-    assert {"Person", "Repo", "Label", "File"} == GLOBAL_ENTITY_TYPES
+    assert {"Person", "Repo", "File"} == GLOBAL_ENTITY_TYPES
     assert is_global_type("Person") and not is_global_type("PullRequest")
 
 

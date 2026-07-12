@@ -49,6 +49,18 @@ work*: it links to the pull requests, files, and issues it touched
 nodes. From Claude Code (other coding agents later).
 _Avoid_: conversation, transcript (the raw form), chat, session log.
 
+## Subject
+
+**Subject**:
+The central artifact entity an episode is extracted from — the Pull request or Issue every
+other entity in that episode's body relates to (its author, reviewers, files, labels,
+linked issues, repo). One Subject per episode. It is what edges hang off; distinct from a
+Repo (which is the *target* of `IN_REPO`, not the episode's Subject — hence Repo, not the
+Subject, keeps the "anchor node" wording). The LLM extractor materializes the Subject node
+unreliably, so relic writes it — and the structural edges the extractor drops —
+deterministically from the body, behind the Memory seam.
+_Avoid_: anchor (reserved for Repo), root, head, principal.
+
 ## Entities
 
 **Person**:
@@ -57,11 +69,6 @@ participant, attendee. One node per human across every source, joined by explici
 per-source handles (`github_login`, `slack_id`, `linear_id`, `email`) first and
 name similarity second.
 _Avoid_: user, account, member, contributor, author (as a type).
-
-**Label**:
-A tag applied to artifacts from a reused vocabulary. A node, so the same label
-connects every artifact it tags (`HAS_LABEL`).
-_Avoid_: tag, topic, category.
 
 **File**:
 A repository-relative path touched by a pull request. A node, so ownership ("who

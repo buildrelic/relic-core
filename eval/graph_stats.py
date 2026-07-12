@@ -15,6 +15,8 @@ Metrics:
   - structure        entities by type, edges by relation, episode count
   - dedup_forking    Person names that resolve to more than one node (support splits)
   - citation_integrity  share of PR/issue episodes whose body yields a citation URL
+  - subject_health   does each episode's Subject (PR/Issue) node materialize and do its
+                     edges attach to it, vs collapse onto Repo (REL-99 / ADR-0002)
   - routing_probe    for --area, the people who reviewed/authored work touching it,
                      ranked by support: the closest proxy for review-routing skill quality
 
@@ -133,6 +135,149 @@ async def citation_integrity(memory: GraphitiMemory, group_id: str) -> dict[str,
     }
 
 
+# Which Subject node each captured source_type should produce (see CONTEXT.md "Subject").
+_SUBJECT_OF: dict[str, str] = {"pull_request": "PullRequest", "issue": "Issue"}
+
+# For each body-derived edge, the endpoint that should be the *Subject* and the labels it
+# may carry. "On repo" means that endpoint collapsed onto Repo instead. Signatures mirror
+# EDGE_TYPE_MAP in relic.graph.schema.
+_SUBJECT_EDGES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "AUTHORED": ("target", ("PullRequest",)),
+    "REVIEWED": ("target", ("PullRequest",)),
+    "REQUESTED_REVIEW": ("target", ("PullRequest",)),
+    "TOUCHES_PATH": ("source", ("PullRequest",)),
+    "CLOSES": ("source", ("PullRequest",)),
+    "ASSIGNED_TO": ("source", ("Issue",)),
+    "PARENT_OF": ("source", ("Issue",)),
+    "IN_REPO": ("source", ("PullRequest",)),
+}
+
+
+def _safe_json(content: Any) -> dict[str, Any] | None:
+    """Parse an episode body to a dict, or None if it is not JSON-object text."""
+    if not isinstance(content, str):
+        return None
+    try:
+        body = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def subject_health(memory: GraphitiMemory, group_id: str) -> dict[str, Any]:
+    """Does the episode's Subject node materialize, and do its edges attach to it (REL-99)?
+
+    The failure this catches: the LLM often treats the PR/Issue as the episode itself, never
+    minting the Subject entity, so its edges collapse onto the ``Repo`` node or are dropped.
+    The deterministic write (ADR-0002) should drive presence to ~1.0. Three read-only views:
+
+    - **presence**  share of episodes of a source_type that MENTION their Subject node (the
+      PR/Issue). The headline.
+    - **anchoring**  per body-derived edge, the share whose Subject endpoint is the expected
+      type (``on_subject``) vs collapsed onto ``Repo`` (``on_repo``) vs elsewhere.
+    - **coverage**  edges that *should* exist from the body (files -> TOUCHES_PATH,
+      linked_issues -> CLOSES) vs how many actually landed.
+    """
+    episodes = await _query(
+        memory,
+        "MATCH (e:Episodic) WHERE e.group_id = $g RETURN e.uuid AS id, e.content AS content",
+        g=group_id,
+    )
+    mentions = await _query(
+        memory,
+        """
+        MATCH (e:Episodic)-[:MENTIONS]->(a:Entity)
+        WHERE e.group_id = $g AND (a:PullRequest OR a:Issue)
+        RETURN e.uuid AS id, [x IN labels(a) WHERE x IN ['PullRequest', 'Issue']][0] AS subject
+        """,
+        g=group_id,
+    )
+    subjects = {
+        "PullRequest": {m["id"] for m in mentions if m["subject"] == "PullRequest"},
+        "Issue": {m["id"] for m in mentions if m["subject"] == "Issue"},
+    }
+
+    by_type: dict[str, dict[str, int]] = {}
+    expected: dict[str, int] = {"TOUCHES_PATH": 0, "CLOSES": 0}
+    for ep in episodes:
+        body = _safe_json(ep.get("content"))
+        source_type = body.get("source_type", "?") if body else "?"
+        bucket = by_type.setdefault(source_type, {"episodes": 0, "with_subject": 0})
+        bucket["episodes"] += 1
+        subject_label = _SUBJECT_OF.get(source_type)
+        if subject_label and ep["id"] in subjects[subject_label]:
+            bucket["with_subject"] += 1
+        if body:
+            expected["TOUCHES_PATH"] += len(body.get("files") or [])
+            expected["CLOSES"] += len(body.get("linked_issues") or [])
+
+    presence = {
+        st: {
+            "episodes": b["episodes"],
+            "with_subject": b["with_subject"],
+            "subject_presence": (
+                round(b["with_subject"] / b["episodes"], 3) if b["episodes"] else 0.0
+            ),
+        }
+        for st, b in by_type.items()
+        if st in _SUBJECT_OF
+    }
+
+    edge_rows = await _query(
+        memory,
+        """
+        MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) WHERE r.group_id = $g
+        RETURN r.name AS rel,
+               [x IN labels(s) WHERE x <> 'Entity'][0] AS src,
+               [x IN labels(t) WHERE x <> 'Entity'][0] AS tgt,
+               count(*) AS n
+        """,
+        g=group_id,
+    )
+    anchoring: dict[str, dict[str, Any]] = {}
+    actual: dict[str, int] = {}
+    for r in edge_rows:
+        rel = r["rel"]
+        actual[rel] = actual.get(rel, 0) + r["n"]
+        spec = _SUBJECT_EDGES.get(rel)
+        if spec is None:
+            continue
+        role, expected_labels = spec
+        endpoint = r["src"] if role == "source" else r["tgt"]
+        stat = anchoring.setdefault(
+            rel,
+            {
+                "total": 0,
+                "on_subject": 0,
+                "on_repo": 0,
+                "other": 0,
+                "expected_endpoint": f"{role} in [{', '.join(expected_labels)}]",
+            },
+        )
+        stat["total"] += r["n"]
+        if endpoint in expected_labels:
+            stat["on_subject"] += r["n"]
+        elif endpoint == "Repo":
+            stat["on_repo"] += r["n"]
+        else:
+            stat["other"] += r["n"]
+    for stat in anchoring.values():
+        stat["anchored_rate"] = (
+            round(stat["on_subject"] / stat["total"], 3) if stat["total"] else 0.0
+        )
+
+    coverage = {
+        rel: {
+            "expected_from_body": expected[rel],
+            "actual_edges": actual.get(rel, 0),
+            "coverage": (round(actual.get(rel, 0) / expected[rel], 3) if expected[rel] else None),
+        }
+        for rel in ("TOUCHES_PATH", "CLOSES")
+    }
+
+    return {"subject_presence": presence, "edge_anchoring": anchoring, "coverage": coverage}
+
+
 async def routing_probe(memory: GraphitiMemory, group_id: str, area: str) -> dict[str, Any]:
     """People who reviewed/authored work touching ``area``, ranked by support.
 
@@ -176,6 +321,7 @@ async def run(repo: str, area: str | None) -> dict[str, Any]:
             "structure": await structure(memory, group_id),
             "dedup_forking": await dedup_forking(memory, group_id),
             "citation_integrity": await citation_integrity(memory, group_id),
+            "subject_health": await subject_health(memory, group_id),
         }
         if area:
             report["routing_probe"] = await routing_probe(memory, group_id, area)

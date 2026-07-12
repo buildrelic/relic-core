@@ -60,7 +60,7 @@ async def test_audit_excludes_the_global_tier_from_the_node_scan() -> None:
     stub = _AuditStub([], [])
     await audit_zone_integrity(stub)
     node_call = next(c for c in stub.calls if "labels(n)" in c[0])
-    assert set(node_call[1]["global_labels"]) == {"Person", "Repo", "Label", "File"}
+    assert set(node_call[1]["global_labels"]) == {"Person", "Repo", "File"}
 
 
 async def test_audit_flags_truncation_at_the_row_limit() -> None:

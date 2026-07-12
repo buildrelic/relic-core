@@ -244,3 +244,160 @@ async def test_supersede_absent_episode_is_a_noop() -> None:
 
     assert removed == 0
     assert graphiti.removed == []
+
+
+# --- deterministic Subject write (REL-99 / ADR-0002), at the adapter level -----
+#
+# add_episode runs the LLM path then writes the Subject + dropped edges from the body.
+# These drive a recording fake graphiti (no FalkorDB, no LLM) and assert the writes the
+# adapter issues: node upserts, edges anchored to the Subject and attributed to the
+# episode, MENTIONS, lookup-or-create reuse, and best-effort failure.
+
+import json  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+
+from graphiti_core.driver.driver import GraphProvider  # noqa: E402
+
+from relic.contracts import EpisodeSpec  # noqa: E402
+
+
+def _pr_spec() -> EpisodeSpec:
+    body = json.dumps(
+        {
+            "source_type": "pull_request",
+            "repo": {"full_name": "demo/repo", "url": "https://github.com/demo/repo"},
+            "pull_request": {
+                "number": 7,
+                "title": "add auth login",
+                "url": "https://github.com/demo/repo/pull/7",
+                "state": "merged",
+                "author": {"login": "alice"},
+            },
+            "requested_reviewers": [{"name": "bob", "kind": "user"}],
+            "linked_issues": [{"identifier": "demo/repo#3", "relation": "closes"}],
+        }
+    )
+    return EpisodeSpec(
+        name="PR demo/repo#7",
+        body=body,
+        source_description="github pull request",
+        reference_time=datetime(2025, 1, 1, tzinfo=UTC),
+        group_id="demo__repo",
+    )
+
+
+class _FakeEmbedder:
+    async def create(self, input_data):  # noqa: ANN001, ANN202
+        return [0.0, 0.0, 0.0]
+
+
+class _RecordingDriver:
+    """Records every execute_query and answers the lookups the Subject write issues.
+
+    - episode-uuid lookup -> a fixed uuid ("ep-1")
+    - node-existence lookup ('$label IN labels(n)') -> reuse for ``existing`` names, else miss
+    - everything else (node/edge/MENTIONS saves, entity_edges update) -> recorded, empty
+    """
+
+    provider = GraphProvider.FALKORDB
+    graph_operations_interface = None
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.existing = existing or set()
+
+    async def execute_query(self, query, **kwargs):  # noqa: ANN001, ANN202
+        self.calls.append((query, kwargs))
+        if "ORDER BY e.created_at" in query:  # episode-uuid lookup
+            return [{"uuid": "ep-1"}], None, None
+        if "$label IN labels(n)" in query:  # node lookup-or-create
+            name = kwargs.get("name")
+            if name in self.existing:
+                return [{"uuid": f"existing-{name}"}], None, None
+            return [], None, None
+        return [], None, None
+
+
+class _SubjectWriteGraphiti:
+    """A raw-graphiti stand-in with the driver + embedder the Subject write needs."""
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self.driver = _RecordingDriver(existing)
+        self.embedder = _FakeEmbedder()
+        self.added: list[str] = []
+
+    async def add_episode(self, *, name: str, **_kwargs) -> None:
+        self.added.append(name)
+
+
+def _entity_saves(driver: _RecordingDriver) -> list[dict]:
+    return [k["entity_data"] for _q, k in driver.calls if "entity_data" in k]
+
+
+def _edge_saves(driver: _RecordingDriver) -> list[dict]:
+    return [k["edge_data"] for _q, k in driver.calls if "edge_data" in k]
+
+
+async def test_add_episode_writes_subject_and_dropped_edges() -> None:
+    graphiti = _SubjectWriteGraphiti()
+
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    assert graphiti.added == ["PR demo/repo#7"]  # the LLM path still ran
+    node_names = {n["name"] for n in _entity_saves(graphiti.driver)}
+    assert "demo/repo#7" in node_names  # the Subject node was created
+    assert "demo/repo" in node_names  # the Repo endpoint was created
+
+    edges = {e["name"]: e for e in _edge_saves(graphiti.driver)}
+    assert {"IN_REPO", "CLOSES", "REQUESTED_REVIEW"} <= set(edges)
+    # every deterministic edge is attributed to the episode (for recall + supersession)
+    assert all(e["episodes"] == ["ep-1"] for e in edges.values())
+    # CLOSES carries its relation attribute
+    assert edges["CLOSES"]["relation"] == "closes"
+    # a MENTIONS episode -> Subject is written so subject_presence counts it
+    mentions = [k for _q, k in graphiti.driver.calls if "entity_uuid" in k]
+    assert mentions and mentions[0]["episode_uuid"] == "ep-1"
+
+
+async def test_subject_edges_anchor_to_the_subject_not_repo() -> None:
+    graphiti = _SubjectWriteGraphiti()
+
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    edges = {e["name"]: e for e in _edge_saves(graphiti.driver)}
+    subject_uuid = edges["IN_REPO"]["source_uuid"]  # IN_REPO is Subject -> Repo
+    # CLOSES is also Subject -> Issue, so it shares the PR source (anchored to the PR)
+    assert edges["CLOSES"]["source_uuid"] == subject_uuid
+    # REQUESTED_REVIEW is Person -> PR, so the PR is the *target*
+    assert edges["REQUESTED_REVIEW"]["target_uuid"] == subject_uuid
+
+
+async def test_existing_nodes_are_reused_not_clobbered() -> None:
+    # When the LLM already extracted the PR and Repo nodes, reuse their uuids for the
+    # edges and do not re-save the nodes (no clobber of the LLM's attributes/summary).
+    graphiti = _SubjectWriteGraphiti(existing={"demo/repo#7", "demo/repo"})
+
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    node_names = {n["name"] for n in _entity_saves(graphiti.driver)}
+    assert "demo/repo#7" not in node_names  # reused, not re-saved
+    assert "demo/repo" not in node_names
+    in_repo = next(e for e in _edge_saves(graphiti.driver) if e["name"] == "IN_REPO")
+    assert in_repo["source_uuid"] == "existing-demo/repo#7"
+    assert in_repo["target_uuid"] == "existing-demo/repo"
+
+
+async def test_subject_write_failure_is_swallowed() -> None:
+    class _ExplodingDriver(_RecordingDriver):
+        async def execute_query(self, query, **kwargs):  # noqa: ANN001, ANN202
+            if "ORDER BY e.created_at" in query:
+                raise RuntimeError("driver down")
+            return await super().execute_query(query, **kwargs)
+
+    graphiti = _SubjectWriteGraphiti()
+    graphiti.driver = _ExplodingDriver()
+
+    # The LLM extraction already landed, so a Subject-write failure must not raise.
+    await GraphitiMemory(graphiti).add_episode(_pr_spec())  # type: ignore[arg-type]
+
+    assert graphiti.added == ["PR demo/repo#7"]

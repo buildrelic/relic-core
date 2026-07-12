@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from graphiti_core.llm_client.client import LLMClient
 
     from relic.contracts import EpisodeSpec
+    from relic.graph.subjects import PlannedNode
 
     # The provider-client triple _build_graphiti hands to Graphiti.
     _ClientTriple = tuple[LLMClient, EmbedderClient, CrossEncoderClient]
@@ -60,7 +61,7 @@ class MemoryEntity:
     """A node: the resolved endpoint of an edge, or a looked-up entity.
 
     ``group_id`` is the node's Zone (ADR-0005); ``None`` for a global-tier node
-    (Person/Repo/Label/File), which is Zone-exempt. Zone enforcement keys on it.
+    (Person/Repo/File), which is Zone-exempt. Zone enforcement keys on it.
     """
 
     uuid: str
@@ -195,7 +196,7 @@ class ScopedMemory:
     sees nothing (fail closed). Out-of-Zone nodes read as **nonexistent** -- no error, no
     redaction marker (ADR-0005 Decision 5), so the requester never learns they exist.
 
-    Global-tier nodes (Person/Repo/Label/File) are Zone-exempt: a tenant member may see
+    Global-tier nodes (Person/Repo/File) are Zone-exempt: a tenant member may see
     *that* a person or repo exists; only their Zoned activity is gated (ADR-0005 Decision
     6). Construct this from the principal's grants at the composition root and hand serve
     nothing else; the unscoped ``GraphitiMemory`` stays for ingest/eval/admin only.
@@ -387,6 +388,7 @@ class GraphitiMemory:
             ),
             label=spec.name,
         )
+        await self._write_subject_best_effort(spec, zone)
 
     async def add_episode_bulk(self, specs: list[EpisodeSpec]) -> None:
         """Add one batch of episodes (all sharing a group_id) via Graphiti's bulk path."""
@@ -433,6 +435,8 @@ class GraphitiMemory:
             ),
             label=f"bulk[{group_id}]",
         )
+        for spec in specs:
+            await self._write_subject_best_effort(spec, group_id)
 
     async def build_indices(self) -> None:
         await self._graphiti.build_indices_and_constraints()
@@ -485,6 +489,138 @@ class GraphitiMemory:
                         )
             await self._graphiti.remove_episode(uuid)
         return len(found)
+
+    # -- deterministic Subject write (ADR-0002) --
+
+    async def _write_subject_best_effort(self, spec: EpisodeSpec, zone: str) -> None:
+        """Deterministically write the episode's Subject node + dropped edges (ADR-0002).
+
+        Best-effort: the LLM extraction already landed, so a failure here is logged and
+        swallowed rather than discarding the episode. Runs for both the sequential and bulk
+        write paths so every ingested PR/Issue gets its Subject regardless of how it landed.
+
+        ``zone`` is the normalized Zone the episode was persisted under
+        (``require_episode_zone``), so the Subject writes land in the same Zone.
+        """
+        try:
+            await self._write_subject(spec, zone)
+        except Exception as exc:  # noqa: BLE001 - reliability enhancement; never fail the episode
+            reason = f"{type(exc).__name__}: {exc}".splitlines()[0]
+            log.warning("deterministic subject write failed for %s: %s", spec.name, reason)
+            log.debug("subject write traceback for %s", spec.name, exc_info=exc)
+
+    async def _write_subject(self, spec: EpisodeSpec, zone: str) -> None:
+        """Upsert the Subject (PR/Issue) node + the dropped structural edges from the body.
+
+        The plan (which nodes/edges to write) is computed by the pure ``graph.subjects``
+        module; this method is the Graphiti translation: deterministic uuids so re-ingest
+        MERGEs in place, name/fact embeddings so the writes are first-class in search, and
+        ``episodes``/``MENTIONS``/``entity_edges`` wiring so recall cites them and REL-118
+        supersession cleans them up when a body changes.
+        """
+        from relic.graph.subjects import det_uuid, plan_subject_writes
+
+        plan = plan_subject_writes(spec)
+        if plan is None:
+            return
+
+        from graphiti_core.edges import EntityEdge, EpisodicEdge
+
+        created = spec.reference_time
+        episode_uuid = await self._episode_uuid(spec.name, zone)
+        subject_uuid = await self._upsert_node(plan.subject, zone, created)
+
+        new_edge_uuids: list[str] = []
+        for planned in plan.edges:
+            target_uuid = await self._upsert_node(planned.target, zone, created)
+            src, tgt = (
+                (subject_uuid, target_uuid)
+                if planned.direction == "out"
+                else (target_uuid, subject_uuid)
+            )
+            edge = EntityEdge(
+                uuid=det_uuid(zone, planned.relation, src, tgt),
+                source_node_uuid=src,
+                target_node_uuid=tgt,
+                name=planned.relation,
+                fact=planned.fact,
+                group_id=zone,
+                created_at=created,
+                episodes=[episode_uuid] if episode_uuid else [],
+                attributes=dict(planned.attributes),
+            )
+            await self._with_backoff(
+                lambda e=edge: e.generate_embedding(self._graphiti.embedder),
+                label=f"subject-edge[{planned.relation}]",
+            )
+            await edge.save(self._graphiti.driver)
+            new_edge_uuids.append(edge.uuid)
+
+        if episode_uuid is None:
+            return
+        # MENTIONS episode -> Subject, so subject_presence counts it and provenance resolves.
+        await EpisodicEdge(
+            uuid=det_uuid(zone, "MENTIONS", episode_uuid, subject_uuid),
+            source_node_uuid=episode_uuid,
+            target_node_uuid=subject_uuid,
+            group_id=zone,
+            created_at=created,
+        ).save(self._graphiti.driver)
+        # Register the deterministic edges on the Episodic node so REL-118 supersede_episode
+        # removes them when this episode is superseded (it reads e.entity_edges).
+        if new_edge_uuids:
+            await self._graphiti.driver.execute_query(
+                "MATCH (e:Episodic {uuid: $uuid}) "
+                "SET e.entity_edges = coalesce(e.entity_edges, []) + $new",
+                uuid=episode_uuid,
+                new=new_edge_uuids,
+            )
+
+    async def _episode_uuid(self, name: str, group_id: str) -> str | None:
+        """The uuid of the just-added Episodic for ``(name, group_id)``, or None if absent."""
+        rows, _, _ = await self._graphiti.driver.execute_query(
+            "MATCH (e:Episodic {name: $name, group_id: $group_id}) "
+            "RETURN e.uuid AS uuid ORDER BY e.created_at DESC LIMIT 1",
+            name=name,
+            group_id=group_id,
+            routing_="r",
+        )
+        return rows[0]["uuid"] if rows else None
+
+    async def _upsert_node(self, planned: PlannedNode, group_id: str, created: datetime) -> str:
+        """Return the node uuid for ``planned``: reuse an existing same-(group_id, label,
+        name) Entity (e.g. one the LLM extracted) without clobbering it, else create and
+        save a fresh node with a deterministic uuid and a name embedding.
+        """
+        from relic.graph.subjects import det_uuid
+
+        existing, _, _ = await self._graphiti.driver.execute_query(
+            "MATCH (n:Entity) WHERE n.group_id = $g AND n.name = $name AND $label IN labels(n) "
+            "RETURN n.uuid AS uuid LIMIT 1",
+            g=group_id,
+            name=planned.name,
+            label=planned.label,
+            routing_="r",
+        )
+        if existing:
+            return existing[0]["uuid"]
+
+        from graphiti_core.nodes import EntityNode
+
+        node = EntityNode(
+            uuid=det_uuid(group_id, planned.label, planned.name),
+            name=planned.name,
+            group_id=group_id,
+            labels=[planned.label],
+            attributes=dict(planned.attributes),
+            created_at=created,
+        )
+        await self._with_backoff(
+            lambda: node.generate_name_embedding(self._graphiti.embedder),
+            label=f"subject-node[{planned.label}]",
+        )
+        await node.save(self._graphiti.driver)
+        return node.uuid
 
     async def _with_backoff(self, make_awaitable: Callable[[], Awaitable], *, label: str) -> object:
         """Await a graphiti write, retrying OpenAI/Gemini rate limits with exponential backoff.

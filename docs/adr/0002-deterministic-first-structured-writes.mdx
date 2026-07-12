@@ -1,0 +1,109 @@
+---
+title: "Deterministic-first writes for structured bodies"
+description: "The LLM extractor drops the PR/Issue Subject node ~1 in 3 ingests. Write the Subject and the structural edges the LLM reliably drops deterministically from the parsed body, behind the Memory seam, instead of trusting extraction for exact data."
+icon: "anchor"
+---
+
+<Info>
+**Status:** accepted (2026-06-27). Implements
+[REL-99](https://linear.app/buildrelic/issue/REL-99). Builds on
+[ADR-0001](/adr/0001-engram-graph-ontology) (the ontology) and lands behind
+[ADR-0003](/adr/0003-memory-seam) (the Memory seam). First concrete use of REL-94's
+"deterministic escape hatch."
+</Info>
+
+## Context
+
+relic ingests each PR/Issue as an episode and lets Graphiti's LLM extractor pull the
+typed nodes/edges the [REL-93 ontology](/adr/0001-engram-graph-ontology) defines. The
+episode's central entity — the **Subject** (the PullRequest or Issue every other body
+entity relates to) — is the spine of that episode's subgraph.
+
+Measured during REL-94 (one realistic merged-PR body → `add_episode` → Cypher readback,
+3× against FalkorDB with `gpt-4o-mini`):
+
+|  | Run 1 | Run 2 | Run 3 |
+| -- | -- | -- | -- |
+| `PullRequest` Subject node | ❌ | ❌ | ✅ |
+| `IN_REPO` edge | ❌ | ❌ | ✅ |
+| `TOUCHES_PATH` edge | ❌ | ✅ | ✅ |
+| Person / File / Label / Repo nodes | ✅ | ✅ | ✅ |
+
+The Subject node materializes ~1 in 3 runs. When it is absent the extractor treats the
+PR *as* the episode and **mis-anchors** its edges onto the `Repo` node
+(`alice AUTHORED demo/repo`); PR-targeted edges (`CLOSES`, `REQUESTED_REVIEW`, the linked
+`Issue`) are dropped because their endpoint never resolves. Yet every one of these values
+is present **exactly** in the episode body. This is the case REL-94 flagged for the
+deterministic escape hatch: exact data the body holds perfectly should not depend on an
+LLM coin-flip.
+
+## Decision
+
+Adopt **deterministic-first writes for structured bodies**: for data the body holds
+exactly, write it ourselves rather than trusting extraction.
+
+Concretely, behind the Memory seam (inside `GraphitiMemory`, the only Graphiti importer),
+after the LLM `add_episode`/`add_episode_bulk` lands, deterministically upsert from the
+parsed body:
+
+- the **Subject** node (`PullRequest` / `Issue`), and
+- the structural edges the LLM **reliably drops**: `IN_REPO`, `CLOSES` (+ the linked
+  `Issue` node), `REQUESTED_REVIEW` (and `PARENT_OF` for issues).
+
+The parse is a pure, Graphiti-free module (`graph/subjects.py`) that returns a plan; the
+adapter is the Graphiti translation.
+
+### Shape
+
+- **Mechanism: direct `EntityNode.save` / `EntityEdge.save`** with deterministic `uuid5`
+  (keyed on `group_id` + the entity's stable identity, and on `(group_id, rel, src, tgt)`
+  for edges) and manually-generated name/fact embeddings, so the writes are idempotent on
+  re-ingest and first-class in vector search.
+- **Cheap dedup: lookup-or-create per node.** If a same-`(group_id, label, name)` Entity
+  already exists (e.g. the Repo/Person the LLM extracts reliably), reuse its uuid as the
+  edge endpoint and do **not** re-save it (no clobber). Only create+save a node when
+  absent — the common Subject case.
+- **Best-effort.** The deterministic write runs after extraction and is wrapped so a
+  failure is logged, never discarding the episode the LLM already landed.
+- **Attribution.** Edges carry the episode uuid in `episodes`, the episode gets a
+  `MENTIONS` edge to the Subject, and the new edge uuids are appended to the episode's
+  `entity_edges` so [REL-118](https://linear.app/buildrelic/issue/REL-118) supersession
+  removes them when a body changes.
+- **Scope: the dropped edges only.** `AUTHORED`/`REVIEWED`/`HAS_LABEL`/`TOUCHES_PATH` —
+  which the LLM *does* make — stay with the LLM. Writing them too would duplicate the
+  extractor's edges; the dropped edges are additive. Their residual drift is **measured**
+  (the new `subject_health` metric in `eval/graph_stats.py`) before any are moved
+  deterministically — one field at a time, each justified by a number.
+
+## Rejected alternatives
+
+- **Trust the LLM (do nothing).** The measured ~1/3 Subject-presence rate makes the
+  anchor — and therefore PR-targeted recall — unreliable. Rejected.
+- **`graphiti.add_triplet`.** Framework-native and dedups our nodes against the LLM's
+  naming variants, but per edge it runs ~2 hybrid searches + 1 LLM dedup call
+  (`resolve_extracted_edge`), roughly doubling ingest LLM cost and making the write
+  partly nondeterministic. Rejected for direct save: the body data is exact, so we do not
+  need LLM judgement to write it.
+- **Raw Cypher `MERGE` without embeddings.** Cheapest, but the deterministic nodes/edges
+  would be invisible to Graphiti's vector search (Cypher-walk/exact only). Rejected —
+  generating embeddings is cheap (no LLM) and keeps the writes first-class.
+- **Re-anchor the LLM's drifted edges** (rewrite `alice AUTHORED demo/repo` →
+  `… → PR#42`). Fuzzy and fragile (it guesses which Repo-anchored edge belongs to the
+  PR). Deferred behind measurement — once the Subject reliably exists, the metric shows
+  whether the LLM still drifts before we build any rewrite.
+- **Write the whole structural graph deterministically.** Over-scoped and risks duplicate
+  edges with the LLM's. Rejected for "move one field at a time, measured."
+
+## Consequences
+
+- The Subject node and its dropped edges land on ~100% of ingests; `subject_presence`
+  (the new `subject_health` metric) is the gate, run before/after on a real repo.
+- The **writer half of the seam grows** as ADR-0003 anticipated: `MemoryWriter` gains the
+  deterministic Subject write; the load loop is unchanged.
+- A naming variance can still fork a reused Repo/Person node (exact-name dedup), visible
+  as `dedup_forking.fork_rate`. Accepted, measured.
+- Re-ingest and REL-118 supersession stay correct via deterministic uuids + episode
+  attribution.
+- Establishes the pattern other connectors and the `AUTHORED`/`TOUCHES_PATH` follow-ons
+  build on: measure the LLM's fumble, then move exact data deterministically behind the
+  seam.

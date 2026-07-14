@@ -1,10 +1,10 @@
 """Doctor: a read-only health check of a relic setup.
 
 Reports what relic can see without changing anything: where the registry lives
-and how many skills it holds by status, where the engram graph lives and whether
-it is built, and which API keys are configured. It creates nothing (it opens the
-registry only when the file already exists) and never raises: a broken setup
-should still produce a report you can read.
+and how many skills it holds by status, whether the engram store is reachable
+and its document mirror configured, and which API keys are configured. It
+creates nothing (it opens the registry only when the file already exists) and
+never raises: a broken setup should still produce a report you can read.
 """
 
 from __future__ import annotations
@@ -12,17 +12,19 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 from relic.config import Settings
-from relic.graph import falkordb_reachable as _falkordb_reachable
+from relic.engram import firestore_configured as _firestore_configured
+from relic.engram import postgres_reachable as _postgres_reachable
 
 # (display name, Settings attribute, what the key unlocks)
 _KEYS: list[tuple[str, str, str]] = [
-    ("openai", "openai_api_key", "graph ingest, recall"),
     ("anthropic", "anthropic_api_key", "skill compiler"),
-    ("gemini", "gemini_api_key", "graph extraction (gemini provider, hybrid)"),
     ("github", "github_token", "github ingest"),
     ("linear", "linear_api_key", "linear ingest"),
+    ("granola", "granola_api_key", "granola ingest"),
+    ("notion", "notion_api_key", "notion ingest"),
 ]
 
 
@@ -41,11 +43,12 @@ class RegistryStatus:
 
 
 @dataclass(slots=True)
-class GraphStatus:
-    """Where the engram graph lives and whether it is built on disk."""
+class EngramStatus:
+    """Whether the engram store answers, and whether documents mirror to Firestore."""
 
-    path: str
-    exists: bool
+    dsn: str  # redacted: no password
+    reachable: bool
+    firestore: bool
 
 
 @dataclass(slots=True)
@@ -62,26 +65,28 @@ class DoctorReport:
     """The full read-only picture of a relic setup."""
 
     registry: RegistryStatus
-    graph: GraphStatus
+    engram: EngramStatus
     keys: list[KeyStatus]
 
-    @property
-    def openai_configured(self) -> bool:
-        return any(key.name == "openai" and key.configured for key in self.keys)
+
+def _redact_dsn(dsn: str) -> str:
+    """The DSN with any password dropped, safe to print."""
+    parsed = urlparse(dsn)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    db = (parsed.path or "").lstrip("/") or "relic"
+    user = f"{parsed.username}@" if parsed.username else ""
+    return f"postgresql://{user}{host}:{port}/{db}"
 
 
 def diagnose(settings: Settings) -> DoctorReport:
     """Inspect the setup described by ``settings`` and return a report. Never raises."""
-    host = settings.falkordb_host
-    port = settings.falkordb_port
-    db = settings.falkordb_database
-    path = f"falkordb://{host}:{port}/{db}"
-    exists = _falkordb_reachable(host, port)
     return DoctorReport(
         registry=_registry_status(settings.registry_db_path),
-        graph=GraphStatus(
-            path=path,
-            exists=exists,
+        engram=EngramStatus(
+            dsn=_redact_dsn(settings.database_url),
+            reachable=_postgres_reachable(settings.database_url),
+            firestore=_firestore_configured(settings),
         ),
         keys=[
             KeyStatus(name=name, purpose=purpose, configured=getattr(settings, attr) is not None)
@@ -128,13 +133,15 @@ def format_report(report: DoctorReport) -> str:
         lines.append(f"  {report.registry.total} {noun}: {breakdown}")
     lines.append("")
 
-    lines.append(f"graph: {report.graph.path}")
-    if not report.graph.exists:
-        lines.append("  not built yet. run `relic ingest --repo owner/name` to build it.")
-    elif report.openai_configured:
-        lines.append("  present. recall and ingest ready.")
+    lines.append(f"engram: {report.engram.dsn}")
+    if not report.engram.reachable:
+        lines.append("  not reachable. start it with `just up`.")
     else:
-        lines.append("  present, but OPENAI_API_KEY is missing: recall and ingest need it.")
+        lines.append("  reachable. ingest and recall ready.")
+    if report.engram.firestore:
+        lines.append("  firestore: configured (documents mirror to the web workspace).")
+    else:
+        lines.append("  firestore: not configured (documents stay local-only).")
     lines.append("")
 
     lines.append("keys:")

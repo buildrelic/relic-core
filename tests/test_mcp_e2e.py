@@ -52,25 +52,26 @@ async def test_inmemory_client_full_protocol(tmp_path, make_skill: Callable[...,
 
 
 async def test_real_serve_subprocess_speaks_mcp(
-    tmp_path, make_skill: Callable[..., SkillIR], monkeypatch
+    tmp_path, make_skill: Callable[..., SkillIR]
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     db = tmp_path / "registry.db"
     conn = connect(db)
     upsert_skill(conn, make_skill("verified-skill", status="verified"))
     conn.close()
 
-    # No OPENAI_API_KEY: recall is disabled, which exercises serve's stderr diagnostic.
-    # If that diagnostic went to stdout it would corrupt the MCP stream and this would fail.
-    # To prevent any imported AI libraries (like graphiti_core) from searching for and loading the
-    # repo's root .env, we mock out dotenv.load_dotenv before starting the app.
+    # An unreachable engram store (a dead-end DATABASE_URL) disables recall, which
+    # exercises serve's stderr diagnostic. If that diagnostic went to stdout it would
+    # corrupt the MCP stream and this would fail. Skills are served regardless.
     cmd = (
-        "import dotenv; dotenv.load_dotenv = lambda *args, **kwargs: False; "
         "import sys; sys.argv = ['relic', 'serve']; "
         "from relic.cli import app; app()"
     )
-    env = {**os.environ, "REGISTRY_DB_PATH": str(db)}
-    env.pop("OPENAI_API_KEY", None)
+    env = {
+        **os.environ,
+        "REGISTRY_DB_PATH": str(db),
+        # a closed port: connect fails fast, recall degrades, skills still serve
+        "DATABASE_URL": "postgresql://relic:relic@127.0.0.1:1/relic",
+    }
 
     transport = StdioTransport(command=sys.executable, args=["-c", cmd], env=env, cwd=str(tmp_path))
     async with Client(transport, init_timeout=30) as client:

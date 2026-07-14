@@ -1,6 +1,6 @@
 # Relic dev tasks. Run `just` with no arguments to list them.
 #
-# uv runs Python on the host, Docker runs FalkorDB only. `just setup` takes a
+# uv runs Python on the host, Docker runs Postgres only. `just setup` takes a
 # fresh clone to a working, verifiable environment. Daily work runs through the
 # short recipes below.
 
@@ -10,11 +10,11 @@ set dotenv-load
 default:
     @just --list
 
-# Full local setup: deps, .env, FalkorDB, pre-commit hook, then doctor. Safe to re-run.
+# Full local setup: deps, .env, Postgres, pre-commit hook, then doctor. Safe to re-run.
 setup: env && doctor
     uv python install 3.12
     uv sync --dev
-    docker compose up -d --wait falkordb
+    docker compose up -d --wait postgres
     -uv run pre-commit install
 
 # Create .env from .env.example if it is missing. Never clobbers an existing .env.
@@ -28,19 +28,19 @@ env:
       echo "created .env from .env.example. fill in keys, then run just doctor"
     fi
 
-# Start FalkorDB and wait until it reports healthy.
+# Start Postgres and wait until it reports healthy.
 up:
-    docker compose up -d --wait falkordb
+    docker compose up -d --wait postgres
 
-# Stop FalkorDB. The graph volume is kept.
+# Stop Postgres. The data volume is kept.
 down:
     docker compose down
 
-# Tail FalkorDB logs. Ctrl-C to stop.
+# Tail Postgres logs. Ctrl-C to stop.
 logs:
-    docker compose logs -f falkordb
+    docker compose logs -f postgres
 
-# Report registry, graph, and key status. Reads only, changes nothing.
+# Report registry, engram, and key status. Reads only, changes nothing.
 doctor:
     uv run relic doctor
 
@@ -59,14 +59,14 @@ lint:
 types:
     uv run python -m pyright
 
-# Run the test suite. The e2e loop smoke is excluded (slow, spends OpenAI tokens);
+# Run the test suite. The e2e loop smoke is excluded (needs a live Postgres);
 # run it deliberately with `just loop-smoke`.
 test:
     uv run python -m pytest -m "not e2e"
 
-# End-to-end closed-loop smoke against a real FalkorDB: ingest a fixture repo,
+# End-to-end closed-loop smoke against a real Postgres: ingest a fixture repo,
 # daemon inject (cited recall) and capture (write-back + readback), tear down.
-# Needs OPENAI_API_KEY; uses a throwaway per-run graph, never touches shared ones.
+# No API keys needed; uses a throwaway per-run workspace, never touches shared ones.
 loop-smoke: up
     uv run python -m pytest -m e2e -rs tests/test_loop_smoke.py
 
@@ -86,12 +86,11 @@ ingest REPO LIMIT="":
 recall QUERY:
     uv run relic recall "{{QUERY}}"
 
-# repo_group_id slugs owner/name to owner__name, the per-repo graph key.
-# Destructive: wipe the FalkorDB volume (every repo's graph, not one). One repo: redis-cli GRAPH.DELETE astral-sh__uv.
-reset-graph:
+# Destructive: wipe the Postgres volume (every workspace's memories, not one).
+reset-db:
     docker compose down -v
-    docker compose up -d --wait falkordb
+    docker compose up -d --wait postgres
 
-# Destructive: remove local state under data/ (registry, raw artifacts) and tool caches. Keeps the FalkorDB volume.
+# Destructive: remove local state under data/ (registry, raw artifacts) and tool caches. Keeps the Postgres volume.
 clean:
     rm -rf data .ruff_cache .pytest_cache

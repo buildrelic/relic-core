@@ -39,9 +39,9 @@ def test_scope_for_cwd_resolved_and_fallback(tmp_path):
     d = tmp_path / "repo"
     d.mkdir()
     _git_repo(d, "git@github.com:owner/name.git")
-    # a resolved repo scopes both the engram database and the recall group to its slug
-    assert _scope_for_cwd(str(d), "default_db") == ("owner__name", "owner__name")
-    # an unresolved cwd fails closed to the daemon's concrete default for BOTH, so recall
-    # and capture agree on a group and recall never reads the whole graph unfiltered
-    assert _scope_for_cwd("", "default_db") == ("default_db", "default_db")
-    assert _scope_for_cwd("/no/such", "default_db") == ("default_db", "default_db")
+    # a resolved repo scopes recall and capture to its ingest-scope slug
+    assert _scope_for_cwd(str(d), "default_scope") == "owner__name"
+    # an unresolved cwd falls back to the daemon's concrete default, so recall and
+    # capture always agree on a scope (the store already binds reads to the workspace)
+    assert _scope_for_cwd("", "default_scope") == "default_scope"
+    assert _scope_for_cwd("/no/such", "default_scope") == "default_scope"

@@ -102,7 +102,7 @@ def test_no_participants_context_is_bare() -> None:
 def test_edited_page_moves_the_freshness_token() -> None:
     # REL-118 edit-reingest falls out naturally for notion: the page's last_edited_time
     # already rides in the body, so the loader's content fingerprint
-    # (relic.graph.load._content_token, sha256 of the body bytes) moves on any edit and
+    # (relic.engram.load._content_token, sha256 of the body bytes) moves on any edit and
     # the stale episode is superseded; an unchanged re-capture maps to identical bytes
     # and is skipped. Deliberately asserts on body bytes, not a named field, so the pin
     # holds across body-shape changes (conversation today, doc-shaped later).

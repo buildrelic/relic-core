@@ -1,8 +1,8 @@
 """Tests for `relic doctor`: the read-only setup health check.
 
 `diagnose` is exercised directly for its data, and the CLI command for its
-wiring. Settings are built with `_env_file=None` and the key env vars cleared so
-the report never depends on the developer's real .env or shell.
+wiring. Settings are built with explicit values so the report never depends on
+the developer's real .env or shell.
 """
 
 from collections.abc import Callable
@@ -21,11 +21,14 @@ from relic.registry.store import connect, upsert_skill
 runner = CliRunner()
 
 _KEY_ENV = (
-    "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
-    "GEMINI_API_KEY",
     "GITHUB_TOKEN",
     "LINEAR_API_KEY",
+    "GRANOLA_API_KEY",
+    "NOTION_API_KEY",
+    "FIREBASE_PROJECT_ID",
+    "FIREBASE_CLIENT_EMAIL",
+    "FIREBASE_PRIVATE_KEY",
 )
 
 
@@ -44,9 +47,7 @@ def clean_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
     base: dict[str, Any] = {
         "registry_db_path": str(tmp_path / "registry.db"),
-        "falkordb_host": "localhost",
-        "falkordb_port": 6379,
-        "falkordb_database": "relic",
+        "database_url": "postgresql://relic:relic@localhost:5432/relic",
     }
     base.update(overrides)
     return Settings(**base)
@@ -55,20 +56,20 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
 def test_diagnose_empty_setup(
     tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
+    monkeypatch.setattr("relic.doctor._postgres_reachable", lambda dsn: False)
     report = diagnose(_settings(tmp_path))
     assert report.registry.exists is False
     assert report.registry.total == 0
-    assert report.graph.exists is False
+    assert report.engram.reachable is False
+    assert report.engram.firestore is False
     assert {key.name for key in report.keys} == {
-        "openai",
         "anthropic",
-        "gemini",
         "github",
         "linear",
+        "granola",
+        "notion",
     }
     assert all(not key.configured for key in report.keys)
-    assert report.openai_configured is False
 
 
 def test_diagnose_counts_skills_by_status(
@@ -93,41 +94,56 @@ def test_diagnose_counts_skills_by_status(
 
 
 def test_diagnose_detects_configured_keys(tmp_path: Path, clean_env: None) -> None:
-    report = diagnose(_settings(tmp_path, openai_api_key="sk-test", github_token="ghp_test"))
+    report = diagnose(_settings(tmp_path, anthropic_api_key="sk-test", github_token="ghp_test"))
     by_name = {key.name: key for key in report.keys}
-    assert by_name["openai"].configured is True
+    assert by_name["anthropic"].configured is True
     assert by_name["github"].configured is True
-    assert by_name["anthropic"].configured is False
-    assert report.openai_configured is True
+    assert by_name["linear"].configured is False
 
 
-def test_graph_present_with_openai_reads_ready(
+def test_engram_dsn_is_redacted(tmp_path: Path, clean_env: None) -> None:
+    report = diagnose(
+        _settings(tmp_path, database_url="postgresql://relic:s3cret@db.example.com:5432/relic")
+    )
+    assert "s3cret" not in report.engram.dsn
+    assert "db.example.com" in report.engram.dsn
+
+
+def test_engram_reachable_reads_ready(
     tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
-    report = diagnose(_settings(tmp_path, openai_api_key="sk-test"))
-    assert report.graph.exists is True
-    assert "recall and ingest ready" in format_report(report)
-
-
-def test_graph_present_without_openai_flags_missing_key(
-    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: True)
+    monkeypatch.setattr("relic.doctor._postgres_reachable", lambda dsn: True)
     report = diagnose(_settings(tmp_path))
-    assert report.graph.exists is True
-    assert "OPENAI_API_KEY is missing" in format_report(report)
+    assert report.engram.reachable is True
+    assert "ingest and recall ready" in format_report(report)
+
+
+def test_firestore_configured_is_reported(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("relic.doctor._postgres_reachable", lambda dsn: True)
+    report = diagnose(
+        _settings(
+            tmp_path,
+            firebase_project_id="relic-test",
+            firebase_client_email="svc@relic-test.iam.gserviceaccount.com",
+            firebase_private_key="-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+        )
+    )
+    assert report.engram.firestore is True
+    assert "documents mirror to the web workspace" in format_report(report)
 
 
 def test_format_report_empty_setup_is_readable(
     tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
+    monkeypatch.setattr("relic.doctor._postgres_reachable", lambda dsn: False)
     text = format_report(diagnose(_settings(tmp_path)))
     assert "relic doctor" in text
     assert "not created yet" in text  # registry
-    assert "not built yet" in text  # graph
-    assert "openai" in text
+    assert "not reachable" in text  # engram
+    assert "documents stay local-only" in text  # firestore unset
+    assert "github" in text
     assert "missing" in text
 
 
@@ -136,9 +152,9 @@ def test_doctor_command_runs(
 ) -> None:
     settings = _settings(tmp_path)
     monkeypatch.setattr("relic.config.get_settings", lambda: settings)
-    monkeypatch.setattr("relic.doctor._falkordb_reachable", lambda h, p: False)
+    monkeypatch.setattr("relic.doctor._postgres_reachable", lambda dsn: False)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "registry:" in result.output
-    assert "graph:" in result.output
+    assert "engram:" in result.output
     assert "keys:" in result.output

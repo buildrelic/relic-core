@@ -8,8 +8,8 @@ Every command is a subcommand of `relic` ([`cli.py`](https://github.com/buildrel
 `uv run relic --help` for the live list, or `uv run relic <command> --help` for one
 command. The CLI prints `--help` when given no arguments.
 
-Commands group into the capture and memory side, the skills side, diagnostics, and
-two stubs that land in later phases.
+Commands group into the capture and memory side, the skills side, the long-running
+surfaces, diagnostics, and two stubs that land in later phases.
 
 ## Global options
 
@@ -21,86 +21,101 @@ two stubs that land in later phases.
 
 ### relic ingest
 
-Pull merged PRs, reviews, and issues into the graph.
+Pull a source's history into the engram store.
 
 ```
-relic ingest --repo OWNER/NAME [--limit N] [--months M] [--bulk] [--fresh] [--no-progress] [--no-load]
+relic ingest [--repo OWNER/NAME] [--source github|granola|notion] [--limit N] [--months M] [--fresh] [--no-progress] [--no-load]
 ```
 
-- `--repo` (required): the `owner/name` to ingest. Anything without a `/` exits 2.
-- `--limit` (optional): cap merged PRs and issues pulled, most recent first.
-- `--months` (optional, default 12): how many months of history to backfill. PRs
-  merged and issues updated within the window are pulled.
-- `--bulk` (optional): load via batched `add_episode_bulk` for a faster backfill
-  (experimental; sequential is the default). Also set by `BULK_LOAD`.
-- `--fresh` (optional): ignore the checkpoint and reload every episode. Pair it
-  with clearing the repo's graph, or you get duplicates.
-- `--no-progress` (optional): disable the live progress bar. It already turns off under `--verbose` and when stderr is not a terminal.
-- `--no-load` (optional): run only the fast, no-LLM half (fetch, map, raw store,
-  spool) and stop. No FalkorDB or `OPENAI_API_KEY` needed. The episodes are left on
-  the spool under `./data/spool/<group_id>/`; run `relic load` to extract them.
+- `--repo` (required for the github source): the `owner/name` to ingest.
+  Anything without a `/` exits 2.
+- `--source` (optional, default `github`): `github` pulls PRs and issues (plus
+  Linear when `LINEAR_API_KEY` is set); `granola` pulls meetings, scoped per
+  note owner; `notion` pulls pages, scoped per workspace. The non-repo sources
+  take no `--repo`.
+- `--limit` (optional): cap items pulled, most recent first.
+- `--months` (optional, default 12): how many months of history to backfill.
+- `--fresh` (optional): ignore the checkpoint and reload every episode. Safe:
+  the store upserts on `(workspace_id, name)`, so a reload refreshes rows in
+  place rather than duplicating them.
+- `--no-progress` (optional): disable the live progress bar. It already turns
+  off under `--verbose` and when stderr is not a terminal.
+- `--no-load` (optional): run only the capture half (fetch, map, raw store,
+  spool) and stop. No Postgres needed. The episodes are left on the spool under
+  `./data/spool/<scope>/`; run `relic load` to land them.
 
-An ingest has two halves: a fast deterministic capture and a slow LLM extraction.
-The default runs both. `--no-load` runs the first and hands off to `relic load`, so
-the expensive step can run later, on a schedule, or one batch at a time.
+An ingest has two halves: a deterministic capture and the engram write (the
+load). Both are fast; no LLM runs in either. The default runs both back to
+back. `--no-load` runs the first and hands off to `relic load`, so the write
+can run later or on a schedule.
 
-A full ingest needs a GitHub token, `OPENAI_API_KEY`, and a running FalkorDB; a
-`--no-load` capture needs only a GitHub token (no graph, no OpenAI). Pulls Linear too
-when `LINEAR_API_KEY` is set. Resumable: a re-run skips episodes already landed
-(the per-repo checkpoint under `./data/ingest/`). See [Ingestion](/ingestion).
+A full ingest needs a GitHub token (or the source's key) and a running
+Postgres; a `--no-load` capture needs only the source credential. Resumable: a
+re-run skips episodes whose content is unchanged and refreshes the ones whose
+content changed (the per-scope checkpoint under `./data/ingest/` records each
+episode's content token).
 
 Exit codes: `0` on success (including a no-op re-run where everything was already
-loaded, and a `--no-load` capture), `2` for a malformed `--repo`, `1` when the graph
-is unreachable or the run loaded nothing because every episode failed.
+loaded, and a `--no-load` capture), `2` for a malformed `--repo` or a missing
+source key, `1` when Postgres is unreachable or the run loaded nothing because
+every episode failed.
 
 ```bash
 uv run relic ingest --repo astral-sh/uv --limit 20
-uv run relic ingest --repo astral-sh/uv --no-load   # capture only, extract later
+uv run relic ingest --source granola                # meetings, per note owner
+uv run relic ingest --repo astral-sh/uv --no-load   # capture only, load later
 uv run relic --verbose ingest --repo astral-sh/uv   # debug logging
 ```
 
 ### relic load
 
-Extract spooled episodes into the graph: the LLM-heavy half of ingest, run on demand.
+Load spooled episodes into the engram: the second half of ingest, on demand.
 
 ```
-relic load --repo OWNER/NAME [--limit N] [--bulk] [--fresh] [--no-progress]
+relic load [--repo OWNER/NAME] [--source github|granola|notion] [--limit N] [--fresh] [--no-progress]
 ```
 
-- `--repo` (required): the `owner/name` whose spooled episodes to extract. Reads
-  `./data/spool/<group_id>/`, written by a prior `relic ingest`. Anything without a
-  `/` exits 2.
-- `--limit` (optional): extract at most N not-yet-loaded episodes, for case-by-case
+- `--repo` (required for the github source): the `owner/name` whose spooled
+  episodes to load. Reads `./data/spool/<scope>/`, written by a prior
+  `relic ingest`. Anything without a `/` exits 2.
+- `--source` (optional, default `github`): `granola` and `notion` load their
+  spooled scopes (`granola__*`, `notion__*`) without a repo.
+- `--limit` (optional): load at most N not-yet-loaded episodes, for case-by-case
   loading. Re-run to drain more.
-- `--bulk` (optional): load via batched `add_episode_bulk`. Also set by `BULK_LOAD`.
-- `--fresh` (optional): ignore the checkpoint and reload every spooled episode. Pair
-  it with clearing the repo's graph, or you get duplicates.
+- `--fresh` (optional): ignore the checkpoint and reload every spooled episode.
+  The upsert refreshes rows in place, so no duplicates.
 - `--no-progress` (optional): disable the live progress bar.
 
-Needs `OPENAI_API_KEY` and a running FalkorDB, but no GitHub token: it reads the
-spool, not the network. Resumable and idempotent: it skips episodes the checkpoint
-already records, so a re-run only extracts what is new. An empty spool is a no-op.
+Needs a running Postgres, but no source credential: it reads the spool, not the
+network. Resumable and idempotent: it skips episodes the checkpoint already
+records with an unchanged token, so a re-run only loads what is new or changed.
+An empty spool is a no-op.
 
 Exit codes: `0` on success (including an empty spool and a no-op re-run), `2` for a
-malformed `--repo`, `1` when the graph is unreachable or every episode failed.
+malformed `--repo`, `1` when Postgres is unreachable or every episode failed.
 
 ```bash
 uv run relic ingest --repo astral-sh/uv --no-load   # capture
-uv run relic load --repo astral-sh/uv --limit 5     # extract the first 5, on demand
-uv run relic load --repo astral-sh/uv               # extract the rest
+uv run relic load --repo astral-sh/uv --limit 5     # land the first 5, on demand
+uv run relic load --repo astral-sh/uv               # land the rest
 ```
 
 ### relic recall
 
-Recall facts from the memory graph, with their sources.
+Recall facts from the engram, with their sources.
 
 ```
 relic recall "QUERY" [--repo OWNER/NAME] [--num-results N]
 ```
 
 - `query` (argument, required): what to recall.
-- `--repo` (optional): scope to a repo's graph. Defaults to `TARGET_REPO`.
+- `--repo` (optional): narrow to a repo's ingest scope. Defaults to
+  `TARGET_REPO`; with neither set, the search runs workspace-wide.
 - `--num-results` (optional, default 10): max facts to return.
+
+Recall is Postgres full-text search: websearch semantics first, then an
+any-term fallback so a natural-language prompt with one unmatched word still
+recalls. See [Memory and recall](/memory-and-recall).
 
 ```bash
 uv run relic recall "who usually reviews auth changes?"
@@ -108,17 +123,19 @@ uv run relic recall "who usually reviews auth changes?"
 
 ### relic query
 
-Find people connected to work matching the text (search first, Cypher fallback).
+Find people connected to work matching the text. One SQL query over the
+`memory_people` roles, the `memory_paths` table, and full-text search.
 
 ```
 relic query "TEXT" [--repo OWNER/NAME]
 ```
 
-- `text` (argument, required): the query string.
-- `--repo` (optional): scope to a repo's graph. Defaults to `TARGET_REPO`.
+- `text` (argument, required): the query string (a topic or a file path).
+- `--repo` (optional): narrow to a repo's ingest scope. Defaults to
+  `TARGET_REPO`; with neither set, the query runs workspace-wide.
 
-Prints each person, relation, fact, profile URL, and source episodes,
-de-duplicated by name.
+Prints each person, relation (reviewer, author, requested_reviewer), fact,
+profile URL, and source memories, de-duplicated by name.
 
 ### relic eval
 
@@ -203,35 +220,90 @@ Print a browsable markdown index of verified skills to stdout.
 relic catalog
 ```
 
+## Long-running surfaces
+
 ### relic serve
 
-Serve verified skills and memory recall as MCP tools over stdio. The one
-long-running command. See [Skills](/skills).
+Serve verified skills and memory recall as MCP tools over stdio. See
+[Skills](/skills).
 
 ```
 relic serve [--repo OWNER/NAME]
 ```
 
-- `--repo` (optional): scope `recall_memory` to a repo's graph. Defaults to
-  `TARGET_REPO`. Recall reads one repo's graph, so without a repo set here or in
-  `TARGET_REPO` it reads the default graph and returns nothing for memory you
-  ingested under a repo.
+- `--repo` (optional): scope `recall_memory` to a repo's ingest scope. Defaults
+  to `TARGET_REPO`. Without either, recall runs workspace-wide (the store binds
+  every read to its workspace).
+
+### relic daemon
+
+Run the closed-loop daemon: recall on inject, write-back on capture. A loopback
+HTTP surface the Claude Code hooks call every turn.
+
+```
+relic daemon [--repo OWNER/NAME] [--host HOST] [--port PORT] [--token TOKEN]
+```
+
+- `--repo` (optional): the fallback scope when a session's repo cannot be
+  resolved. Defaults to `TARGET_REPO`, else the workspace.
+- `--host` (optional, default `127.0.0.1`): bind host. Keep it loopback.
+- `--port` (optional, default `8788`): bind port.
+- `--token` (optional): require `Authorization: Bearer <token>` on the
+  data routes. Defaults to `RELIC_DAEMON_TOKEN`. `status` stays open so a
+  supervisor can poll liveness.
+
+Routes:
+
+| Route | Method | What it does |
+|---|---|---|
+| `/v1/daemon/status` | GET | liveness plus loop counters (injects, captures, errors, last activity) |
+| `/v1/daemon/activity` | GET | a ring buffer of recent loop events, for the desktop app |
+| `/v1/daemon/inject` | POST | recall the engram onto a prompt: returns the cited context block |
+| `/v1/daemon/recall` | POST | manual recall, same engine as inject |
+| `/v1/daemon/capture` | POST | write a finished session back as an AgentSession episode |
+
+The daemon scopes per session: each inject/capture resolves the repo from the
+session's working directory (its git origin) and recalls or writes in that
+scope, falling back to `--repo`. It boots even with Postgres down (the store is
+built lazily) and degrades per-request, so a hook never breaks a turn. Install
+the hooks with `relic install-hooks`; the
+[relic-desktop](https://github.com/buildrelic/relic-desktop) tray app can
+supervise it.
+
+### relic install-hooks
+
+Wire the Relic daemon into Claude Code: inject on prompt, capture on session end.
+
+```
+relic install-hooks [--settings PATH] [--token TOKEN]
+```
+
+- `--settings` (optional, default `~/.claude/settings.json`): the Claude Code
+  settings file to merge into.
+- `--token` (optional): daemon token to bake into the hook env. Defaults to
+  `RELIC_DAEMON_TOKEN`.
+
+Merges two command hooks into the settings file, `UserPromptSubmit` to inject
+and `SessionEnd` to capture, both pointing at the stdlib-only shim in
+`relic.hooks`. Idempotent: a re-run refreshes an existing entry in place (a
+changed interpreter path or token) instead of duplicating it, and backs up the
+existing file to `<name>.bak` first. After this, start the loop with
+`relic daemon --repo owner/name`.
 
 ### relic serve-http
 
 Serve connector status and the ingest trigger over HTTP for the web app. `GET
-/v1/connectors` returns each source's sync status, `GET /v1/ingest/runs` returns
-run history plus totals, `GET /v1/status` is a liveness check, and `POST
-/v1/ingest` with `{"repo": "owner/name"}` kicks off an ingest. Long-running. The
-status routes read the ingest checkpoints on disk, so they need no graph
-connection or `OPENAI_API_KEY`; the trigger spawns `relic ingest`, so a full run
-still needs FalkorDB and the source keys. The checkpoint makes a re-run
-incremental (only new episodes are extracted), so a webhook can call `POST
-/v1/ingest` on every push and only the new PR or issue gets loaded; a repo with a
-run already in flight gets `409`. Run history comes from
-`data/ingest/runs.jsonl`, which `relic ingest` and `relic load` append to as each
-run completes. Recall is not here: that is an agent feature, served over MCP by
-`relic serve`.
+/v1/connectors` returns each source's sync status (github, linear, granola,
+notion), `GET /v1/ingest/runs` returns run history plus totals, `GET /v1/status`
+is a liveness check, and `POST /v1/ingest` kicks off an ingest. Long-running.
+The status routes read the ingest checkpoints on disk, so they need no store
+connection; the trigger spawns `relic ingest`, so a full run still needs
+Postgres and the source keys. The checkpoint makes a re-run incremental (only
+new or changed episodes land), so a webhook can call `POST /v1/ingest` on every
+push; a scope with a run already in flight gets `409`. Run history comes from
+`data/ingest/runs.jsonl`, which `relic ingest` and `relic load` append to as
+each run completes. Recall is not here: that is an agent feature, served over
+MCP by `relic serve`.
 
 ```
 relic serve-http [--host HOST] [--port PORT] [--token TOKEN]
@@ -241,47 +313,44 @@ relic serve-http [--host HOST] [--port PORT] [--token TOKEN]
 - `--port` (optional, default `8787`): bind port.
 - `--token` (optional): when set, the data routes require `Authorization: Bearer <token>`. Defaults to `RELIC_HTTP_TOKEN`. Leave unset for local dev.
 
+The `POST /v1/ingest` body:
+
+| Field | Required | What it does |
+|---|---|---|
+| `source` | no (default `github`) | `github` (needs `repo`), `granola`, or `notion` |
+| `repo` | for the github source | the `owner/name` to ingest |
+| `token` | no | the connecting user's secret for that source (a GitHub OAuth token, a granola `grn_` key, a Notion integration token). Reaches the child through its environment, never argv. Absent falls back to the server's own credentials |
+| `workspace` | no | the engram workspace the run writes into (the web app forwards its Clerk scope). Validated, then forwarded to the child as `RELIC_WORKSPACE`; absent falls back to the server's own workspace |
+
+A malformed `token` or `workspace` is a `400`, a started run is `202`, a run
+already in flight for the same scope is `409`.
+
 ```bash
 uv run relic serve-http --port 8787
 curl "http://127.0.0.1:8787/v1/connectors"
 curl -X POST -H 'content-type: application/json' \
-  -d '{"repo":"owner/name"}' "http://127.0.0.1:8787/v1/ingest"
+  -d '{"repo":"owner/name","workspace":"org_2abc"}' "http://127.0.0.1:8787/v1/ingest"
 ```
 
 ## Diagnostics
 
 ### relic doctor
 
-Report registry, graph, and key status for this setup. Reads only, changes
-nothing, never raises. See [Configuration](/configuration).
+Report registry, engram, and key status for this setup. Reads only, changes
+nothing, never raises. The engram section shows the Postgres DSN (password
+redacted), whether it is reachable, and whether the Firestore document mirror
+is configured. The keys section covers anthropic, github, linear, granola, and
+notion. See [Configuration](/configuration).
 
 ```
 relic doctor
 ```
 
-### relic audit-zones
-
-Scan a repo's graph for Zone-integrity violations: Zoned nodes or edges that
-carry no Zone (`group_id`). A clean report is the proof that the access
-boundary is structurally sound; any violation exits non-zero so the command can
-gate CI. The write path already refuses untagged Zoned writes (ADR-0006
-Decision 1); this audit is the safety net for data that predates the rule. See
-[ADR-0006](/adr/0006-sound-graph-for-consumers).
-
-```
-relic audit-zones [--repo OWNER/NAME] [--limit N]
-```
-
-- `--repo` (optional): the repo whose graph to audit. Defaults to `TARGET_REPO`.
-- `--limit` (optional, default 1000): max violations to report per kind
-  (untagged nodes vs untagged edges). The report flags itself as truncated when
-  the cap is hit, so a clean exit never masks an aborted scan.
-
 ## Stubs (later phases)
 
 ### relic resolve
 
-Unify people across GitHub and Linear into single `Person` nodes. Phase 3. Prints
+Unify people across GitHub and Linear into single `Person` rows. Phase 3. Prints
 "not implemented yet" and exits 1.
 
 ### relic compile
@@ -295,10 +364,10 @@ relic compile --skill ARCHETYPE
 
 ## Quick reference
 
-| Command | Required args | Key flags | Needs graph |
+| Command | Required args | Key flags | Needs Postgres |
 |---|---|---|---|
-| `ingest` | `--repo` | `--limit`, `--months`, `--bulk`, `--fresh`, `--no-progress`, `--no-load` | yes (no with `--no-load`) |
-| `load` | `--repo` | `--limit`, `--bulk`, `--fresh`, `--no-progress` | yes |
+| `ingest` | `--repo` (github) | `--source`, `--limit`, `--months`, `--fresh`, `--no-progress`, `--no-load` | yes (no with `--no-load`) |
+| `load` | `--repo` (github) | `--source`, `--limit`, `--fresh`, `--no-progress` | yes |
 | `recall` | `query` | `--repo`, `--num-results` | yes |
 | `query` | `text` | `--repo` | yes |
 | `eval` | none | `--path`, `--num-results`, `--json` | yes |
@@ -310,8 +379,9 @@ relic compile --skill ARCHETYPE
 | `emit` | `--repo` | none | no |
 | `catalog` | none | none | no |
 | `serve` | none | `--repo` | optional |
+| `daemon` | none | `--repo`, `--host`, `--port`, `--token` | optional (degrades) |
+| `install-hooks` | none | `--settings`, `--token` | no |
 | `serve-http` | none | `--host`, `--port`, `--token` | no |
 | `doctor` | none | none | no |
-| `audit-zones` | none | `--repo`, `--limit` | yes |
 | `resolve` | none | none | stub |
 | `compile` | `--skill` | none | stub |

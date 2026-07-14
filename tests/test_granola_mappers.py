@@ -82,10 +82,10 @@ def test_long_transcript_is_trimmed_to_budget() -> None:
 
 def test_edited_note_moves_the_freshness_token() -> None:
     # REL-118 edit-reingest: the loader supersedes on a changed body fingerprint
-    # (relic.graph.load._content_token). An edit bumps the note's updated_at, which
+    # (relic.engram.load._content_token). An edit bumps the note's updated_at, which
     # rides in the body, so the token moves even when the clipped summary/transcript
     # are unchanged; a no-op re-capture maps to identical bytes and is skipped.
-    from relic.graph.load import _content_token
+    from relic.engram.load import _content_token
 
     v1 = meeting_to_episode(_meeting())
     edited = meeting_to_episode(_meeting(updated_at="2026-06-23T09:00:00Z"))

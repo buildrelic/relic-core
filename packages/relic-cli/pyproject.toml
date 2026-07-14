@@ -1,13 +1,13 @@
 [project]
 name = "relic-cli"
 version = "0.0.1"
-description = "Relic CLI: the composition root that wires ingest, graph, and serve. Owner: Zidan."
+description = "Relic CLI: the composition root that wires ingest, engram, and serve. Owner: Zidan."
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "buildrelic" }]
 dependencies = [
     "relic-core",
     "relic-ingest",
-    "relic-graph",
+    "relic-engram",
     "relic-serve",
     "typer>=0.12",
     "rich>=13.7",
@@ -29,5 +29,5 @@ packages = ["src/relic"]
 [tool.uv.sources]
 relic-core = { workspace = true }
 relic-ingest = { workspace = true }
-relic-graph = { workspace = true }
+relic-engram = { workspace = true }
 relic-serve = { workspace = true }

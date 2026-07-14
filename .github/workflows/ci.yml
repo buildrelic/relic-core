@@ -9,10 +9,19 @@ jobs:
   check:
     runs-on: ubuntu-latest
     services:
-      falkordb:
-        image: falkordb/falkordb:latest
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: relic
+          POSTGRES_PASSWORD: relic
+          POSTGRES_DB: relic
         ports:
-          - 6379:6379
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U relic"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -30,3 +39,5 @@ jobs:
         run: uv run lint-imports
       - name: Pytest
         run: uv run python -m pytest
+        env:
+          DATABASE_URL: postgresql://relic:relic@localhost:5432/relic

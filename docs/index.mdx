@@ -1,13 +1,13 @@
 ---
 title: "Introduction"
-description: "Relic ingests engineering history into a temporal knowledge graph and serves grounded, cited answers and skills to coding agents over MCP."
+description: "Relic ingests engineering history into the engram store and serves grounded, cited answers and skills to coding agents over MCP."
 icon: "house"
 ---
 
-Relic is an early memory layer for AI-native teams, built on
-[Graphiti](https://github.com/getzep/graphiti). It ingests engineering history,
-structures it in a temporal knowledge graph, and serves grounded answers and
-skills to coding agents over MCP. Every answer cites its source.
+Relic is an early memory layer for AI-native teams. It ingests engineering
+history into the engram store (Postgres, with a Firestore document mirror the
+web app renders and lets humans edit) and serves grounded answers and skills to
+coding agents over MCP. Every answer cites its source.
 
 This site documents the platform as it stands today: what the pieces are, how
 they fit, and how data moves through them. For the product framing and house
@@ -16,7 +16,7 @@ at the repo root.
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Clone the repo, populate the graph, and get your first cited recall.
+    Clone the repo, populate the engram, and get your first cited recall.
   </Card>
   <Card title="System overview" icon="binoculars" href="/system-brief">
     What Relic is, the core loop, the architecture, and the stack on one page.
@@ -32,24 +32,27 @@ at the repo root.
 ## The core loop
 
 `relic ingest --repo owner/name` pulls merged and closed PRs (title, description,
-files, reviews, requested reviewers) and issues from GitHub, maps them to
-deterministic records, turns each into a JSON episode, and feeds them to Graphiti,
-which extracts typed entities and relationships into a FalkorDB graph partitioned
-per repo. `relic recall "..."` queries that graph and returns facts, each carrying
-the PR or issue it came from. Skills are a separate track: typed `SkillIR` records
-in a SQLite registry, moved through draft to verified to deprecated, then written
-to a repo's `.claude/skills/` with `relic emit` or served to agents with
-`relic serve`. Two stores, kept apart: the graph holds memory, the registry holds
-skills.
+files, reviews, requested reviewers) and issues from GitHub (Granola meetings and
+Notion pages ride `--source`), maps them to deterministic records, turns each
+into a typed JSON episode, and lands each as one row in Postgres, with the
+people it names, the paths it touches, and a rendered document mirrored to
+Firestore. No LLM runs anywhere in the loop. `relic recall "..."` searches those
+rows with Postgres full-text search and returns facts, each carrying the PR or
+issue it came from. Skills are a separate track: typed `SkillIR` records in a
+SQLite registry, moved through draft to verified to deprecated, then written to
+a repo's `.claude/skills/` with `relic emit` or served to agents with
+`relic serve`. Two stores, kept apart: the engram holds memory, the registry
+holds skills.
 
 ## Explore the subsystems
 
 <CardGroup cols={3}>
   <Card title="Ingestion" icon="download" href="/ingestion">
-    The capture pipeline: GitHub and Linear to deterministic records to episodes.
+    The capture pipeline: GitHub, Linear, Granola, and Notion to deterministic
+    records to episodes.
   </Card>
   <Card title="Memory & recall" icon="brain" href="/memory-and-recall">
-    The graph, per-repo partitioning, recall, query, and the recall scorecard.
+    The engram store, workspace and scope, recall, query, and the scorecard.
   </Card>
   <Card title="Skills & serve" icon="screwdriver-wrench" href="/skills">
     The SkillIR lifecycle, the SQLite registry, emit, catalog, and the MCP server.
@@ -59,9 +62,10 @@ skills.
 ## Status
 
 <Note>
-  Relic is a prototype, built phase by phase. Capture, memory, recall, the
-  registry, emit, catalog, the scorecard, the MCP server, and doctor are wired
-  up. Entity resolution (`resolve`, Phase 3) and the procedure detector plus
-  skill compiler (`compile`, Phase 4) are stubs that exit with a "not implemented
-  yet" message. See the [roadmap](/roadmap) for the full breakdown.
+  Relic is a prototype, built phase by phase. Capture, the engram store, recall,
+  the closed-loop daemon, the registry, emit, catalog, the scorecard, the MCP
+  server, and doctor are wired up. Entity resolution (`resolve`, Phase 3) and
+  the procedure detector plus skill compiler (`compile`, Phase 4) are stubs that
+  exit with a "not implemented yet" message. See the [roadmap](/roadmap) for the
+  full breakdown.
 </Note>

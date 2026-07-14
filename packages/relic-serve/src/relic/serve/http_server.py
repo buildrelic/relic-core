@@ -29,15 +29,31 @@ ConnectorsFn = Callable[[], Awaitable[dict[str, Any]]]
 # repo and source are independent filters: a repo scopes to one github repo, source scopes
 # to a non-repo connector (granola/notion, whose runs carry no repo). Either, both, or neither.
 IngestRunsFn = Callable[[str | None, int, str | None], Awaitable[dict[str, Any]]]
-# (source, repo | None, token | None) -> {"status": "running" | "already_running", ...}
+# (source, repo | None, token | None, workspace | None) -> {"status": "running" | ...}
 # source is "github" (repo required) or a non-repo source ("granola", "notion") that scopes
 # itself server-side. token is the per-user secret for that source (a github OAuth token, a
-# granola grn_ key, or a notion integration token).
-IngestTriggerFn = Callable[[str, str | None, str | None], Awaitable[dict[str, Any]]]
+# granola grn_ key, or a notion integration token). workspace is the engram workspace the
+# run writes into (the web app's Clerk scope); absent falls back to the server's own
+# RELIC_WORKSPACE.
+IngestTriggerFn = Callable[[str, str | None, str | None, str | None], Awaitable[dict[str, Any]]]
 
 _MAX_LIMIT = 200
 _DEFAULT_LIMIT = 50
 _MAX_TOKEN_LEN = 255
+_MAX_WORKSPACE_LEN = 128
+
+
+def _valid_workspace(workspace: str) -> bool:
+    """A workspace id is a Clerk scope: short, printable, no whitespace.
+
+    It becomes the RELIC_WORKSPACE env of the spawned ingest, so the same shapes the
+    secret sanitizer rejects are rejected here with a clean 400.
+    """
+    return (
+        0 < len(workspace) <= _MAX_WORKSPACE_LEN
+        and not workspace.startswith("#")
+        and all(c.isprintable() and not c.isspace() for c in workspace)
+    )
 
 
 def _valid_token(token: str) -> bool:
@@ -109,14 +125,20 @@ def build_http_app(
         user_token = raw_token.strip() if isinstance(raw_token, str) else ""
         if user_token and not _valid_token(user_token):
             return JSONResponse({"error": "invalid token"}, status_code=400)
+        # Optional engram workspace the run writes into (the web app's Clerk scope).
+        # Absent falls back to the server's own RELIC_WORKSPACE.
+        raw_workspace = body.get("workspace")
+        workspace = raw_workspace.strip() if isinstance(raw_workspace, str) else ""
+        if workspace and not _valid_workspace(workspace):
+            return JSONResponse({"error": "invalid workspace"}, status_code=400)
 
         if source in ("granola", "notion"):
-            result = await ingest_trigger(source, None, user_token or None)
+            result = await ingest_trigger(source, None, user_token or None, workspace or None)
         elif source == "github":
             repo = str(body.get("repo", "")).strip()
             if "/" not in repo:
                 return JSONResponse({"error": "repo must be owner/name"}, status_code=400)
-            result = await ingest_trigger("github", repo, user_token or None)
+            result = await ingest_trigger("github", repo, user_token or None, workspace or None)
         else:
             return JSONResponse({"error": f"unknown source: {source}"}, status_code=400)
         # A run already in flight for this scope is a conflict, not a new job.

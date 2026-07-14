@@ -1,21 +1,23 @@
 services:
-  falkordb:
-    image: falkordb/falkordb:latest
-    container_name: relic-falkordb
+  postgres:
+    image: postgres:16-alpine
+    container_name: relic-postgres
+    environment:
+      POSTGRES_USER: relic
+      POSTGRES_PASSWORD: relic
+      POSTGRES_DB: relic
     ports:
-      - "6379:6379"   # graph / Redis protocol (FALKORDB_PORT)
-      - "3000:3000"   # FalkorDB Browser UI at http://localhost:3000
+      - "5432:5432"   # the engram store (DATABASE_URL)
     volumes:
-      - falkordb-data:/data
+      - postgres-data:/var/lib/postgresql/data
     restart: "no"
-    # FalkorDB speaks the Redis protocol, so a PING is enough to call it ready.
     # `docker compose up -d --wait` blocks on this before returning.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "pg_isready -U relic -d relic"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 5s
 
 volumes:
-  falkordb-data:
+  postgres-data:

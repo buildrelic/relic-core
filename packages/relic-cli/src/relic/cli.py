@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
     from relic.config import Settings
     from relic.contracts import EpisodeSpec
-    from relic.graph import GraphitiMemory, LoadStats
+    from relic.engram import EngramStore, LoadStats
 
 app = typer.Typer(
     name="relic",
@@ -57,10 +57,6 @@ def ingest(
     ] = "github",
     limit: Annotated[int | None, typer.Option(help="cap items pulled, most recent first")] = None,
     months: Annotated[int, typer.Option(help="how many months of history to backfill")] = 12,
-    bulk: Annotated[
-        bool,
-        typer.Option("--bulk", help="load via batched add_episode_bulk (faster, experimental)"),
-    ] = False,
     fresh: Annotated[
         bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
     ] = False,
@@ -71,15 +67,15 @@ def ingest(
         bool,
         typer.Option(
             "--no-load",
-            help="capture and spool episodes but skip LLM extraction; run `relic load` after",
+            help="capture and spool episodes but skip the engram write; run `relic load` after",
         ),
     ] = False,
 ) -> None:
-    """Pull merged and closed PRs, reviews, and issues into the graph (Phase 2).
+    """Pull merged and closed PRs, reviews, and issues into the engram (Phase 2).
 
-    Two halves: a fast, deterministic capture (fetch, map, raw store, spool) with no
-    LLM, then the LLM-heavy extraction into the graph. ``--no-load`` runs only the
-    first half and stops, leaving the episodes spooled for a later ``relic load``.
+    Two halves: a fast, deterministic capture (fetch, map, raw store, spool), then
+    the load into the engram store. ``--no-load`` runs only the first half and
+    stops, leaving the episodes spooled for a later ``relic load``.
     """
     import asyncio
 
@@ -92,7 +88,6 @@ def ingest(
                 limit,
                 source=source,
                 months=months,
-                bulk=bulk,
                 fresh=fresh,
                 no_progress=no_progress,
                 no_load=no_load,
@@ -119,33 +114,21 @@ def load(
     ] = "github",
     limit: Annotated[
         int | None,
-        typer.Option(help="extract at most N not-yet-loaded episodes, for case-by-case loading"),
+        typer.Option(help="load at most N not-yet-loaded episodes, for case-by-case loading"),
     ] = None,
-    bulk: Annotated[
-        bool,
-        typer.Option("--bulk", help="load via batched add_episode_bulk (faster, experimental)"),
-    ] = False,
     fresh: Annotated[
         bool, typer.Option("--fresh", help="ignore the checkpoint and reload every episode")
     ] = False,
     no_progress: Annotated[
         bool, typer.Option("--no-progress", help="disable the live progress bar")
     ] = False,
-    concurrency: Annotated[
-        int | None,
-        typer.Option(
-            "--concurrency",
-            help="episodes extracting at once on the sequential path "
-            "(default LOAD_CONCURRENCY; 1 = strictly sequential)",
-        ),
-    ] = None,
 ) -> None:
-    """Extract spooled episodes into the graph: the LLM-heavy half of ingest, on demand.
+    """Load spooled episodes into the engram: the second half of ingest, on demand.
 
-    Reads what `relic ingest --no-load` spooled for the repo and runs Graphiti
-    extraction. Run it whenever: right after capture, on a schedule, or one batch at a
-    time with ``--limit``. Resumable and idempotent: the checkpoint skips episodes that
-    already landed, so a re-run only extracts what is new.
+    Reads what `relic ingest --no-load` spooled for the repo and lands it in the
+    store. Run it whenever: right after capture, on a schedule, or one batch at a
+    time with ``--limit``. Resumable and idempotent: the checkpoint skips episodes
+    that already landed, so a re-run only loads what is new.
     """
     import asyncio
 
@@ -157,10 +140,8 @@ def load(
                 repo,
                 limit,
                 source=source,
-                bulk=bulk,
                 fresh=fresh,
                 no_progress=no_progress,
-                concurrency=concurrency,
             )
         )
     except typer.Exit:
@@ -174,24 +155,6 @@ def load(
 
 def _safe_ident(identifier: str) -> str:
     return identifier.replace("/", "_").replace("#", "-")
-
-
-def _quiet_background_errors(log: "logging.Logger") -> None:
-    """Route the FalkorDB driver's detached index-build errors to debug.
-
-    The driver schedules an index build in its constructor as an orphaned task. If the
-    graph is unhealthy that task fails too, and asyncio dumps a full traceback to
-    stderr. The run's own error reporting already covers the foreground failure, so
-    these orphaned-task errors go to debug.
-    """
-    import asyncio
-
-    def _on_loop_error(_loop: object, context: dict) -> None:
-        log.debug(
-            "background task error: %s", context.get("message"), exc_info=context.get("exception")
-        )
-
-    asyncio.get_running_loop().set_exception_handler(_on_loop_error)
 
 
 async def _github_token_with_fallback(
@@ -348,26 +311,22 @@ async def _extract(
     group_id: str,
     *,
     settings: "Settings",
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     limit: int | None,
     progress_label: str,
     log: "logging.Logger",
-    concurrency: int | None = None,
-) -> "tuple[LoadStats, bool]":
-    """Run Graphiti extraction over episodes: the LLM-heavy half. Returns (stats, used_bulk).
+) -> "LoadStats":
+    """Land episodes in the engram store: the second half of an ingest.
 
     ``fresh`` clears the checkpoint first so every episode reloads. ``limit`` caps how
-    many not-yet-loaded episodes extract this run, for case-by-case loading; ``None``
-    loads all pending (the loader skips checkpointed names internally). ``concurrency``
-    bounds how many episodes extract at once on the sequential path (``None`` falls back
-    to ``settings.load_concurrency``); the bulk path has its own batch fan-out.
+    many not-yet-loaded episodes land this run, for case-by-case loading; ``None``
+    loads all pending (the loader skips checkpointed names internally).
     """
     import logging
     from collections.abc import Callable
 
-    from relic.graph import LoadStats, load_episodes, load_episodes_bulk, open_memory
+    from relic.engram import LoadStats, load_episodes, open_engram
     from relic.ingest import checkpoint_path, clear, compact, load_done, record_done
     from relic.obs import load_progress, stderr_console
 
@@ -385,38 +344,22 @@ async def _extract(
     else:
         to_load, skip = episodes, done
 
-    # Open the engram at the group's own graph, matching where the writes land (graphiti
-    # keys the graph by each episode's group_id) and how every read path opens it. Opening
-    # the default graph here would break REL-118 supersession on a fresh process: the
-    # loader supersedes *before* the first add, so the removal MATCH would run against the
-    # default graph (where the episodes never lived), silently remove nothing, and the
-    # re-add would fork a duplicate episode in the group's graph.
-    engram = open_memory(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=group_id,
-        api_key=settings.openai_api_key,
-        max_coroutines=settings.graphiti_max_coroutines,
-    )
-    use_bulk = bulk or settings.bulk_load
-    episode_concurrency = concurrency if concurrency is not None else settings.load_concurrency
+    # One store serves every scope: the episode's group_id lands on the row's scope
+    # column, so there is no per-scope connection to pick (ADR-0007).
+    engram = await open_engram(settings)
 
     async def _run(on_progress: Callable[[LoadStats], None] | None) -> LoadStats:
         # progress=on_progress is None: the bar replaces the "loaded x/y" heartbeat logs
         # when active, so they aren't emitted twice.
-        common = {
-            "group_id": group_id,
-            "skip": skip,
-            "on_loaded": lambda name, token: record_done(ledger, name, token),
-            "on_progress": on_progress,
-            "progress": on_progress is None,
-        }
-        if use_bulk:
-            return await load_episodes_bulk(
-                engram, to_load, batch_size=settings.bulk_batch_size, **common
-            )
-        return await load_episodes(engram, to_load, concurrency=episode_concurrency, **common)
+        return await load_episodes(
+            engram,
+            to_load,
+            group_id=group_id,
+            skip=skip,
+            on_loaded=lambda name, token: record_done(ledger, name, token),
+            on_progress=on_progress,
+            progress=on_progress is None,
+        )
 
     # A live bar only on a real terminal, off under --verbose (DEBUG logs would churn it)
     # and --no-progress; otherwise fall back to the heartbeat log lines. The bar wiring
@@ -449,14 +392,14 @@ async def _extract(
     compact(ledger)
 
     summary = (
-        f"extracted {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
+        f"loaded {stats.loaded} episodes from {repo} in {stats.duration_s:.1f}s "
         f"({stats.superseded} refreshed, {stats.skipped} skipped, {stats.failed} failed)"
     )
     if stats.failed:
         log.warning(summary)
     else:
         log.info(summary)
-    return stats, use_bulk
+    return stats
 
 
 async def _ingest(
@@ -465,7 +408,6 @@ async def _ingest(
     *,
     source: str = "github",
     months: int = 12,
-    bulk: bool = False,
     fresh: bool = False,
     no_progress: bool = False,
     no_load: bool = False,
@@ -473,12 +415,11 @@ async def _ingest(
     import time
 
     from relic.config import get_settings
-    from relic.graph import falkordb_reachable
+    from relic.engram import postgres_reachable
     from relic.ingest import format_ingest_timing
     from relic.obs import get_logger, stderr_console
 
     log = get_logger("ingest")
-    _quiet_background_errors(log)
     settings = get_settings()
 
     # Granola and Notion are non-repo sources: they scope per note-owner / per workspace,
@@ -488,7 +429,6 @@ async def _ingest(
         await _ingest_granola(
             limit,
             months=months,
-            bulk=bulk,
             fresh=fresh,
             no_progress=no_progress,
             no_load=no_load,
@@ -501,7 +441,6 @@ async def _ingest(
         await _ingest_notion(
             limit,
             months=months,
-            bulk=bulk,
             fresh=fresh,
             no_progress=no_progress,
             no_load=no_load,
@@ -515,14 +454,10 @@ async def _ingest(
         raise typer.Exit(code=2)
     ingest_start = time.monotonic()
 
-    # The graph is only needed for extraction. A capture-only run (--no-load) needs no
-    # FalkorDB, so the preflight probe is skipped; a full run keeps the early-fail.
-    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    # The store is only needed for the load half. A capture-only run (--no-load) needs
+    # no Postgres, so the preflight probe is skipped; a full run keeps the early-fail.
+    if not no_load and not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     episodes, group_id, fetch_seconds, prepare_seconds = await _capture(
@@ -546,12 +481,11 @@ async def _ingest(
         )
         return
 
-    stats, use_bulk = await _extract(
+    stats = await _extract(
         repo,
         episodes,
         group_id,
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=None,
@@ -562,8 +496,8 @@ async def _ingest(
 
     extracted = stats.loaded + stats.failed
     total_seconds = time.monotonic() - ingest_start
-    # The honest remainder: FalkorDB probe, token resolve, engram build, and the
-    # index build (which the loader's duration_s deliberately excludes).
+    # The honest remainder: the Postgres probe, token resolve, store build, and the
+    # schema check (which the loader's duration_s deliberately excludes).
     setup_seconds = max(0.0, total_seconds - fetch_seconds - prepare_seconds - stats.duration_s)
     stderr_console().print(
         format_ingest_timing(
@@ -571,15 +505,15 @@ async def _ingest(
             [
                 ("fetch", fetch_seconds),
                 ("map + raw store + spool", prepare_seconds),
-                ("load (extraction)", stats.duration_s),
-                ("setup + index", setup_seconds),
+                ("load (engram write)", stats.duration_s),
+                ("setup + schema", setup_seconds),
             ],
             total_seconds,
             loaded=stats.loaded,
             skipped=stats.skipped,
             failed=stats.failed,
             per_episode_seconds=stats.duration_s / extracted if extracted else 0.0,
-            bulk=use_bulk,
+            bulk=False,
         ),
         markup=False,
         highlight=False,
@@ -650,15 +584,13 @@ async def _extract_scopes(
     *,
     source: str,
     settings: "Settings",
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     limit: int | None,
     verb: str,
     log: "logging.Logger",
-    concurrency: int | None = None,
 ) -> "tuple[int, int]":
-    """Extract each scope into its own partition + ledger. Returns ``(loaded, failed)``.
+    """Load each scope under its own ledger. Returns ``(loaded, failed)``.
 
     Shared by the non-repo sources (granola, notion). ``_extract`` checkpoints under the
     group_id it is handed, so each scope is passed its own key (``granola__<email>`` /
@@ -668,18 +600,16 @@ async def _extract_scopes(
     """
     total_loaded = total_failed = 0
     for scope, specs in sorted(by_scope.items()):
-        stats, _ = await _extract(
+        stats = await _extract(
             scope,
             specs,
             scope,
             settings=settings,
-            bulk=bulk,
             fresh=fresh,
             no_progress=no_progress,
             limit=limit,
             progress_label=f"{verb} {scope}",
             log=log,
-            concurrency=concurrency,
         )
         # A non-repo run has no repo; the source label + the per-scope id identify it.
         _record_run(stats, None, source=source)
@@ -692,22 +622,21 @@ async def _ingest_granola(
     limit: int | None,
     *,
     months: int,
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     no_load: bool,
     settings: "Settings",
     log: "logging.Logger",
 ) -> None:
-    """Standalone Granola ingest: capture meetings, then extract per owner-scope.
+    """Standalone Granola ingest: capture meetings, then load per owner-scope.
 
     Unlike the github path there is no repo. The grn_ key (a per-user key forwarded by the
     web app's POST /v1/ingest, else the server's own ``GRANOLA_API_KEY``) is read from
-    settings; each meeting is partitioned by its note owner (``granola__<email>``).
+    settings; each meeting is scoped by its note owner (``granola__<email>``).
     """
     import time
 
-    from relic.graph import falkordb_reachable
+    from relic.engram import postgres_reachable
 
     if not settings.granola_api_key:
         log.error(
@@ -716,12 +645,8 @@ async def _ingest_granola(
         raise typer.Exit(code=2)
 
     ingest_start = time.monotonic()
-    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    if not no_load and not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     episodes, fetch_seconds, prepare_seconds = await _capture_granola(
@@ -747,7 +672,6 @@ async def _ingest_granola(
         by_scope,
         source="Granola",
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=None,
@@ -771,23 +695,17 @@ async def _ingest_granola(
 async def _load_granola(
     limit: int | None,
     *,
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     settings: "Settings",
     log: "logging.Logger",
-    concurrency: int | None = None,
 ) -> None:
-    """Extract spooled Granola episodes per owner-scope: the LLM half of a two-phase granola run."""
-    from relic.graph import falkordb_reachable
+    """Load spooled Granola episodes per owner-scope: the second half of a two-phase run."""
+    from relic.engram import postgres_reachable
     from relic.ingest import read_spool
 
-    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    if not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     spool_base = Path("data/spool")
@@ -808,13 +726,11 @@ async def _load_granola(
         by_scope,
         source="Granola",
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=limit,
-        verb="extracting",
+        verb="loading",
         log=log,
-        concurrency=concurrency,
     )
     log.info("granola load done: %d meetings loaded, %d failed", loaded, failed)
     if loaded == 0 and failed:
@@ -865,7 +781,6 @@ async def _ingest_notion(
     limit: int | None,
     *,
     months: int,
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     no_load: bool,
@@ -880,7 +795,7 @@ async def _ingest_notion(
     """
     import time
 
-    from relic.graph import falkordb_reachable
+    from relic.engram import postgres_reachable
 
     if not settings.notion_api_key:
         log.error(
@@ -889,12 +804,8 @@ async def _ingest_notion(
         raise typer.Exit(code=2)
 
     ingest_start = time.monotonic()
-    if not no_load and not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    if not no_load and not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     episodes, fetch_seconds, prepare_seconds = await _capture_notion(
@@ -920,7 +831,6 @@ async def _ingest_notion(
         by_scope,
         source="Notion",
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=None,
@@ -944,23 +854,17 @@ async def _ingest_notion(
 async def _load_notion(
     limit: int | None,
     *,
-    bulk: bool,
     fresh: bool,
     no_progress: bool,
     settings: "Settings",
     log: "logging.Logger",
-    concurrency: int | None = None,
 ) -> None:
-    """Extract spooled Notion episodes per workspace-scope: the LLM half of a notion run."""
-    from relic.graph import falkordb_reachable
+    """Load spooled Notion episodes per workspace-scope: the second half of a notion run."""
+    from relic.engram import postgres_reachable
     from relic.ingest import read_spool
 
-    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    if not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     spool_base = Path("data/spool")
@@ -981,13 +885,11 @@ async def _load_notion(
         by_scope,
         source="Notion",
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=limit,
-        verb="extracting",
+        verb="loading",
         log=log,
-        concurrency=concurrency,
     )
     log.info("notion load done: %d pages loaded, %d failed", loaded, failed)
     if loaded == 0 and failed:
@@ -999,43 +901,36 @@ async def _load(
     limit: int | None = None,
     *,
     source: str = "github",
-    bulk: bool = False,
     fresh: bool = False,
     no_progress: bool = False,
-    concurrency: int | None = None,
 ) -> None:
     import time
 
     from relic.config import get_settings
-    from relic.graph import falkordb_reachable
+    from relic.engram import postgres_reachable
     from relic.ingest import format_ingest_timing, read_spool, repo_group_id
     from relic.obs import get_logger, stderr_console
 
     log = get_logger("load")
-    _quiet_background_errors(log)
     settings = get_settings()
 
     if source == "granola":
         await _load_granola(
             limit,
-            bulk=bulk,
             fresh=fresh,
             no_progress=no_progress,
             settings=settings,
             log=log,
-            concurrency=concurrency,
         )
         return
 
     if source == "notion":
         await _load_notion(
             limit,
-            bulk=bulk,
             fresh=fresh,
             no_progress=no_progress,
             settings=settings,
             log=log,
-            concurrency=concurrency,
         )
         return
 
@@ -1044,12 +939,8 @@ async def _load(
         raise typer.Exit(code=2)
     load_start = time.monotonic()
 
-    if not falkordb_reachable(settings.falkordb_host, settings.falkordb_port):
-        log.error(
-            "FalkorDB not reachable at %s:%s. Start it with `just up`.",
-            settings.falkordb_host,
-            settings.falkordb_port,
-        )
+    if not postgres_reachable(settings.database_url):
+        log.error("Postgres not reachable at %s. Start it with `just up`.", settings.database_url)
         raise typer.Exit(code=1)
 
     group_id = repo_group_id(repo)
@@ -1061,18 +952,16 @@ async def _load(
         return
     log.info("read %d spooled episodes for %s", len(episodes), repo)
 
-    stats, use_bulk = await _extract(
+    stats = await _extract(
         repo,
         episodes,
         group_id,
         settings=settings,
-        bulk=bulk,
         fresh=fresh,
         no_progress=no_progress,
         limit=limit,
-        progress_label=f"extracting {repo}",
+        progress_label=f"loading {repo}",
         log=log,
-        concurrency=concurrency,
     )
     _record_run(stats, repo)
 
@@ -1084,15 +973,15 @@ async def _load(
             repo,
             [
                 ("read spool", read_seconds),
-                ("load (extraction)", stats.duration_s),
-                ("setup + index", setup_seconds),
+                ("load (engram write)", stats.duration_s),
+                ("setup + schema", setup_seconds),
             ],
             total_seconds,
             loaded=stats.loaded,
             skipped=stats.skipped,
             failed=stats.failed,
             per_episode_seconds=stats.duration_s / extracted if extracted else 0.0,
-            bulk=use_bulk,
+            bulk=False,
         ),
         markup=False,
         highlight=False,
@@ -1227,118 +1116,75 @@ def _repo_from_cwd(cwd: str) -> str | None:
     return f"{m.group(1)}/{m.group(2)}".lower() if m else None
 
 
-def _scope_for_cwd(cwd: str, default_db: str) -> "tuple[str, str]":
-    """Resolve (engram database, group_id) for a session's working dir.
+def _scope_for_cwd(cwd: str, default_scope: str) -> str:
+    """Resolve the ingest scope for a session's working dir.
 
-    A cwd that maps to a repo scopes to that repo's slug for BOTH the database and the
-    group_id (matching how ingest writes). An unresolved cwd falls back to the daemon's
-    concrete default for both, so recall and capture always agree on a concrete group
-    and recall never reads the whole graph unfiltered.
+    A cwd that maps to a repo scopes to that repo's slug (matching how ingest
+    writes the ``scope`` column). An unresolved cwd falls back to the daemon's
+    concrete default, so recall and capture always agree on a concrete scope. The
+    store already binds every read and write to its workspace, so even the
+    fallback never crosses a tenant.
     """
     from relic.ingest import repo_group_id
 
     repo = _repo_from_cwd(cwd)
-    if repo:
-        slug = repo_group_id(repo)
-        return slug, slug
-    return default_db, default_db
+    return repo_group_id(repo) if repo else default_scope
 
 
-class _EngramPool:
-    """Lazily builds and caches one engram per FalkorDB database (per repo).
+class _StoreHandle:
+    """Lazily builds and caches the one engram store the daemon serves from.
 
-    A session can touch any repo, so the daemon can't pin a single engram at boot. The
-    pool builds one on first use and reuses it. Building is deferred, so the daemon boots
-    even with FalkorDB down (the failure surfaces per-request and degrades there).
-
-    Each database gets its OWN build lock, so a slow cold-build for one repo never
-    serializes requests for another. Bounded by an LRU cap so a long-lived daemon that
-    visits many repos doesn't grow without limit.
+    Building is deferred so the daemon boots even with Postgres down: the failure
+    surfaces per-request and degrades there. One store serves every scope, since
+    scope is a column filter, not a connection (ADR-0007).
     """
 
-    def __init__(self, settings: "Settings", max_size: int = 32) -> None:
+    def __init__(self, settings: "Settings") -> None:
         import asyncio
-        from collections import OrderedDict
 
         self._settings = settings
-        self._max = max_size
-        self._engrams = OrderedDict()  # database -> engram, in LRU order
-        self._locks = {}  # database -> its build lock
-        self._meta = asyncio.Lock()  # guards lazy per-database lock creation
+        self._store: EngramStore | None = None
+        self._lock = asyncio.Lock()
 
-    async def _lock_for(self, database: str):
-        import asyncio
+    async def get(self) -> "EngramStore":
+        if self._store is not None:
+            return self._store
+        async with self._lock:
+            if self._store is None:
+                from relic.engram import open_engram
 
-        lock = self._locks.get(database)
-        if lock is None:
-            async with self._meta:
-                lock = self._locks.get(database)
-                if lock is None:
-                    lock = asyncio.Lock()
-                    self._locks[database] = lock
-        return lock
+                self._store = await open_engram(self._settings)
+            return self._store
 
-    async def get(self, database: str) -> "GraphitiMemory":
-        eng = self._engrams.get(database)
-        if eng is not None:
-            self._engrams.move_to_end(database)  # LRU touch
-            return eng
-        async with await self._lock_for(database):
-            eng = self._engrams.get(database)
-            if eng is None:
-                from relic.graph import open_memory
-
-                eng = open_memory(
-                    host=self._settings.falkordb_host,
-                    port=self._settings.falkordb_port,
-                    password=self._settings.falkordb_password,
-                    database=database,
-                    api_key=self._settings.openai_api_key,
-                )
-                self._engrams[database] = eng
-                self._engrams.move_to_end(database)
-                await self._evict_over_cap()
-            return eng
-
-    async def _evict_over_cap(self) -> None:
-        while len(self._engrams) > self._max:
-            db, eng = self._engrams.popitem(last=False)  # least-recently-used
-            self._locks.pop(db, None)
-            with suppress(Exception):  # eviction close is best-effort
-                await eng.close()
-
-    async def close_all(self) -> None:
-        for eng in self._engrams.values():
+    async def close(self) -> None:
+        if self._store is not None:
             with suppress(Exception):  # shutdown close is best-effort
-                await eng.close()
-        self._engrams.clear()
-        self._locks.clear()
+                await self._store.close()
+            self._store = None
 
 
 def _make_recall_fn(
-    engram: "GraphitiMemory", group_id: str | None
+    engram: "EngramStore", scope: str | None
 ) -> "Callable[[str, int], Awaitable[str]]":
     async def recall_fn(query: str, num_results: int = 10) -> str:
-        from relic.graph import format_answer, recall
+        from relic.engram import format_answer, recall
 
-        return format_answer(
-            await recall(engram, query, group_id=group_id, num_results=num_results)
-        )
+        return format_answer(await recall(engram, query, scope=scope, num_results=num_results))
 
     return recall_fn
 
 
 async def _write_session_episode(
-    engram: "GraphitiMemory", group: str, payload: dict[str, Any]
+    engram: "EngramStore", group: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """Write one finished session into ``group`` as an AgentSession episode.
 
     Composition only: ``relic.ingest.session_to_episode`` owns turning the capture payload
     (transcript distillation included) into the ``EpisodeSpec``; this runs it through the
     same loader ingest uses. Idempotent per session via the group's checkpoint ledger -- the
-    episode name is the session id, so a repeated SessionEnd is skipped, not re-extracted.
+    episode name is the session id, so a repeated SessionEnd is skipped, not re-landed.
     """
-    from relic.graph import load_episodes
+    from relic.engram import load_episodes
     from relic.ingest import checkpoint_path, load_done, record_done, session_to_episode
 
     session_id = str(payload.get("session_id", "")).strip()
@@ -1363,30 +1209,28 @@ async def _write_session_episode(
 
 
 def _make_pool_recall_fn(
-    pool: "_EngramPool", default_db: str
+    handle: "_StoreHandle", default_scope: str
 ) -> "Callable[[str, int, str], Awaitable[str]]":
-    """Daemon recall: resolve the repo from the session's cwd, recall in that group."""
+    """Daemon recall: resolve the repo from the session's cwd, recall in that scope."""
 
     async def recall_fn(query: str, num_results: int, cwd: str) -> str:
-        from relic.graph import format_answer, recall
+        from relic.engram import format_answer, recall
 
-        database, group_id = _scope_for_cwd(cwd, default_db)
-        engram = await pool.get(database)
-        return format_answer(
-            await recall(engram, query, group_id=group_id, num_results=num_results)
-        )
+        scope = _scope_for_cwd(cwd, default_scope)
+        engram = await handle.get()
+        return format_answer(await recall(engram, query, scope=scope, num_results=num_results))
 
     return recall_fn
 
 
 def _make_pool_capture_fn(
-    pool: "_EngramPool", default_db: str
+    handle: "_StoreHandle", default_scope: str
 ) -> "Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]":
-    """Daemon write-back: resolve the repo from the session's cwd, write to that group."""
+    """Daemon write-back: resolve the repo from the session's cwd, write to that scope."""
 
     async def capture_fn(payload: dict[str, Any]) -> dict[str, Any]:
-        database, group = _scope_for_cwd(str(payload.get("cwd", "")), default_db)
-        engram = await pool.get(database)
+        group = _scope_for_cwd(str(payload.get("cwd", "")), default_scope)
+        engram = await handle.get()
         return await _write_session_episode(engram, group, payload)
 
     return capture_fn
@@ -1401,26 +1245,20 @@ async def _serve(repo: str | None = None) -> None:
 
     log = get_logger("serve")
     settings = get_settings()
-    # Recall reads one FalkorDB graph: the repo's group_id partition that ingest wrote
-    # to. Without this scope serve reads the empty default graph and recall_memory
-    # returns nothing even with data ingested. Mirrors `relic recall --repo`.
+    # Recall scopes to the repo's ingest scope when one is configured; without it the
+    # search runs workspace-wide (the store binds every read to its workspace).
+    # Mirrors `relic recall --repo`.
     repo = repo or settings.target_repo
     group_id = repo_group_id(repo) if repo else None
     conn = connect(settings.registry_db_path)
     engram = None
     recall_fn = None
     try:
-        from relic.graph import open_memory
+        from relic.engram import open_engram
 
-        engram = open_memory(
-            host=settings.falkordb_host,
-            port=settings.falkordb_port,
-            password=settings.falkordb_password,
-            database=group_id or settings.falkordb_database,
-            api_key=settings.openai_api_key,
-        )
+        engram = await open_engram(settings)
         recall_fn = _make_recall_fn(engram, group_id)
-        log.info("memory recall scoped to %s", group_id or settings.falkordb_database)
+        log.info("memory recall scoped to %s", group_id or "the whole workspace")
     except Exception as exc:  # noqa: BLE001 - recall is optional; still serve skills
         # The logger writes to stderr: stdout is the MCP transport and any bytes on it
         # would corrupt the stream.
@@ -1476,31 +1314,33 @@ async def _daemon(repo: str | None, host: str, port: int, token: str | None) -> 
     settings = get_settings()
     repo = (repo or settings.target_repo or "").strip().lower() or None
     # The daemon scopes per session: each inject/capture resolves the repo from the
-    # session's cwd (git origin) and uses that repo's engram, falling back to this
-    # concrete default when the cwd is not a known repo. Engrams are built lazily per
-    # repo by the pool, so the daemon boots even with FalkorDB down (recall/capture then
-    # error per-request, caught by the surface and shown as degraded in the app).
-    default_db = repo_group_id(repo) if repo else settings.falkordb_database
-    pool = _EngramPool(settings)
+    # session's cwd (git origin) and uses that scope, falling back to this concrete
+    # default when the cwd is not a known repo. The store is built lazily, so the
+    # daemon boots even with Postgres down (recall/capture then error per-request,
+    # caught by the surface and shown as degraded in the app).
+    default_scope = repo_group_id(repo) if repo else settings.relic_workspace
+    handle = _StoreHandle(settings)
     app_ = build_daemon_app(
-        recall=_make_pool_recall_fn(pool, default_db),
-        capture=_make_pool_capture_fn(pool, default_db),
+        recall=_make_pool_recall_fn(handle, default_scope),
+        capture=_make_pool_capture_fn(handle, default_scope),
         # empty/blank falls through to None (no auth), never the literal empty string
         token=token or os.environ.get("RELIC_DAEMON_TOKEN") or None,
     )
-    # Pre-warm the default engram so the common case (a session in the --repo repo) is
-    # hot on the first inject instead of paying the cold build inside the 2s hook.
+    # Pre-warm the store so the first inject is hot instead of paying the cold build
+    # inside the 2s hook window.
     try:
-        await pool.get(default_db)
-    except Exception as exc:  # noqa: BLE001 - best-effort; a down engram still boots degraded
+        await handle.get()
+    except Exception as exc:  # noqa: BLE001 - best-effort; a down store still boots degraded
         log.warning("engram pre-warm failed, daemon degraded until it recovers: %s", exc)
-    log.info("daemon on http://%s:%d, default scope %s, per-session by cwd", host, port, default_db)
+    log.info(
+        "daemon on http://%s:%d, default scope %s, per-session by cwd", host, port, default_scope
+    )
     config = uvicorn.Config(app_, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     try:
         await server.serve()
     finally:
-        await pool.close_all()
+        await handle.close()
 
 
 @app.command(name="install-hooks")
@@ -1848,16 +1688,18 @@ def _resolve_server_token() -> str | None:
     return get_settings().github_token or None
 
 
-def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> dict[str, Any]:
+def _trigger_ingest(
+    source: str, repo: str | None, token: str | None = None, workspace: str | None = None
+) -> dict[str, Any]:
     """Kick off a background ingest and return its status.
 
     Spawns `relic ingest` as a subprocess, isolated from the server's event loop. The
-    checkpoint makes it effectively incremental: a re-run only extracts episodes that are
-    new, so a webhook or cron can call this repeatedly and only the new items get loaded.
+    checkpoint makes it effectively incremental: a re-run only loads episodes that are
+    new, so a webhook or cron can call this repeatedly and only the new items land.
 
     For ``source == "github"`` ``repo`` is required (owner/name) and the in-flight guard
     keys on it. For the non-repo sources (``granola``, ``notion``) there is no repo: the
-    graph scope (``granola__<owner-email>`` / ``notion__<workspace>``) isn't knowable until
+    ingest scope (``granola__<owner-email>`` / ``notion__<workspace>``) isn't knowable until
     the data is fetched, so the guard keys on a hash of the source token instead (one token
     ≈ one user/workspace), and the run spawns `relic ingest --source <source>`.
 
@@ -1865,6 +1707,10 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
     granola grn_ key). It reaches the child through its environment, never argv, so it does
     not leak to the process list; the child's settings pick it up. No token means the child
     inherits the server's own credentials for that source.
+
+    ``workspace`` is the engram workspace the run writes into (the web app forwards its
+    Clerk scope). It rides in RELIC_WORKSPACE so the child's rows land under the caller's
+    workspace; absent, the child uses the server's own RELIC_WORKSPACE.
 
     When a github user token is forwarded, the server's own GITHUB_TOKEN is stashed in
     RELIC_SERVER_GITHUB_TOKEN so the child can fall back to it if the user token is expired
@@ -1875,6 +1721,11 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
     import os
     import subprocess
     import sys
+
+    def _with_workspace(env: dict[str, str] | None) -> dict[str, str] | None:
+        if not workspace:
+            return env
+        return {**(env if env is not None else os.environ), "RELIC_WORKSPACE": workspace}
 
     if source == "granola":
         # No repo, and the owner-email scope is unknown until fetch, so key the in-flight
@@ -1888,7 +1739,8 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
         # no user key, env=None lets the child inherit the server's own GRANOLA_API_KEY.
         env = {**os.environ, "GRANOLA_API_KEY": token} if token else None
         proc = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-m", "relic", "ingest", "--source", "granola"], env=env
+            [sys.executable, "-m", "relic", "ingest", "--source", "granola"],
+            env=_with_workspace(env),
         )
         _INGEST_PROCS[key] = proc
         return {"status": "running", "source": "granola"}
@@ -1906,7 +1758,8 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
         # user token, env=None lets the child inherit the server's own NOTION_API_KEY.
         env = {**os.environ, "NOTION_API_KEY": token} if token else None
         proc = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-m", "relic", "ingest", "--source", "notion"], env=env
+            [sys.executable, "-m", "relic", "ingest", "--source", "notion"],
+            env=_with_workspace(env),
         )
         _INGEST_PROCS[key] = proc
         return {"status": "running", "source": "notion"}
@@ -1931,7 +1784,7 @@ def _trigger_ingest(source: str, repo: str | None, token: str | None = None) -> 
     else:
         env = None
     proc = subprocess.Popen(  # noqa: S603
-        [sys.executable, "-m", "relic", "ingest", "--repo", repo], env=env
+        [sys.executable, "-m", "relic", "ingest", "--repo", repo], env=_with_workspace(env)
     )
     _INGEST_PROCS[repo] = proc
     return {"status": "running", "repo": repo}
@@ -1949,8 +1802,8 @@ def serve_http(
     """Serve connector status and the ingest trigger over HTTP for the web app.
 
     GET /v1/connectors, GET /v1/ingest/runs, GET /v1/status, POST /v1/ingest.
-    Status reads the ingest checkpoints on disk (no graph needed); the trigger
-    spawns `relic ingest`, so a full run still needs FalkorDB and the source keys.
+    Status reads the ingest checkpoints on disk (no store needed); the trigger
+    spawns `relic ingest`, so a full run still needs Postgres and the source keys.
     """
     import os
 
@@ -1967,8 +1820,10 @@ def serve_http(
     async def ingest_runs(repo: str | None, limit: int, source: str | None) -> dict[str, Any]:
         return _ingest_runs(repo, limit, source)
 
-    async def ingest_trigger(source: str, repo: str | None, token: str | None) -> dict[str, Any]:
-        return _trigger_ingest(source, repo, token)
+    async def ingest_trigger(
+        source: str, repo: str | None, token: str | None, workspace: str | None
+    ) -> dict[str, Any]:
+        return _trigger_ingest(source, repo, token, workspace)
 
     api = build_http_app(
         connectors=connectors,
@@ -2084,7 +1939,7 @@ def recall_command(
     ] = None,
     num_results: Annotated[int, typer.Option(help="max facts to return")] = 10,
 ) -> None:
-    """Recall facts from the memory graph, with their sources."""
+    """Recall facts from the engram, with their sources."""
     import asyncio
 
     asyncio.run(_recall(query, repo, num_results))
@@ -2092,72 +1947,18 @@ def recall_command(
 
 async def _recall(query: str, repo: str | None, num_results: int) -> None:
     from relic.config import get_settings
-    from relic.graph import format_answer, open_memory, recall
+    from relic.engram import format_answer, open_engram, recall
     from relic.ingest import repo_group_id
 
     settings = get_settings()
     repo = repo or settings.target_repo
     group_id = repo_group_id(repo) if repo else None
-    engram = open_memory(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=group_id or settings.falkordb_database,
-        api_key=settings.openai_api_key,
-    )
+    engram = await open_engram(settings)
     try:
-        answer = await recall(engram, query, group_id=group_id, num_results=num_results)
+        answer = await recall(engram, query, scope=group_id, num_results=num_results)
     finally:
         await engram.close()
     print(format_answer(answer))
-
-
-@app.command("audit-zones")
-def audit_zones_command(
-    repo: Annotated[
-        str | None,
-        typer.Option(help="owner/name whose database to audit, defaults to TARGET_REPO"),
-    ] = None,
-    limit: Annotated[int, typer.Option(help="max violations to report per kind")] = 1000,
-) -> None:
-    """Audit Zone integrity (ADR-0006): is every Zoned node and edge tagged with a Zone?
-
-    Exits non-zero if any violation is found, so it can gate CI. A clean report is the
-    proof that the access boundary is structurally sound.
-    """
-    import asyncio
-
-    asyncio.run(_audit_zones(repo, limit))
-
-
-async def _audit_zones(repo: str | None, limit: int) -> None:
-    from relic.config import get_settings
-    from relic.graph import audit_zone_integrity, open_memory
-    from relic.ingest import repo_group_id
-
-    settings = get_settings()
-    repo = repo or settings.target_repo
-    group_id = repo_group_id(repo) if repo else None
-    engram = open_memory(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=group_id or settings.falkordb_database,
-        api_key=settings.openai_api_key,
-    )
-    try:
-        report = await audit_zone_integrity(engram, limit=limit)
-    finally:
-        await engram.close()
-    if report.is_clean:
-        console.print("[green]Zone integrity: clean[/] — every Zoned node and edge carries a Zone.")
-        return
-    console.print(f"[red]Zone integrity: {len(report.violations)} violation(s)[/]")
-    for violation in report.violations:
-        console.print(f"  [yellow]{violation.kind}[/] {violation.uuid}: {violation.detail}")
-    if report.truncated:
-        console.print("[yellow]…report truncated at the row limit; more violations may exist.[/]")
-    raise typer.Exit(code=1)
 
 
 @app.command("eval")
@@ -2180,7 +1981,7 @@ async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
     import json
 
     from relic.config import get_settings
-    from relic.graph import open_memory, recall
+    from relic.engram import open_engram, recall
     from relic.ingest import repo_group_id
     from relic.scorecard import load_gold, score_case, summarize, to_payload
 
@@ -2191,17 +1992,11 @@ async def _eval(path: Path, num_results: int, json_out: Path | None) -> None:
         raise typer.Exit(code=1) from exc
     settings = get_settings()
     group_id = repo_group_id(gold.repo)
-    engram = open_memory(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=group_id or settings.falkordb_database,
-        api_key=settings.openai_api_key,
-    )
+    engram = await open_engram(settings)
     results = []
     try:
         for case in gold.cases:
-            answer = await recall(engram, case.question, group_id=group_id, num_results=num_results)
+            answer = await recall(engram, case.question, scope=group_id, num_results=num_results)
             results.append(score_case(case, gold.repo, answer))
     finally:
         await engram.close()
@@ -2226,7 +2021,7 @@ def query(
         str | None, typer.Option(help="owner/name to scope the query, defaults to TARGET_REPO")
     ] = None,
 ) -> None:
-    """Query the graph, e.g. reviewers of a path (Phase 2)."""
+    """Query the engram, e.g. reviewers of a path (Phase 2)."""
     import asyncio
 
     asyncio.run(_query(text, repo))
@@ -2234,24 +2029,17 @@ def query(
 
 async def _query(text: str, repo: str | None) -> None:
     from relic.config import get_settings
-    from relic.graph import open_memory, reviewers_of
+    from relic.engram import open_engram, reviewers_of
     from relic.ingest import repo_group_id
 
     settings = get_settings()
-    # FalkorDB partitions each repo into its own graph named by group_id, so the
-    # client must target that graph. Without a repo we query the default database,
-    # which only holds ungrouped data.
+    # A repo narrows the query to that ingest scope; without one it runs
+    # workspace-wide (the store binds every read to its workspace).
     repo = repo or settings.target_repo
     group_id = repo_group_id(repo) if repo else None
-    engram = open_memory(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-        database=group_id or settings.falkordb_database,
-        api_key=settings.openai_api_key,
-    )
+    engram = await open_engram(settings)
     try:
-        hits = await reviewers_of(engram, text, group_id=group_id)
+        hits = await reviewers_of(engram, text, scope=group_id)
     finally:
         await engram.close()
 

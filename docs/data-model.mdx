@@ -1,7 +1,7 @@
 ---
 title: "Data model"
 icon: "database"
-description: "The three type layers: the rich ontology, the flat graph nodes, and SkillIR, plus the episode JSON."
+description: "The three type layers: the rich ontology, the relational engram schema, and SkillIR, plus the episode body contract."
 ---
 
 Relic has three type layers, each with a distinct job. Conflating them is the
@@ -9,33 +9,26 @@ mistake the split prevents.
 
 1. **The rich ontology** (`ontology/`) is the typed source of truth for the
    domain: nested models, audit records, canonical URLs.
-2. **The flat graph types** (`graph/engram.py`) are the Graphiti-facing view:
-   flat scalar fields only, no nested objects, no reserved names.
+2. **The relational engram schema** (`engram/store.py`) is what Postgres holds:
+   memory rows, people, and the joins between them.
 3. **SkillIR** (`ontology/skill_ir.py`) is the contract for a compiled skill,
    ported verbatim from the system-design doc.
 
-A fourth shape sits between ingestion and the graph: the **episode JSON**, whose
-keys mirror the flat graph attributes so the extractor maps cleanly onto them. The
-flatten-and-rename the extractor performs from the body to the flat node is recorded
-as executable data in
-[`relic.graph.field_map`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/field_map.py)
-(`ARTIFACT_FIELD_MAPS`) and checked by `tests/test_field_map.py`, so a node field with
-no body source — or a mapped body path that no longer resolves — fails in CI instead of
-surfacing as a silent null at graph-read time.
+A fourth shape sits between ingestion and the store: the **episode body**, a
+typed JSON contract in `relic.contracts.episode_body`. The mapping from each
+body onto its row's derived columns is one pure function per artifact type in
+[`relic.engram.derive`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/derive.py),
+checked by `tests/test_derive.py`, so a body field the store depends on cannot
+silently stop resolving.
 
-## Why three layers
+## Why separate layers
 
-Graphiti's custom entity and edge types must be flat scalar models. They cannot
-nest objects, and they cannot use Graphiti's reserved attribute names: `uuid`,
-`name`, `group_id`, `labels`, `created_at`, `summary`, `attributes`,
-`name_embedding`. The rich ontology violates both rules: it nests (`Person` has a
-`ContactInfo`, an `AuditInfo`, a list of `Link`) and it uses names like
-`created_at`.
-
-So the two are kept apart. The rich models stay the source of truth for the typed
-API. The flat `*Node` models in [`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) are
-the graph-facing mirror. When the typed API needs richer structure than the graph
-can hold, the rich layer already has it.
+The rich ontology is built for the typed API: it nests (`Person` has a
+`ContactInfo`, an `AuditInfo`, a list of `Link`) and carries audit metadata.
+The store needs none of that on the row: it needs identity, a search surface,
+and the body itself. So the row keeps the typed body verbatim in `jsonb` and
+derives flat columns from it, and the rich models stay the source of truth for
+the typed domain.
 
 ## Layer 1: the rich ontology
 
@@ -79,47 +72,50 @@ platform grows into as more sources land.
 All ontology types are re-exported from
 [`ontology/__init__.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/ontology/__init__.py).
 
-## Layer 2: the flat graph types
+## Layer 2: the relational engram schema
 
-[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) declares the types Graphiti extracts
-into. Entities:
+[`store.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/store.py)
+owns the DDL (the `_SCHEMA` constant), applied idempotently by
+`ensure_schema()`. Five tables, plus one reserved:
 
-| Key | Model | Fields |
+| Table | Key | What it holds |
 |---|---|---|
-| `Person` | `PersonNode` | full_name, preferred_name, email, slack_handle, external_org, profile_url |
-| `Repo` | `RepoNode` | full_name, url, default_branch |
-| `PullRequest` | `PullRequestNode` | number, title, state, url, merged_at |
-| `Review` | `ReviewNode` | state, url, submitted_at |
-| `Issue` | `IssueNode` | identifier, title, state, url |
-| `Procedure` | `ProcedureNode` | archetype, confidence, support |
+| `workspaces` | `id` (text) | One row per tenant: the web app's Clerk scope, or `RELIC_WORKSPACE` locally |
+| `people` | `id` (uuid) | display_name, github_login, linear_id, slack_id, email, per workspace |
+| `memories` | `id` (uuid), `UNIQUE (workspace_id, name)` | One row per artifact: scope, source, artifact_type, title, url, reference_time, the `jsonb` body, content_hash, schema_version, search_text, the generated `search_tsv`, user_edited/edited_by/edited_at, document_id |
+| `memory_people` | `(memory_id, person_id, role)` | Roles: author, reviewer, requested_reviewer, assignee, participant |
+| `memory_paths` | `(memory_id, path)` | File paths a memory touches |
+| `memory_embeddings` | reserved | The pgvector fast-follow, commented in the DDL, not built |
 
-Edges (attributes only; Graphiti owns the endpoints):
+Two schema decisions worth knowing:
 
-| Key | Model | Attributes |
-|---|---|---|
-| `AUTHORED` | `Authored` | (none) |
-| `REVIEWED` | `Reviewed` | state |
-| `TOUCHES_PATH` | `TouchesPath` | path, additions, deletions |
-| `REPORTS_TO` | `ReportsTo` | (none) |
+- **Person identity is a precedence, enforced by partial unique indexes.** A
+  person keys on `github_login`, else `email`, else `display_name`. Partial
+  indexes because Postgres treats NULLs as distinct: a plain
+  `UNIQUE (workspace_id, github_login)` would let NULL-login duplicates through.
+- **`search_tsv` is generated.** A stored tsvector over `title` plus
+  `search_text`, GIN-indexed, so search stays consistent with the columns by
+  construction.
 
-`EDGE_TYPE_MAP` constrains which edges can connect which entity pairs:
-`(Person, PullRequest)` allows `AUTHORED` and `REVIEWED`; `(Person, Person)`
-allows `REPORTS_TO`. These three dicts (`ENTITY_TYPES`, `EDGE_TYPES`,
-`EDGE_TYPE_MAP`) are passed to every `add_episode` call so extraction stays
-typed and bounded ([`load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/load.py)).
+The mapping from each artifact type's body onto the derived columns (title,
+url, search_text, markdown, people, paths) is
+[`derive.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/derive.py):
+deterministic, pure, and degrading (a malformed body lands as a raw-text row,
+never a failed episode). See [Memory and recall](/memory-and-recall) for the
+full walk.
 
 ## The episode body (a typed, versioned contract)
 
-The bridge from ingestion to the graph. [`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py)
-turns each fetched record into an `EpisodeSpec`. The `body` is a JSON string on the
-wire (Graphiti requires a str), but its shape is no longer implicit: it is built from
-a typed Pydantic model in
+The bridge from ingestion to the store. [`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py)
+turns each fetched record into an `EpisodeSpec`. The `body` is a JSON string on
+the wire, built from a typed Pydantic model in
 [`relic.contracts.episode_body`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/contracts/episode_body.py)
-(`PrEpisodeBody` / `IssueEpisodeBody`) and serialized with `model_dump_json()`. The
-model is the shared schema both sides read: ingest builds it, and the graph side
-(extraction, recall, the detector, the compiler) deserializes it against the same
-type, so the seam cannot drift. The keys mirror the flat `*Node` attribute names, so
-the extractor maps values onto typed entities.
+(`PrEpisodeBody`, `IssueEpisodeBody`, `DocEpisodeBody`,
+`ConversationEpisodeBody`, `AgentSessionEpisodeBody`) and serialized with
+`model_dump_json()`. The model is the shared schema both sides read: ingest
+builds it, and the engram side (`derive`, and later the detector and compiler)
+validates it against the same type, so the seam cannot drift. Dispatch keys on
+the `source_type` discriminator.
 
 A PR episode body (`schema_version` 2):
 
@@ -155,44 +151,46 @@ covers GitHub and Linear, since both map to the `IssueRec` record. Reserved fiel
 default empty in the contract so the schema is the full target while capture fills
 it wave by wave: `checks` on the PR body, and on the issue the `priority`,
 `estimate`, `cycle`, `state_history`, and `relations` Linear has but GitHub does
-not.
+not. The doc, conversation, and agent-session bodies carry the shapes their
+sources produce: a Notion page's title, url, authors, and text; a Granola
+meeting's participants, summary, decisions, and transcript; a Claude Code
+session's actor, cwd, files touched, summary, and distilled transcript.
 
 Each `EpisodeSpec` also carries a `name` (for example `PR buildrelic/relic-core#12`),
 a `source_description`, a `reference_time` (the merge or creation timestamp, parsed
-tz-aware), the `group_id` (the slugified repo), and the `schema_version`.
+tz-aware), the `group_id` (the scope slug), and the `schema_version`.
 
 <Warning>
 **Two invariants the body shape must keep.**
 
-- **Citation anchors.** `pull_request.url` / `issue.url` are read by
-  [`recall._extract_url`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)
-  to attach a source URL to every recalled fact. Moving them degrades every citation
-  to a bare uuid.
-- **The name is the dedup key.** `schema_version` and every new field live in the
-  body, never in `name`. The checkpoint dedups on `name`, so a version woven into it
-  would re-ingest and fork the graph.
+- **Citation anchors.** `pull_request.url` / `issue.url` (and each body's `url`
+  field) are read by
+  [`derive.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/derive.py)
+  into the row's `url` column, which every recalled fact cites. Moving them
+  degrades every citation.
+- **The name is the identity.** `schema_version` and every new field live in the
+  body, never in `name`. The checkpoint dedups on `name` and the store upserts on
+  `(workspace_id, name)`, so a version woven into the name would re-land every
+  episode as a new row instead of refreshing it in place.
 </Warning>
 
 The free-text fields are clipped (description 2000 chars, review comment 1500, commit
-message 1000) and the assembled body is trimmed to a per-episode token budget
-(`_fit_budget`), because oversized JSON episodes degrade extraction. Bot reviews are
+message 1000) and the assembled body is trimmed to a per-episode budget
+(`_fit_budget`), so a pathological artifact cannot bloat its row. Bot reviews are
 dropped and human reviews capped, most-informative kept
 ([`_clip`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py), `_select_reviews`).
 
 <Note>
-Several body fields are richer than the entity/edge schema in
-[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py)
-consumes today (`requested_reviewers` with `kind`, `labels`, `linked_issues`, per-file
-`additions`/`deletions`, `commits`, derived `timestamps`). The full target schema the
-graph side grows into, the node and edge types with their `(source, target)` signatures
-and attributes, the multi-valued rule, and the connector-to-provides map, is the
-[engram graph ontology ADR](/adr/0001-engram-graph-ontology). Capture leads, extraction
-follows.
+Several body fields are richer than what `derive` surfaces into the search
+columns today (per-file `additions`/`deletions`, `co_authors`, derived
+`timestamps`, `linked_issues` relations). The body keeps them verbatim in
+`memories.body`, so the detector and compiler (Phase 4) can read them without a
+re-ingest. Capture leads, consumption follows.
 </Note>
 
 <Warning>
-**Raw payload shapes are not uniform.** The episode JSON above is stable, but the
-verbatim source payloads under `data/raw/` are not. PRs are now fetched over GraphQL,
+**Raw payload shapes are not uniform.** The episode body above is stable, but the
+verbatim source payloads under `data/raw/` are not. PRs are fetched over GraphQL,
 so their raw payload is the **camelCase GraphQL node** (`createdAt`, `mergedAt`,
 `author { login }`); issues still come over REST, so theirs is the **snake_case REST**
 body (`created_at`, `html_url`), as are PRs from any pre-GraphQL ingest. A future pass

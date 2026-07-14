@@ -1,72 +1,79 @@
 ---
 title: "Ingestion"
 icon: "download"
-description: "The capture pipeline: GitHub and Linear to deterministic records to episodes to the graph."
+description: "The capture pipeline: GitHub, Linear, Granola, and Notion to deterministic records to episodes to the engram store."
 ---
 
-`relic ingest --repo owner/name` is the capture pipeline. It pulls engineering
-history from GitHub (and optionally Linear), keeps a raw copy, turns each item
-into a typed episode, spools those episodes to disk, and lands them in the graph.
-The path from source payload to episode is fully deterministic: no LLM, no
-guessing. The LLM enters only at the Graphiti extraction step.
+`relic ingest` is the capture pipeline. It pulls history from a source, keeps a
+raw copy, turns each item into a typed episode, spools those episodes to disk,
+and lands them in the engram store. The whole path is deterministic: no LLM
+anywhere, from source payload to Postgres row (ADR-0007).
 
-That extraction is almost the whole clock: a 40-episode run on `astral-sh/uv`
-spent 99.5% of its time there, against 0.4% on the GitHub fetch. So the pipeline
-splits at the spool into two halves you can run separately:
+Four sources are wired:
 
-- **Capture** (fetch, map, raw store, spool) is fast and deterministic. No LLM, no
-  graph. `relic ingest --no-load` runs only this and stops.
-- **Extraction** (`relic load`) reads the spool and lands episodes in the graph.
-  This is the LLM-heavy half. Run it right after capture, on a schedule, or one
-  batch at a time with `--limit`.
+- **GitHub** (`--repo owner/name`, the default source): merged and closed PRs
+  with reviews and files, plus issues. Pulls Linear issues in the same run when
+  `LINEAR_API_KEY` is set.
+- **Granola** (`--source granola`): meetings, scoped per note owner
+  (`granola__<email>`).
+- **Notion** (`--source notion`): pages, scoped per workspace
+  (`notion__<workspace>`).
+- **Claude Code sessions**: captured by the daemon's `capture` route, not by
+  `relic ingest`; the mapper (`session_to_episode`) and loader are the same.
+
+The pipeline splits at the spool into two halves you can run separately:
+
+- **Capture** (fetch, map, raw store, spool) needs the source credential but no
+  store. `relic ingest --no-load` runs only this and stops.
+- **Load** (`relic load`) reads the spool and lands episodes in the engram: one
+  Postgres upsert per episode, milliseconds each. Run it right after capture, on
+  a schedule, or one batch at a time with `--limit`.
 
 The default `relic ingest` runs both halves back to back, so the split is opt-in.
+In the graph era the split existed because LLM extraction dominated the clock at
+99.5 percent; the extraction step is gone, and the split survives because the
+two-phase workflow (capture on every push, load on a budget) is still the seam a
+webhook or a cron hangs off.
 
 Orchestration lives in [`_ingest`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py) and [`_load`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py). The pieces are in
-[`ingest/`](https://github.com/buildrelic/relic-core/tree/main/packages/relic-ingest/src/relic/ingest/) and [`graph/load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/load.py).
+[`ingest/`](https://github.com/buildrelic/relic-core/tree/main/packages/relic-ingest/src/relic/ingest/) and [`engram/load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/load.py).
 
 ## The flow
 
 ```mermaid
 sequenceDiagram
     participant CLI as relic ingest
-    participant GH as GitHub (GraphQL PRs + REST issues)
-    participant LN as Linear GraphQL
+    participant SRC as GitHub / Linear / Granola / Notion
     participant RAW as raw store
     participant MAP as mappers
     participant SPOOL as spool
     participant LOAD as relic load
-    participant G as Graphiti
-    participant OAI as OpenAI
-    participant DB as FalkorDB
+    participant PG as Postgres engram
+    participant FS as Firestore (optional)
 
     rect rgb(240, 246, 252)
-    note over CLI,SPOOL: capture (fast, deterministic, no LLM)
-    CLI->>GH: fetch last N months: merged + closed PRs (files, reviews, reviewers) + issues
-    GH-->>CLI: PullRequestRec[], IssueRec[]
-    opt LINEAR_API_KEY set
-        CLI->>LN: fetch issues (paginated)
-        LN-->>CLI: IssueRec[]
-    end
+    note over CLI,SPOOL: capture (deterministic, no store)
+    CLI->>SRC: fetch last N months of history
+    SRC-->>CLI: PullRequestRec[], IssueRec[], MeetingRec[], PageRec[]
     CLI->>RAW: dump each raw payload to ./data/raw/<source>/<id>.json
-    CLI->>MAP: pr_to_episode / issue_to_episode
-    MAP-->>CLI: EpisodeSpec[] (JSON bodies, group_id = repo slug)
-    CLI->>SPOOL: write each EpisodeSpec to ./data/spool/<group_id>/
+    CLI->>MAP: pr_to_episode / issue_to_episode / meeting_to_episode / page_to_episode
+    MAP-->>CLI: EpisodeSpec[] (typed JSON bodies, group_id = scope slug)
+    CLI->>SPOOL: write each EpisodeSpec to ./data/spool/<scope>/
     end
     rect rgb(252, 246, 240)
-    note over LOAD,DB: extraction (LLM-heavy, deferrable)
+    note over LOAD,FS: load (the engram write)
     LOAD->>SPOOL: read spooled EpisodeSpec[]
-    loop sequentially, per episode
-        LOAD->>G: add_episode(body, entity_types, edge_types, group_id)
-        G->>OAI: extract entities + edges, embed
-        G->>DB: write to the repo's group_id graph
+    loop per episode
+        LOAD->>PG: derive, then upsert on (workspace_id, name)
+        PG-->>LOAD: row id, user_edited
+        LOAD-->>FS: mirror the rendered document (best-effort)
     end
-    LOAD-->>LOAD: log "extracted N episodes (M skipped, K failed)"
+    LOAD-->>LOAD: log "loaded N episodes (M refreshed, K skipped, J failed)"
     end
 ```
 
 The default `relic ingest` runs both rects in one process. `relic ingest --no-load`
-stops after the spool; `relic load --repo owner/name` runs the second rect later.
+stops after the spool; `relic load` runs the second rect later.
 
 ## Step 1: fetch from GitHub
 
@@ -95,9 +102,30 @@ payload is kept on each record's `raw` field for the raw store.
 guarded behind `LINEAR_API_KEY`. `fetch_issues` paginates all issues (identifier,
 title, description, url, state, assignee, labels, parent, created and completed
 timestamps) and maps each to the same `IssueRec` used for GitHub issues, with
-`source="linear"`. The description was previously not even queried, so every Linear
-episode used to land with a null body; it now carries the issue's substance. When
-the key is unset, `ingest` logs that Linear was skipped and moves on.
+`source="linear"`. When the key is unset, `ingest` logs that Linear was skipped
+and moves on. Linear episodes ride a github ingest: they spool under the repo's
+capture key but keep their own scope inside the record.
+
+## Steps 1 and 2 for the non-repo sources
+
+**Granola.** `relic ingest --source granola` fetches meetings with the `grn_`
+key (`GRANOLA_API_KEY`, or a per-user key forwarded by the web app's
+`POST /v1/ingest`). Each meeting maps to a `ConversationEpisodeBody`
+(participants, summary, decisions, transcript) named `Meeting <id>`, scoped by
+its note owner (`granola__<email>`), since one key can return notes owned by
+different people. Each owner scope gets its own spool directory and checkpoint.
+
+**Notion.** `relic ingest --source notion` fetches pages with an internal
+integration token (`NOTION_API_KEY`, or forwarded per user); only pages shared
+with the integration are visible. Each page maps to a `DocEpisodeBody` (title,
+url, authors, text) named `Notion <id>`, scoped by its workspace
+(`notion__<workspace>`), on the same per-scope spool and checkpoint path as
+Granola.
+
+**Sessions.** The daemon's `capture` route turns a finished Claude Code session
+into an `AgentSessionEpisodeBody` (actor, cwd, files touched, summary, a
+distilled transcript) via `session_to_episode`, and lands it through the same
+loader, scoped to the repo the session ran in.
 
 ## Step 3: keep a raw copy
 
@@ -117,103 +145,87 @@ versioned model from
 
 - `pr_to_episode` maps a PR in any state, builds a `PrEpisodeBody` (repo, pull_request, reviews, requested_reviewers with `kind`, files with per-file stats, commits, linked_issues, derived timestamps, diff stats, labels), names it `PR <repo>#<number>`, and anchors `reference_time` to the merge time, falling back to the creation time, then to the epoch if both are missing.
 - `issue_to_episode` builds an `IssueEpisodeBody` and names it `Issue <identifier>`.
+- `meeting_to_episode` and `page_to_episode` build the conversation and doc
+  bodies for Granola and Notion; `session_to_episode` builds the agent-session
+  body for the daemon.
 - `_pr_timestamps` derives `first_review_at`, `approved_at`, and `time_to_merge_hours` from the reviews and PR times, with no extra fetch. These are stable because a PR is ingested only at a terminal state.
-- `repo_group_id` slugifies `owner/name` to a Graphiti-legal `group_id`: `/`
-  becomes `__`, and any other non-`[A-Za-z0-9_-]` character becomes `_`. For
-  example `buildrelic/relic-core` becomes `buildrelic__relic-core`.
+- `repo_group_id` slugifies `owner/name` into the scope slug: `/` becomes `__`,
+  and any other non-`[A-Za-z0-9_-]` character becomes `_`. For example
+  `buildrelic/relic-core` becomes `buildrelic__relic-core`. The slug lands on the
+  row's `scope` column.
 - `_clip` trims free text per field (description 2000 chars, review comment 1500,
   commit message 1000, dropping empty bodies to null), `_select_reviews` drops bot
   reviews and caps human reviews (keeping decided states and the most recent), and
-  `_fit_budget` trims the assembled body to a per-episode token budget. Oversized
-  JSON episodes degrade extraction, so the body is bounded rather than left to grow.
+  `_fit_budget` trims the assembled body to a per-episode budget, so a
+  pathological artifact cannot bloat its row.
 
-The episode body keys mirror the flat `*Node` attributes so the extractor maps them
-onto typed entities. Several fields are richer than the entity/edge schema consumes
-today; they are the agreed target the graph side adds types for (see the note in
-[Data model](/data-model)).
+The engram side reads the same typed body: `derive` turns it into the row's
+title, url, search text, markdown, people, and paths (see
+[Memory and recall](/memory-and-recall)).
 
 ## Step 5: spool the episodes
 
 [`spool.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/spool.py) writes each mapped `EpisodeSpec` to
-`./data/spool/<group_id>/<slug>-<hash>.json` before extraction runs. This is the
-artifact that decouples the fast capture from the slow LLM load: capture ends here,
-and `relic load` starts here.
+`./data/spool/<scope>/<slug>-<hash>.json` before the load runs. This is the
+artifact that decouples capture from the engram write: capture ends here, and
+`relic load` starts here.
 
 - **One file per episode.** A re-capture upserts by episode name (same name, same
   filename) instead of appending a duplicate, so the spool stays a current snapshot
   of what was captured. The `<hash>` (first 8 hex of the name's sha256) keeps the
   filename unique even when two names slugify alike.
-- **Grouped by capture key.** Files land under the GitHub repo's `group_id`, the same
-  key the checkpoint uses. A Linear episode pulled in the same run spools there too,
-  but keeps its own `group_id` inside the record, so the loader still partitions it
-  into the Linear graph.
+- **Grouped by capture key.** GitHub episodes land under the repo's scope, the
+  same key the checkpoint uses; a Linear episode pulled in the same run spools
+  there too but keeps its own scope inside the record. Granola and Notion spool
+  one directory per owner or workspace scope.
 - **Drained by the checkpoint, not by deletion.** `relic load` skips episodes the
   checkpoint already records, so the spool is re-runnable: load it twice and the
   second run is a no-op. The default `relic ingest` writes the spool and then loads
   from the same in-memory list in one process.
 
-## Step 6: land in the graph
+## Step 6: land in the engram
 
-[`load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/load.py) adds episodes to Graphiti.
+[`load.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/load.py) lands episodes in the store.
 
-- It first calls `ensure_indexes` (`build_indices_and_constraints`), so indexes
-  exist before the first episode.
-- It adds episodes **sequentially**, awaiting each before the next. This matters:
-  an entity extracted from PR 1 must be resolvable when PR 2's reviewer references
-  the same person. Parallel adds would fork the same person into duplicates.
-- `--bulk` (`load_episodes_bulk`) is the faster backfill path: it routes through
-  Graphiti's `add_episode_bulk`, extracting a whole batch in parallel and deduping
-  once. Episodes are grouped by `group_id` (bulk binds one graph per call), chunked,
-  and checkpointed per batch; a failed batch falls back to per-episode adds so the
-  resilience guarantee holds. Sequential remains the default until eval confirms
-  recall parity.
-- Each `add_episode` passes `entity_types`, `edge_types`, `edge_type_map`, and the
-  episode's `group_id`. Graphiti routes the write to the FalkorDB graph named by
-  that `group_id`, partitioning the graph per repo (see
-  [Memory and recall](/memory-and-recall)).
-- The loop is **resilient**: one episode that fails extraction (a rate limit, a
-  malformed entity) is caught, counted, and logged, and the run carries on. A
+- It calls `ensure_schema()` first, so the tables exist before the first episode.
+- Each episode is one `add_episode`: `derive` the row fields, upsert on
+  `(workspace_id, name)`, rebuild the people and path joins, then mirror the
+  document to Firestore (best-effort, skipped for user-edited rows). An upsert
+  is milliseconds, so episodes run sequentially; there is no bulk path and no
+  concurrency knob (the old `--bulk` flag and `load_episodes_bulk` overlapped
+  LLM extraction I/O that no longer exists).
+- The checkpoint diff splits episodes three ways: unseen names are **added**,
+  seen names with an unchanged content token are **skipped**, and seen names
+  whose token changed are **refreshed** (the upsert replaces the row in place;
+  the run counts them as superseded).
+- The loop is **resilient**: one episode that fails (a constraint error, a
+  malformed body) is caught, counted, and logged, and the run carries on. A
   single bad PR never aborts the whole ingest.
-- It returns `LoadStats`: `loaded`, `skipped`, `failed`, the list of failures, and
-  the wall-clock duration. The CLI logs a one-line summary from it.
-
-The engram client for ingestion is built by `make_engram` with the default
-`FALKORDB_DATABASE` and `max_coroutines=GRAPHITI_MAX_COROUTINES`. It is always
-closed in a `finally` so the connection does not leak. `make_engram` also applies
-two compatibility monkeypatches to graphiti-core 0.29.1: one fixes the FalkorDB
-fulltext query builders (it returns an empty query when the text sanitizes to
-nothing, and escapes hyphens in `group_id` filters so RediSearch does not read them
-as negation), the other makes the prompt JSON serializer (`to_prompt_json`)
-tolerate `datetime` values. Without it, `add_episode_bulk` raises `TypeError:
-Object of type datetime is not JSON serializable` and falls back to slow
-per-episode loading (seen with the Gemini provider, which populates node
-timestamps). Both are documented in [`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py).
+- It returns `LoadStats`: `loaded`, `superseded`, `skipped`, `failed`, the list
+  of failures, and the wall-clock duration. The CLI logs a one-line summary and
+  a phase-timing block from it.
 
 <Note>
-Before extraction, `ingest` runs a fast TCP probe (`falkordb_reachable`). If the
-graph is down it stops with one line (`FalkorDB not reachable at ...`) and a
-non-zero exit, before spending a single GitHub or OpenAI call. `--no-load` skips the
-probe entirely: a capture-only run needs no graph.
+Before the load half, `ingest` runs a fast TCP probe (`postgres_reachable`). If
+the store is down it stops with one line (`Postgres not reachable at ...`) and a
+non-zero exit, before spending a single API call. `--no-load` skips the probe
+entirely: a capture-only run needs no store.
 </Note>
 
 ## Running capture and load separately
 
-The split exists because extraction dominates the clock. Capture is a few seconds;
-extraction is minutes-to-hours, ~6 to 8 LLM calls per episode, strictly sequential.
-Pulling them apart lets each run on its own cadence.
-
 <Steps>
-  <Step title="Capture: no graph or OpenAI key needed">
+  <Step title="Capture: no store needed">
     ```bash
     uv run relic ingest --repo astral-sh/uv --no-load
     ```
-    Fetches, maps, and spools episodes, then stops. Fast and deterministic.
+    Fetches, maps, and spools episodes, then stops. Deterministic.
   </Step>
-  <Step title="Extract on demand, a batch at a time">
+  <Step title="Load on demand, a batch at a time">
     ```bash
     uv run relic load --repo astral-sh/uv --limit 10
     ```
-    Drains 10 spooled episodes into the graph. Re-run to drain more.
+    Lands 10 spooled episodes in the engram. Re-run to drain more.
   </Step>
   <Step title="Drain the rest">
     ```bash
@@ -222,86 +234,90 @@ Pulling them apart lets each run on its own cadence.
   </Step>
 </Steps>
 
-`relic load` reads the spool, not the network, so it needs `OPENAI_API_KEY` and a
-running FalkorDB but no GitHub token. `--limit N` extracts at most N not-yet-loaded
-episodes for case-by-case loading; re-run to drain more. It shares the checkpoint
-with `ingest`, so capture-then-load and the combined `ingest` land identical graphs,
-and a `load` re-run only extracts what is new. This is the seam an async worker or a
-nightly job hangs off: capture on every push, extract on a budget.
+`relic load` reads the spool, not the network, so it needs a running Postgres
+but no source credential. It shares the checkpoint with `ingest`, so
+capture-then-load and the combined `ingest` land identical stores, and a `load`
+re-run only lands what is new or changed. This is the seam a webhook or a
+nightly job hangs off: capture on every push, load whenever.
 
 ## Cost control
 
-The "12 months of history in an afternoon" claim rides on not re-deriving what the
-API already gives you.
+Ingest spends no model tokens at all; the only costs are source API calls and
+time. The bounds:
 
-- **Deterministic mapping.** The connectors and mappers do the structural work;
-  the LLM only extracts and embeds.
-- **Bounded entity types.** Passing `entity_types` and `edge_types` keeps the
-  extractor from inventing a wide schema.
+- **Deterministic mapping.** The connectors and mappers do the structural work,
+  and `derive` does the rest. No extraction step.
 - **`--months` and `--limit`.** The window bounds the fetch to recent history;
   `--limit` further caps the count on a large repo.
 - **Batched GraphQL fetch.** One query per page hydrates many PRs at once, instead
-  of three-plus REST calls per PR.
+  of three-plus REST calls per PR. `FETCH_CONCURRENCY` (default 10) bounds the
+  concurrent requests.
 - **Clipped, pruned episodes.** 2000-character cap per description; bot reviews
-  dropped and human reviews capped per PR.
-- **`--bulk`.** Batched loading via `add_episode_bulk` for a faster backfill.
-- **`gpt-4o-mini`.** The cheap model does extraction and reranking.
+  dropped and human reviews capped per PR. This bounds row size, not model spend.
+
+A backfill is bounded by fetch time alone: the engram write is milliseconds per
+episode.
 
 ## Resumability and re-ingesting
 
-Graphiti mints a fresh uuid per `add_episode`, so the same PR added twice would
-land as two episodes. A checkpoint stops that.
+[`checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/checkpoint.py) keeps a per-scope ledger of the
+episodes that have landed, at `./data/ingest/<scope>.log`: one episode name plus
+its content token (a sha256 of the body) per line. The name (`PR owner/name#42`,
+`Issue REL-10`, `Meeting <id>`) is deterministic and unique per item.
+`load_episodes` skips any episode whose recorded token is unchanged, refreshes
+any whose token changed, and appends each landed episode as it goes, flushing
+per line. The ledger is compacted after each run.
 
-[`checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/checkpoint.py) keeps a per-repo ledger of the
-episodes that have landed, at `./data/ingest/<group_id>.log`, one episode name per
-line. The name (`PR owner/name#42`, `Issue REL-10`) is deterministic and unique
-per item. `load_episodes` skips any episode already in the ledger and appends each
-new one as it lands, flushing per line.
-
-Two things fall out of this:
+Three things fall out of this:
 
 - **Resume.** A run cut short by a rate limit or a crash picks up where it left
-  off. The episodes already landed are skipped, not re-paid for and not
-  duplicated. The summary reports the skipped count.
+  off. The episodes already landed are skipped, not re-paid for. The summary
+  reports the skipped count.
+- **Supersession.** A re-ingest of an artifact whose content changed (a PR
+  gained a review, an issue was edited) refreshes its row in place through the
+  upsert. No duplicate, no fork.
 - **Re-run is cheap and idempotent.** Re-running `ingest` on the same repo loads
-  only what is new since last time.
+  only what is new or changed since last time.
 
-<Warning>
-To reload a repo from scratch, pass `--fresh`: it clears the checkpoint so every
-episode is added again. Clearing the checkpoint and clearing the repo's graph go
-together. Drop the per-`group_id` graph in FalkorDB first (see the `just
-reset-graph` note), or you will get duplicates. The raw store overwrites by id, so
-it stays a single current copy per item regardless.
-</Warning>
+<Note>
+`--fresh` clears the checkpoint so every episode is re-presented to the store.
+It is safe: the upsert refreshes rows in place, so no duplicates. A row a human
+edited in the web workspace keeps its title and search text through a `--fresh`
+reload (`user_edited` wins over any re-ingest). The raw store overwrites by id,
+so it stays a single current copy per item regardless.
+</Note>
 
 ## Observability
 
 Logs are diagnostics, so they go to **stderr**. stdout stays clean for piping. The
-result of `ingest` is the populated graph, not its console output.
+result of `ingest` is the populated store, not its console output.
 
 - **Counts and timing.** `ingest` logs the fetch counts and how long the fetch
-  took, whether Linear ran, and a final summary: episodes loaded, skipped, and
-  failed, with the wall-clock duration.
+  took, whether Linear ran, and a final summary: episodes loaded, refreshed,
+  skipped, and failed, with the wall-clock duration.
 - **Phase timing.** A full `ingest` ends with a compact timing block on stderr:
-  fetch, map + raw store + spool, load (extraction), and setup + index, each with
-  its share of the total, plus the per-episode load rate. It makes the LLM-bound
-  shape obvious at a glance: the load phase is almost the whole clock. `relic load`
-  prints the same block over its own phases (read spool, load, setup + index), and a
-  `--no-load` capture logs one line with the fetch and map + spool times.
+  fetch, map + raw store + spool, load (engram write), and setup + schema, each
+  with its share of the total, plus the per-episode load rate. The fetch is now
+  the dominant phase. `relic load` prints the same block over its own phases
+  (read spool, load, setup + schema), and a `--no-load` capture logs one line
+  with the fetch and map + spool times.
 - **Failures.** Each failed episode logs one `WARNING` line with its name and the
   error. A run that loads nothing but hits failures exits non-zero. A whole-run
-  failure (no token, graph down, bad key) logs one `ERROR` line, not a traceback.
+  failure (no token, store down, bad key) logs one `ERROR` line, not a traceback.
 - **Verbose.** `relic --verbose ingest ...` (or `-v`) drops the level to `DEBUG`:
   per-episode tracebacks, the raw-payload count, and any background-task errors.
 - **Quiet by default.** Logging attaches to the `relic` logger only, so
-  graphiti/httpx/openai `INFO` chatter stays suppressed unless you ask for it
+  third-party `INFO` chatter stays suppressed unless you ask for it
   ([`obs.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-core/src/relic/obs.py)).
 
 ## What is verified
 
-The deterministic fetch, map, and raw-store path is unit-tested
-([`test_github_ingest`-style tests](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_integration.py),
+The fetch, map, and raw-store path is unit-tested per source
+([`test_github_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_fetch.py),
 [`test_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mappers.py),
-[`test_raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_raw_store.py)). The live Graphiti load plus
-semantic recall has been run end to end against real repos and returns real people
-with facts, profile URLs, and source-episode provenance.
+[`test_granola_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_granola_ingest.py),
+[`test_notion_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_notion_ingest.py),
+[`test_raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_raw_store.py)). The store
+integration tests run against a real Postgres (self-skipping locally without
+one, always on in CI), and the closed-loop smoke (`just loop-smoke`) exercises
+ingest, inject, and capture end to end in about two seconds with no API keys.

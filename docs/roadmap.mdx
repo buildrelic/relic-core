@@ -5,9 +5,9 @@ description: "Milestones M0 to M4, the phase plan, and what is built versus pend
 ---
 
 Relic is a prototype built phase by phase against an external plan. The goal is to
-prove one loop end to end: ingest real engineering history, structure it in a
-graph, detect a recurring procedure, compile it into a grounded `SKILL.md`, and
-have a coding agent visibly follow it.
+prove one loop end to end: ingest real engineering history, structure it in the
+engram store, detect a recurring procedure, compile it into a grounded `SKILL.md`,
+and have a coding agent visibly follow it.
 
 The thesis to prove (M3): in a real repo, Claude Code opens a PR touching
 `src/auth/**` and tags the correct reviewer because a Relic-compiled skill told it
@@ -16,14 +16,14 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 ## Milestones
 
 - **M0, skeleton.** Repo, `uv` env, CI, `relic --help`. Done.
-- **M1, graph populated.** A repo's merged PRs, reviews, and issues are queryable
-  in the graph. Done. (The plan also scoped one person resolved across GitHub and
-  Linear into M1; that part waits on Phase 3.)
+- **M1, memory populated.** A repo's merged PRs, reviews, and issues are
+  queryable in the store. Done. (The plan also scoped one person resolved across
+  GitHub and Linear into M1; that part waits on Phase 3.)
 - **M2, first skill.** A grounded `SKILL.md` for PR review routing, generated from
   real history, passing schema validation. Pending: needs the Phase 4 compiler.
 - **M3, activation moment.** Claude Code follows a compiled skill on a live PR.
   Pending.
-- **M4, on GCP.** The pipeline runs as a Cloud Run Job against a hosted FalkorDB,
+- **M4, on GCP.** The pipeline runs as a Cloud Run Job against a hosted Postgres,
   and the MCP server is reachable. Pending.
 
 ## Phase status
@@ -32,7 +32,7 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 |---|---|---|
 | 0 | Repo and toolchain | done |
 | 1 | Ontology and SkillIR as code | done |
-| 2 | Deterministic ingestion (GitHub + Linear) | done |
+| 2 | Deterministic ingestion (GitHub + Linear + Granola + Notion) | done |
 | 3 | Entity resolution | stub (`resolve`) |
 | 4 | Procedure detection + skill compilation | stub (`compile`, `detect`, `compiler`); `render` (in `relic-serve`) done |
 | 5 | Registry + human verification | done |
@@ -43,11 +43,12 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 ### Done
 
 - **Phase 0 to 2.** The capture pipeline runs: `ingest` pulls GitHub PRs (with
-  descriptions, files, reviews, review comments) and issues (with bodies), keeps
-  raw copies, maps them deterministically, and lands them in the graph per repo.
-  The two halves can run separately: `relic ingest --no-load` captures and spools
-  episodes with no LLM, and `relic load` extracts those spooled episodes into the
-  graph on demand. See [Ingestion](/ingestion).
+  descriptions, files, reviews, review comments) and issues (with bodies), plus
+  Linear issues, Granola meetings, and Notion pages, keeps raw copies, maps them
+  deterministically, and lands them in the engram store per scope. The two
+  halves can run separately: `relic ingest --no-load` captures and spools
+  episodes with no store, and `relic load` lands those spooled episodes on
+  demand. See [Ingestion](/ingestion).
 - **Phase 5.** The registry and lifecycle are wired: `register`, `list`, `show`,
   `verify`, `deprecate`. See [Skills](/skills).
 - **Phase 6.** Both serve paths work: `emit` writes verified skills and a catalog
@@ -59,9 +60,10 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
 - **Recall.** A general `recall` that returns facts with sources, over the CLI and
   as an MCP `recall_memory` tool, alongside the narrower `query`.
 - **HTTP status surface.** `serve-http` exposes connector and ingest status as an
-  HTTP API (`GET /v1/connectors`, `GET /v1/ingest/runs`) for the web app's
-  connector control plane. First HTTP surface on relic-core, reads the ingest
-  checkpoints so it needs no graph. See [CLI reference](/cli-reference).
+  HTTP API (`GET /v1/connectors`, `GET /v1/ingest/runs`) plus the ingest trigger
+  (`POST /v1/ingest`, with per-user tokens and a `workspace` field) for the web
+  app's connector control plane. Reads the ingest checkpoints so the status
+  routes need no store. See [CLI reference](/cli-reference).
 - **The scorecard.** `eval` measures recall against a gold set, so retrieval
   changes are measured rather than guessed.
 - **doctor.** A read-only setup health check.
@@ -73,7 +75,7 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
   deterministic key match (email, normalized handle) first, LLM only for the
   ambiguous tail. `resolve` is a stub.
 - **Phase 4, the core.** The detector finds a recurring procedure with a
-  deterministic graph query plus support and confidence thresholds, with no LLM,
+  deterministic query over the engram plus support and confidence thresholds, with no LLM,
   which is what makes it trustworthy. The compiler feeds that grounded evidence to
   Anthropic with `SkillIR` as a structured-output schema, so the model can only
   return a valid skill, every field cites a source, anything ungrounded is
@@ -86,37 +88,44 @@ to, with no hand-written `CLAUDE.md` and no prompt engineering.
   detect, compile); the registry moves to Postgres; the raw store moves to object
   storage; the MCP server runs as a reachable service. It is a stub today.
 
-## A note on the graph backend
+## A note on the memory backend
 
 The plan scoped the prototype on embedded Kuzu (zero-infra) and put FalkorDB at
-Phase 8 (production). That changed. The graph was migrated to FalkorDB early, run
-self-hosted via Docker, because Kuzu blocked two things the loop needs: per-repo
-`group_id` partitioning crashed `add_episode`, and full-text search did not work.
-FalkorDB gives both. Recall and query code did not change across the migration,
-since both ride the portable `graphiti.search` API. See
+Phase 8 (production). That changed twice. First the graph was migrated to
+FalkorDB early, run self-hosted via Docker, because Kuzu blocked two things the
+loop needs: per-repo `group_id` partitioning crashed `add_episode`, and
+full-text search did not work. Then the graph itself was retired
+([ADR-0007](/adr/0007-engram-store-pivot)): the Graphiti/FalkorDB knowledge
+graph was replaced by the engram store, Postgres rows plus an optional Firestore
+document mirror, recalled by Postgres full-text search with no LLM at ingest or
+recall. The recall seam (`RecallFn`, the `format_answer` block) and every ingest
+mapper survived both moves unchanged. See
 [Memory and recall](/memory-and-recall). The production move is now from
-self-hosted FalkorDB to a managed or hosted FalkorDB instance, not a backend swap.
+self-hosted Postgres to a hosted instance (e.g. Neon), not a backend swap.
 
 ## The closed loop (now shipping)
 
 The **Relic daemon** ships a v1. It closes the loop the product is named for: a
 local background process (`relic daemon`) that Claude Code hooks call on every turn,
 recalling cited memory onto the prompt (`POST /v1/daemon/inject`) and writing the
-finished session back into the engram as an AgentSession episode (the new artifact type,
+finished session back into the engram as an AgentSession episode (the artifact type,
 see the AgentSession amendment in [ADR-0001](/adr/0001-engram-graph-ontology))
 (`POST /v1/daemon/capture`, on the `SessionEnd` hook). `relic install-hooks` wires
 the hooks; the desktop app (`relic-desktop`) supervises the daemon and exposes manual
-recall. The loop is verified end-to-end against FalkorDB: inject returns real cited
-PRs, capture lands an AgentSession episode, and recall surfaces it. The daemon reuses the
-existing seams whole — `RecallFn` for inject, `load_episodes` for write-back — so it
-added no new write path.
+recall. The loop is verified end-to-end against Postgres on every `just loop-smoke`
+run: ingest a fixture repo, inject returns cited facts, capture lands an
+AgentSession row, and recall surfaces it, in about two seconds with no API keys.
+The daemon reuses the existing seams whole (`RecallFn` for inject,
+`load_episodes` for write-back), so it added no new write path; one lazily-built
+store serves every scope, since scope is a column filter, not a connection.
 
 ## Explicitly not building yet
 
 From the plan, still deferred: the Local Engram and Sync Client; the
-radioactive-graph partition; multi-tenancy, tenant and org management, and scope
-enforcement; the tiered cost model; Slack, Notion, Drive, and Granola connectors; the
-generalized confidence-scored detector and learning loop; and the full org ontology
-beyond the engineering subset (the `org.py` types exist but no connector populates
+radioactive-graph partition; tenant and org management and scope enforcement
+beyond the workspace column; the tiered cost model; Slack and Drive connectors;
+the pgvector embedding search reserved in the schema; the generalized
+confidence-scored detector and learning loop; and the full org ontology beyond
+the engineering subset (the `org.py` types exist but no connector populates
 them). Each is straightforward to add now that the loop works, and none changes
 whether it works.

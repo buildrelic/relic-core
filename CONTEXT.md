@@ -1,9 +1,11 @@
 # Relic Domain Language
 
-Relic ingests engineering history into a temporal knowledge graph (Graphiti on
-FalkorDB) and serves grounded recall. This glossary fixes the terms the engram
-ontology uses, so the graph speaks one language across every source. It is a
-glossary, not a spec: definitions only, no implementation detail.
+Relic ingests engineering history into the engram store (Postgres rows plus a
+Firestore document mirror, see ADR-0007) and serves grounded recall. This
+glossary fixes the terms the engram ontology uses, so the memory speaks one
+language across every source. It is a glossary, not a spec: definitions only,
+no implementation detail. Entries retired by the store pivot are kept with a
+status note, because old ADRs and commit history still use them.
 
 ## Sources and artifact types
 
@@ -114,11 +116,15 @@ inside one tenant graph and may link to each other; access is governed *within*
 that graph, not by physical separation.
 
 **Tenant**:
+*Retired with the graph (ADR-0007): tenancy is now the `workspace_id` column,
+one workspace per Clerk scope or `RELIC_WORKSPACE`.*
 An organization. One FalkorDB database per tenant — the hard isolation boundary
 that nothing crosses. A Tenant owns many Zones.
 _Avoid_: org, account, customer, workspace, group.
 
 **Zone**:
+*Retired with the graph (ADR-0007): the access unit is the workspace, and the
+old `group_id` slug lives on as the per-source `scope` column.*
 A governed, deliberately-bounded region of a tenant graph that access is granted
 against. Every artifact lives in exactly one Zone. A Repo's data, a sprint team's
 work, the company-wide knowledge base, and a restricted "classified" region are
@@ -127,6 +133,8 @@ and stable* (a human owns its boundary), a Community is *emergent and recomputed
 _Avoid_: scope, group, community, workspace, enclave, compartment.
 
 **Community**:
+*Retired with the graph (ADR-0007): there is no community detection over the
+relational store.*
 An emergent topical cluster of related nodes, detected automatically (Graphiti's
 `build_communities`, label propagation) and recomputed as the graph grows. About
 *what a neighborhood is about*, never about who may see it. Access never rides on
@@ -143,6 +151,11 @@ dead-ends at Zone boundaries. (Consequence: a person's or repo's *existence* is
 tenant-public; only their *activity* is gated.)
 
 ## Graph soundness
+
+*This section is retired with the graph (ADR-0007). In the engram store the
+guarantees are structural: every read binds to a workspace, and supersession is
+the upsert on `(workspace_id, name)`. Kept because ADR-0005 and ADR-0006 use
+these terms.*
 
 The guarantees a reader of the graph can rely on. They make the access boundary a
 property of the *data and the seam*, not of a filter the caller must remember to

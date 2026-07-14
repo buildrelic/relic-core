@@ -1,232 +1,228 @@
 ---
 title: "Memory and recall"
 icon: "brain"
-description: "The graph, per-repo partitioning, recall and query, the scorecard, and the FalkorDB workaround."
+description: "The engram store: the Postgres schema, deriving rows from episodes, full-text recall, workspace and scope, the Firestore mirror, and user edits."
 ---
 
-Memory is a temporal knowledge graph: people, repos, pull requests, reviews,
-issues, and the edges between them, extracted from episodes by Graphiti and stored
-in FalkorDB. Recall queries that graph and returns facts, each carrying the source
-it came from.
+Memory is the **engram store**: relational rows in Postgres plus an optional
+document mirror in Firestore. Every ingested artifact (a PR, an issue, a meeting,
+a Notion page, an agent session) is one row in `memories`, joined to the people
+and file paths it names. Recall is Postgres full-text search over those rows, and
+every recalled fact carries the memory it came from.
 
-This doc covers the engram factory, per-repo partitioning, the recall and query
-paths, the scorecard, and the FalkorDB workaround.
+There is no LLM anywhere in this path. Ingest lands typed episodes as rows
+deterministically, and recall ranks them with `ts_rank_cd`. The pivot from the
+Graphiti/FalkorDB knowledge graph is recorded in
+[ADR-0007](/adr/0007-engram-store-pivot).
 
-## The engram
+## The store
 
-[`make_engram`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) builds the Graphiti client. It wires
-FalkorDB as the graph driver and, by default (`GRAPHITI_LLM_PROVIDER=openai`),
-OpenAI for the three model jobs:
+[`store.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/store.py)
+holds the one adapter, `EngramStore`. It owns every SQL statement and the
+document mirror; the rest of the platform depends on two Protocols
+(`EngramReader` for search, `EngramWriter` for `add_episode` and
+`ensure_schema`) and plain value types, never on asyncpg. The seam discipline
+from the graph era (ADR-0003) carried over to the store that replaced it.
 
-- **LLM.** `OpenAIClient` with `gpt-4o-mini` (extraction during ingest).
-- **Embeddings.** `OpenAIEmbedder` with `text-embedding-3-small` (semantic search).
-- **Reranker.** `OpenAIRerankerClient` with `gpt-4o-mini` (ordering search hits).
+`open_engram(settings)` connects a pool to `DATABASE_URL`, applies the schema,
+wires the Firestore mirror when configured, and binds the store to
+`RELIC_WORKSPACE`. `postgres_reachable(dsn)` is the fast TCP probe the CLI runs
+before an ingest.
 
-`GRAPHITI_LLM_PROVIDER=gemini` is the alternative. It moves only the extraction LLM
-to Gemini (`GEMINI_MODEL`, default `gemini-2.5-flash-lite`), whose higher TPM limits
-help on a large backfill. Embeddings and reranking stay on OpenAI, so it needs both
-`GEMINI_API_KEY` and `OPENAI_API_KEY`. See [Configuration](/configuration) for the
-concurrency tuning the gemini provider wants.
+## The schema
 
-Connection params (`FALKORDB_*`) and the OpenAI key fall back to settings when not
-passed, so a caller can build a default-local client with no arguments. If no
-OpenAI key is found anywhere, it raises a clear error rather than letting the
-OpenAI SDK raise a cryptic one. Clients are built here, never at import, so
-`relic --help` stays key-free.
+Postgres is authoritative. relic-core owns the DDL (the `_SCHEMA` constant in
+`store.py`), applied by an idempotent `ensure_schema()` on every store open, so
+the URL is the only coordinate a deploy needs. The landing web app reads and
+edits against the same tables, so a schema change here is a cross-repo contract
+change.
 
-`ensure_indexes` runs `build_indices_and_constraints` (idempotent). FalkorDB
-honors it, unlike the embedded Kuzu backend it replaced, so search works once it
-has run. `load_episodes` calls it before the first episode.
+| Table | What it holds |
+|---|---|
+| `workspaces` | One row per tenant. The id is the web app's Clerk scope (`orgId ?? userId`), or `RELIC_WORKSPACE` (default `local`) for the CLI and daemon. |
+| `people` | Humans named by memories, per workspace: `display_name`, `github_login`, `linear_id`, `slack_id`, `email`. |
+| `memories` | One row per artifact. Identity, the typed episode body, the search columns, and the edit flags (below). |
+| `memory_people` | Person-to-memory joins with a `role`: `author`, `reviewer`, `requested_reviewer`, `assignee`, or `participant`. |
+| `memory_paths` | File paths a memory touches, one row per path, indexed for prefix matching. |
 
-## Per-repo partitioning
+The `memories` row carries:
 
-Each repo's memory lives in its own FalkorDB graph, keyed by `group_id`. This is
-the multi-tenant partitioning FalkorDB was chosen for.
+- **Identity.** `workspace_id`, `scope` (the former `group_id` slug, the
+  per-source partition within a workspace), `source`, `artifact_type`, `name`
+  (the episode name, e.g. `PR owner/name#42`), and `UNIQUE (workspace_id, name)`.
+- **The body.** The typed episode JSON in a `jsonb` column, plus `content_hash`
+  and `schema_version`.
+- **Search.** `title`, `url`, `search_text`, and a generated `search_tsv`
+  tsvector over title plus search text, GIN-indexed.
+- **Edits.** `user_edited`, `edited_by`, `edited_at`: set when a human edits the
+  memory in the web workspace.
+- **The mirror.** `document_id`, the Firestore document this row mirrors to,
+  NULL when the mirror is off.
 
-The mechanism: `repo_group_id("owner/name")` produces a slug like
-`owner__name`. Graphiti routes group-scoped operations to a FalkorDB graph of that name. On a write, `add_episode` (and `add_episode_bulk`) clone the driver to the `group_id` graph (`driver.clone(database=group_id)`). On a read, `search` does not clone for a single `group_id`: recall, query, and eval reach the right graph through the `database = group_id` connection the engram opens, plus the `group_ids` filter passed to search. So:
+Person identity resolves by precedence: `github_login`, else `email`, else
+`display_name`. The uniqueness is enforced by partial unique indexes rather than
+one plain constraint, because Postgres treats NULLs as distinct and a plain
+`UNIQUE (workspace_id, github_login)` would let NULL-login duplicates through.
+A ref with none of the three (a ghost account) gets no row and no join.
 
-- **Ingest** builds the engram with the default database (`FALKORDB_DATABASE`,
-  default `relic`) but calls `add_episode(group_id=slug)`. Graphiti clones to the
-  `slug` graph, and the writes land there.
-- **Recall, query, and eval** build the engram with `database = group_id` and also
-  pass `group_ids=[group_id]` to search. Both the connection and the filter target
-  the same per-repo graph ([`_recall`, `_query`, `_eval`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)).
-- **Without a repo** (`--repo` unset and no `TARGET_REPO`), `group_id` is `None`
-  and operations use the default `relic` graph, which holds only ungrouped data.
+A `memory_embeddings` pgvector table is **reserved** in the DDL as a comment,
+not built. It is the fast-follow if full-text search falls short on the
+scorecard.
 
-The repo is resolved as `--repo` if given, else the `TARGET_REPO` setting. So a
-common setup is to set `TARGET_REPO` once and let recall default to it.
+## Derive: from episode body to row
 
-## A sound graph for consumers
+[`derive.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/derive.py)
+is pure, no I/O. One function per artifact type turns the typed episode body
+(`PrEpisodeBody`, `IssueEpisodeBody`, `DocEpisodeBody`,
+`ConversationEpisodeBody`, `AgentSessionEpisodeBody`) into what the store
+writes:
 
-[ADR-0006](/adr/0006-sound-graph-for-consumers) makes three guarantees properties
-of the *data and the seam* rather than of a filter the caller must remember, so
-the graph in `relic.graph.memory` is safe to hand to a downstream developer past
-`recall()`. Today the unscoped `GraphitiMemory` is still the production reader
-(ingest, eval, admin, the existing CLI and serve paths); a follow-up wires
-`ScopedMemory` onto the MCP and daemon surfaces from a principal's grants.
+- **`title` and `url`.** The row's display name and citation anchor.
+- **`search_text`.** The text that feeds full-text search: titles,
+  descriptions, labels, reviewer logins, commit messages, and file paths (both
+  whole and split on `/`, so a query like "auth" matches `src/auth/token.py`).
+- **`markdown`.** The rendered document the web workspace displays and lets a
+  human edit.
+- **`people` and `paths`.** The `(person, role)` pairs for `memory_people` and
+  the file paths for `memory_paths`.
 
-**Zone integrity (write-time refusal + read-time audit).** The writer seam
-refuses, fail-closed, to persist a Zoned episode with no Zone:
-`GraphitiMemory.add_episode` and `add_episode_bulk` route the `group_id` through
-`require_episode_zone` and raise `ZoneIntegrityError` on an empty Zone. A bulk
-batch must also carry exactly one Zone, since `graphiti.add_episode_bulk` maps a
-batch to a single `group_id` and a mixed-Zone batch would silently drop all but
-the first. `audit_zone_integrity` (exposed as `relic audit-zones`, see
-[CLI reference](/cli-reference#relic-audit-zones)) is the read-side safety net:
-it scans the graph through the `execute_read` introspection hatch for Zoned
-nodes and edges that carry no `group_id`, so a graph built before the rule can
-be proven clean or repaired.
+Dispatch keys on the body's `source_type` discriminator. An unknown or
+malformed body degrades to a raw-text row rather than failing the episode.
+`derive.py` lives in the engram package, not ingest: both sides share the body
+models through `relic.contracts.episode_body`, and the import contract forbids
+engram from importing ingest.
 
-**Scoped reads (`ScopedMemory`).** `ScopedMemory(inner, zones)` is a
-principal-scoped read view over a `MemoryReader`: it closes over the principal's
-Zone-set and applies it to **every** read it exposes — `search`, `get_episode`,
-`reviewer_walk`, and a new Zone-checked `get_entity(uuid)` so consumers never
-need raw Cypher to resolve an edge endpoint (the move that bypasses Zones
-today). A caller-supplied `group_ids` can only narrow within the principal's
-scope, never widen it; an empty scope sees nothing. Out-of-Zone nodes read as
-**nonexistent** — no error, no redaction marker — exactly as if they did not
-exist (ADR-0005 §5). The global identity spine (Person, Repo, Label, File)
-stays tenant-public: `is_global_entity` short-circuits the Zone check for those
-labels, so a tenant member can still see that a person or repo exists.
+## Supersession is the upsert
 
-**Temporal honesty.** `MemoryEdge` now carries `valid_at`, `invalid_at`, and
-`expired_at`, with an `is_current` property — a fact is current when both
-`invalid_at` and `expired_at` are unset. `recall` returns only current facts by
-default; opt into history with `include_superseded=True`. `MemoryEpisode` and
-`MemoryEntity` also carry `group_id` so a scoped read can drop an out-of-Zone
-episode or entity rather than leak its content as provenance. All new fields
-have defaults, so existing positional constructors and callers are untouched.
+`add_episode` upserts on `(workspace_id, name)`. A re-presented episode with
+changed bytes replaces its row in place; an identical replay is a no-op
+refresh. There is no removal cascade and no way to fork: the name is the
+identity, so one artifact is always exactly one row.
+
+## User edits win
+
+A human edit in the web workspace sets `user_edited` (with `edited_by` and
+`edited_at`). From then on, a re-ingest of the same artifact refreshes the
+structured columns (`body`, `content_hash`, `url`, `reference_time`) but never
+the human's `title` or `search_text`, and skips the Firestore mirror for that
+row so the edited markdown is never clobbered. `--fresh` clears the checkpoint
+but still respects the edit.
+
+## Workspace and scope
+
+Every row carries a `workspace_id` and every read binds to one, so an unscoped
+read is workspace-wide, never tenant-wide. Within a workspace, `scope` is the
+per-source partition: a repo slug like `buildrelic__relic-core`, a Granola
+owner like `granola__paris@buildrelic.com`, or a Notion workspace like
+`notion__buildrelic`. Recall, `query`, and `eval` narrow to one scope with
+`--repo` (or `TARGET_REPO`); without one they search the whole workspace.
+
+The web app writes with its Clerk scope as the workspace; the CLI and daemon
+write to `RELIC_WORKSPACE` (default `local`). The Zone machinery from
+[ADR-0005](/adr/0005-tenant-zone-access-model) and
+[ADR-0006](/adr/0006-sound-graph-for-consumers) is retired with the graph; the
+workspace column is the tenancy boundary now (ADR-0007).
+
+## The Firestore mirror
+
+[`documents.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/documents.py)
+is the NoSQL half. Documents live at
+`engram/{workspaceId}/documents/{documentId}` and carry `memoryName`, `scope`,
+`source`, `artifactType`, the typed `body`, the rendered `markdown`, and
+`updatedAt`. The `markdown` is what the landing web app's Drive-style Memory
+workspace renders and lets a human edit.
+
+The mirror is optional and best-effort. It is configured by
+`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY`, the
+same service-account env names the landing app uses. Unconfigured, documents
+stay local-only (`memories.body` in Postgres remains authoritative and
+`document_id` stays NULL). The mirror write runs after the row's transaction
+commits and never raises: a Firestore outage degrades the web UI, never an
+ingest. User-edited rows are skipped entirely.
 
 ## Recall: facts with sources
 
-[`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py) is the general path. It is the keystone
-of the "every answer cites its source" promise.
+[`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/recall.py)
+is the general path and the keystone of the "every answer cites its source"
+promise. The answer shapes and the rendered block are carried over verbatim from
+the graph era: `format_answer`'s output is a seam (the daemon injects it onto
+prompts, the MCP `recall_memory` tool returns it), so its format must not drift.
 
 ```
 RecallAnswer
 ├── query: str
 └── facts: list[RecalledFact]
-        ├── fact: str           # the edge's fact text
-        ├── relation: str       # the edge name (e.g. REVIEWED)
+        ├── fact: str           # "<title> — <snippet>"
+        ├── relation: str       # the artifact type (pull_request, issue, ...)
         └── sources: list[Source]
-                ├── label: str  # the episode name, e.g. "PR owner/name#12"
-                └── url: str?    # the PR or issue URL, resolved best-effort
+                ├── label: str  # the memory name, e.g. "PR owner/name#12"
+                └── url: str?   # the row's url column
 ```
 
-`recall(memory, query, *, zones=None, group_id=None, num_results=10, include_superseded=False)`:
+The engine is Postgres full-text search, two passes:
 
-1. Resolves the search scope from `zones` (the ADR-0005 principal Zone-set) or the
-   legacy single-scope `group_id` alias. An explicit empty `zones` collection means
-   "no accessible Zones" and **fails closed**: recall returns an empty answer and
-   never calls `search`. Passing neither is an unscoped read, reserved for trusted
-   single-tenant callers.
-2. Calls `graphiti.search(query, group_ids, num_results)`: hybrid semantic plus
-   keyword search, reranked. This is the portable Graphiti API, so it survived the
-   Kuzu to FalkorDB migration unchanged.
-3. For each returned edge, takes its `fact` text and `name` (the relation), and
-   resolves its source episodes.
-4. Drops every fact that is not **current** — a fact a later episode invalidated
-   (`invalid_at`) or superseded (`expired_at`) — so a grounded answer never
-   surfaces a stale fact as if it still held. Set `include_superseded=True` to
-   keep them for history views (ADR-0006 Decision 5).
-5. Returns a `RecallAnswer`. If search raises (for example FTS unavailable), it
-   returns an empty answer. Recall never raises.
+1. **Websearch semantics first.** `websearch_to_tsquery('english', query)`
+   against `search_tsv`, ranked by `ts_rank_cd` (ties broken by
+   `reference_time`), with a query-focused snippet from `ts_headline`.
+2. **An any-term fallback.** When the first pass finds nothing, the query's
+   words are re-joined with `OR` and run again. Hook prompts are natural
+   language ("who worked on the webhook receiver?"), and one word absent from
+   the corpus must not blank the whole recall; `ts_rank_cd` still puts the rows
+   matching the most terms first.
 
-**Provenance resolution** (`_resolve_sources`) looks up each episode uuid via
-`EpisodicNode.get_by_uuid`, using the episode name as the label and pulling the
-canonical URL out of the episode body. The URL extractor reads the `pull_request`
-or `issue` object's `url` field, ignoring the repo URL (which is not the source of
-the fact). If a lookup fails it falls back to the uuid string, so provenance
-degrades rather than disappears. Duplicate labels are dropped, order preserved.
+Each hit becomes one fact: the row's title, then the headline snippet, with the
+memory's `name` as the source label and the row's `url` as the citation. Recall
+never raises: if the store is unavailable it returns an empty answer.
+`format_answer` renders the cited block, each fact on its own line, each source
+indented beneath it.
 
-`format_answer` renders the answer as a cited block: each fact on its own line,
-each source indented beneath it with its URL.
+## Query: people, one SQL statement
 
-## Query: people, with a fallback
-
-[`queries.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/queries.py) is a narrower path used by
-`relic query`. It finds people connected to work matching the text and returns
-`ReviewerHit`s (name, relation, fact, episodes, profile_url).
-
-`reviewers_of` tries Graphiti hybrid search first. For each result edge it loads
-both endpoint nodes and keeps the ones labeled `Person`. If search returns nothing
-or raises, it falls back to a deterministic Cypher walk over `RELATES_TO` edges
-whose name is `REVIEWED` or `AUTHORED`, filtered by `group_id` and a case-
-insensitive substring match on the fact, work name, or summary. The fallback means
-the query still returns something when search is cold or unavailable. Like recall,
-it never raises.
+[`queries.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/queries.py)
+backs `relic query`. `reviewers_of` answers the review-routing question ("who
+reviews auth changes?") as one SQL query over the `memory_people` join, the
+`memory_paths` table, and full-text search: people with a `reviewer`, `author`,
+or `requested_reviewer` role on memories whose paths match the text (`ILIKE`)
+or whose `search_tsv` matches it, weighted by how many memories support them.
+It is deterministic where the old Cypher walk was best-effort, and like recall
+it never raises: a store failure returns an empty list.
 
 ## Eval: the recall scorecard
 
-[`scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/scorecard.py) measures recall quality as a small set
-of numbers. A gold set ([`eval/github_recall.json`](https://github.com/buildrelic/relic-core/blob/main/eval/github_recall.json))
+[`scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/scorecard.py)
+measures recall quality as a small set of numbers. A gold set
+([`eval/github_recall.json`](https://github.com/buildrelic/relic-core/blob/main/eval/github_recall.json))
 names a repo and a list of cases, each a question plus the PR or issue numbers
 whose content answers it.
 
 `relic eval` runs recall for each question, then `score_case` walks the recalled
-facts in ranked order and records which expected PR or issue URLs were cited and how
-highly. A match is an exact URL comparison after case and trailing-slash
-normalization (GitHub URLs are case-insensitive, and a cosmetic near-miss must not
-score zero). From that, `summarize` reports three aggregates plus a per-case line:
+facts in ranked order and records which expected PR or issue URLs were cited and
+how highly. A match is an exact URL comparison after case and trailing-slash
+normalization (GitHub URLs are case-insensitive, and a cosmetic near-miss must
+not score zero). From that, `summarize` reports three aggregates plus a
+per-case line:
 
-- **Hit rate.** Share of cases where at least one expected source was cited. The
-  coarsest signal, and what the scorecard reported originally.
-- **MRR.** Mean reciprocal rank of the first fact that cites an expected source.
-  Rank is counted in facts, the unit recall ranks and reranking reorders, so this
-  is the number to tune recall reranking against.
-- **Coverage.** The mean share of each case's expected sources found, across all
-  cases. One hit out of two expected PRs is half coverage, not a clean pass. For
-  single-source cases coverage equals the hit, so this only adds signal beyond
-  hit rate as multi-source cases land in the gold set.
+- **Hit rate.** Share of cases where at least one expected source was cited.
+- **MRR.** Mean reciprocal rank of the first fact that cites an expected
+  source. Rank is counted in facts, the unit recall orders, so this is the
+  number to tune ranking against.
+- **Coverage.** The mean share of each case's expected sources found, across
+  all cases. One hit out of two expected PRs is half coverage, not a clean pass.
 
 There is no LLM judge. Scoring is a deterministic URL comparison, so the ruler
-costs nothing beyond the recall calls it measures. Use it to tell whether an
-ingestion or retrieval change actually moved recall instead of eyeballing answers.
-`relic eval --json out.json` additionally writes the run as JSON (the aggregates
-plus per-case detail), so metrics can be tracked across runs rather than read
-out of terminal scrollback. `load_gold` rejects gold sets that would score
-misleadingly: a malformed repo or non-integer number builds URLs that can never
-match, and a case with no expected sources can never hit.
+costs nothing beyond the recall calls it measures. It is also the ruler for the
+pivot's core trade: full-text search does not do semantic matching, and the
+scorecard is what says whether that matters. `relic eval --json out.json`
+additionally writes the run as JSON so metrics track across runs. `load_gold`
+rejects gold sets that would score misleadingly.
 
-## The FalkorDB workaround
+## History: the graph era
 
-[`engram.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/engram.py) applies two compatibility
-monkeypatches to graphiti-core 0.29.x at `make_engram` time, each applied once. The
-first (`_patch_falkordb_empty_query`) guards the two FalkorDB fulltext-query
-builders against two issues:
-
-1. **Empty fulltext queries.** When an extracted entity's name sanitizes to
-   nothing (all punctuation or stopwords, common in real history: version tags,
-   file paths, single symbols), the builder emits a query with empty trailing
-   parens that RediSearch rejects, aborting `add_episode`. The patch returns an
-   empty string instead, which Graphiti already treats as "skip the fulltext
-   search."
-2. **Hyphens in group_ids.** RediSearch treats `-` as a negation operator even
-   inside quotes, so a `group_id` like `relic-core` breaks the query. The patch
-   escapes hyphens in the `group_id` filter on the final query string.
-
-The second (`_patch_prompt_json_datetime`) makes graphiti's `to_prompt_json`
-serializer tolerate `datetime` values. Without it, `add_episode_bulk` raises
-`TypeError: Object of type datetime is not JSON serializable` and falls back to
-slow per-episode loading. This shows up with the Gemini provider, which populates
-node timestamps (`created_at`, `valid_at`) that OpenAI often leaves null.
-
-<Warning>
-Both patches target graphiti-core 0.29.x and are flagged to remove once upstream
-guards these cases. Revisit on every Graphiti upgrade. They matter because a slug
-like `buildrelic__relic-core` contains a hyphen, and real repos produce entity
-names that sanitize to empty.
-</Warning>
-
-## History: Kuzu to FalkorDB
-
-Memory storage was migrated from embedded Kuzu to FalkorDB. Kuzu was zero-infra
-but had two blockers: custom `group_id` partitioning crashed `add_episode` (its
-driver lacked the multi-database support the path needs), and full-text search did
-not work the way recall needs. FalkorDB gives both: per-repo graphs by `group_id`
-and working RediSearch fulltext. The cost is that FalkorDB is a networked service
-you must run (Docker locally), where Kuzu was a file. The recall and query code
-did not change across the migration, because both are built on the portable
-`graphiti.search` API. See [Roadmap](/roadmap).
+Memory storage has moved twice. Embedded Kuzu was replaced by FalkorDB (Kuzu's
+`group_id` partitioning crashed and its full-text search did not work), and the
+Graphiti/FalkorDB temporal knowledge graph was then replaced by this store
+([ADR-0007](/adr/0007-engram-store-pivot)): LLM extraction dominated ingest
+wall clock at roughly 99.5 percent, and the product needed a memory a human can
+see and correct. The recall seam (`RecallFn`, the `format_answer` block), the
+episode contract, and every ingest mapper survived both moves unchanged. Git
+history preserves the graph implementation.

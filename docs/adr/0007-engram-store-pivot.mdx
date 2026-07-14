@@ -1,0 +1,81 @@
+---
+title: "The engram store pivot: Postgres + Firestore replace the graph"
+description: "Retire the Graphiti/FalkorDB knowledge graph. Memory becomes relational rows in Postgres plus documents in Firestore, recalled by full-text search, and edited by humans in a Drive-style web workspace."
+icon: "database"
+---
+
+<Info>
+**Status:** accepted (2026-07-14). Supersedes
+[ADR-0002](/adr/0002-deterministic-first-structured-writes),
+[ADR-0003](/adr/0003-memory-seam),
+[ADR-0005](/adr/0005-tenant-zone-access-model), and
+[ADR-0006](/adr/0006-sound-graph-for-consumers). The seam discipline those records
+established carries over; the graph they governed does not.
+</Info>
+
+## Context
+
+The graph was the most expensive and slowest-shipping part of the stack. LLM
+extraction dominated ingest wall clock at roughly 99.5 percent, the adapter needed
+two monkeypatches on graphiti-core, and the compiled-skills pipeline that would
+justify graph structure (Phases 3 and 4) was still stubbed. The 6/25 product
+meeting deprioritized the graph in favor of plain SQL plus NoSQL; this record
+lands that decision.
+
+The product goal for this phase is shipping speed and a memory a human can see
+and correct: users access and edit their engram through a Drive-style workspace
+in the web app, which shows both the relational tables of memories and the
+documents.
+
+## Decision
+
+Replace the graph with the **engram store**, two halves:
+
+1. **Postgres is authoritative.** One database. Relational tables: `workspaces`,
+   `people`, `memories` (one row per artifact, unique on `(workspace_id, name)`,
+   with the typed episode body in a `jsonb` column and a generated `search_tsv`
+   tsvector), `memory_people` (roles: author, reviewer, requested_reviewer,
+   assignee, participant), and `memory_paths`. The schema is owned here and
+   applied by an idempotent `ensure_schema()`; the landing web app reads and
+   edits against it directly.
+2. **Firestore mirrors documents.** `engram/{workspaceId}/documents/{documentId}`
+   carries the typed body plus a rendered `markdown` the web workspace displays
+   and lets a human edit. The mirror is best-effort: unconfigured or unreachable
+   Firestore degrades the web UI, never an ingest.
+
+Consequences baked into the store:
+
+- **Recall is Postgres full-text search.** `websearch_to_tsquery` plus
+  `ts_rank_cd` and a `ts_headline` snippet, with an any-term fallback so a
+  natural-language prompt with one unmatched word still recalls. No LLM at
+  ingest or recall. A `memory_embeddings` pgvector table is reserved as a
+  fast-follow, not built.
+- **Supersession is structural.** The upsert on `(workspace_id, name)` replaces
+  a changed body in place. There is no removal cascade and no way to fork.
+- **User edits win.** A workspace edit sets `user_edited`; re-ingest refreshes
+  the structured body but never the human's title or search text, and skips the
+  Firestore mirror for that row.
+- **Tenancy is the workspace.** Every row carries a `workspace_id` (the web
+  app's Clerk scope, `RELIC_WORKSPACE` locally) and every read binds to one.
+  The old `group_id` slug lives on as the `scope` column, the per-source
+  partition within a workspace. The Zone machinery is retired.
+- **The seams held.** `RecallFn`, the `format_answer` block, `DaemonRecallFn`,
+  `CaptureFn`, `EpisodeSpec`, and every ingest mapper are unchanged. The daemon,
+  the hooks, the MCP server, and relic-desktop needed no changes.
+
+## What was removed
+
+The Graphiti adapter and its monkeypatches, the flat graph schema, deterministic
+Subject writes, ScopedMemory, the Zone integrity audit and `relic audit-zones`,
+`load_episodes_bulk` and the `--bulk`/`--concurrency` flags, the FalkorDB
+service in compose and CI, and the OpenAI/Gemini extraction dependency. Git
+history preserves all of it.
+
+## What it bought
+
+Ingest cost drops to zero LLM spend and the closed-loop e2e smoke runs in under
+two seconds with no API keys. A backfill is bounded by GitHub fetch time alone.
+The web workspace gets a store it can query and edit directly. The price is
+recall quality: full-text search does not do semantic matching or multi-hop
+traversal. The scorecard (`relic eval`) is the ruler for that trade, and pgvector
+is the reserved next step if FTS falls short.

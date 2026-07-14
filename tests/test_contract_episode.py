@@ -7,7 +7,7 @@ silently in production:
 
 - the wire body validates against ``PrEpisodeBody`` / ``IssueEpisodeBody`` (the
   detector can deserialize it),
-- ``recall._extract_url`` still resolves a citation URL from the body (I3),
+- ``derive`` still resolves a citation URL from the body (I3),
 - the episode ``name`` carries no version or mutable data (I2),
 - the body stays under the per-episode token budget (I4).
 
@@ -32,7 +32,7 @@ from relic.contracts.episode_body import (
     ReleaseEpisodeBody,
     RepoRef,
 )
-from relic.graph.recall import _extract_url
+from relic.engram.derive import derive
 from relic.ingest.mappers import (
     _MAX_BODY_CHARS,
     CommitRec,
@@ -147,17 +147,17 @@ def test_issue_body_validates_against_contract() -> None:
     assert body.issue.assignees == ["paris-phan"]
 
 
-# --- I3: recall._extract_url must still resolve the citation anchor ----------
+# --- I3: derive must still resolve the citation anchor -----------------------
 
 
-def test_extract_url_resolves_pr_citation() -> None:
+def test_derive_resolves_pr_citation() -> None:
     spec = pr_to_episode(canonical_pr_record(), _repo())
-    assert _extract_url(spec.body) == "https://github.com/buildrelic/relic-core/pull/12"
+    assert derive(spec).url == "https://github.com/buildrelic/relic-core/pull/12"
 
 
-def test_extract_url_resolves_issue_citation() -> None:
+def test_derive_resolves_issue_citation() -> None:
     spec = issue_to_episode(canonical_issue_record(), _repo())
-    assert _extract_url(spec.body) == "https://github.com/buildrelic/relic-core/issues/100"
+    assert derive(spec).url == "https://github.com/buildrelic/relic-core/issues/100"
 
 
 # --- I2: the episode name is the dedup key, version-free and stable ----------
@@ -236,10 +236,21 @@ def test_every_source_type_is_distinct() -> None:
 
 def test_dev_source_bodies_carry_a_resolvable_citation_anchor() -> None:
     # I3 for every new source, for free: each body exposes a top-level `url`, which
-    # recall._extract_url resolves via its top-level fallback. No recall change is
-    # needed per source.
+    # derive resolves (typed builders for the wired sources, the top-level fallback
+    # for the rest). No store change is needed per source.
+    from datetime import UTC, datetime
+
+    from relic.contracts import EpisodeSpec
+
     for body in _SOURCE_BODIES:
-        assert _extract_url(body.model_dump_json()) == body.url  # type: ignore[attr-defined]
+        spec = EpisodeSpec(
+            name="x",
+            body=body.model_dump_json(),
+            source_description="test",
+            reference_time=datetime(2025, 1, 1, tzinfo=UTC),
+            group_id="demo__repo",
+        )
+        assert derive(spec).url == body.url  # type: ignore[attr-defined]
 
 
 # --- derived timestamps (no extra fetch) ------------------------------------

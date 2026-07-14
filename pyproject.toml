@@ -5,11 +5,11 @@
 #
 #   relic-core            shared: contracts, ontology, config, obs   (jointly owned)
 #     ^      ^      ^
-#   ingest  graph  serve   each depends on relic-core only; mutually independent
+#   ingest engram  serve   each depends on relic-core only; mutually independent
 #     ^      ^      ^
 #          relic-cli       composition root: depends on all three + core
 #
-# Owners: ingest = Paris, graph = Abhinav, serve + cli = Zidan, core = all.
+# Owners: ingest = Paris, engram = Abhinav, serve + cli = Zidan, core = all.
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -31,7 +31,7 @@ target-version = "py312"
 src = [
     "packages/relic-core/src",
     "packages/relic-ingest/src",
-    "packages/relic-graph/src",
+    "packages/relic-engram/src",
     "packages/relic-serve/src",
     "packages/relic-cli/src",
     "tests",
@@ -52,7 +52,7 @@ include = ["packages", "tests"]
 extraPaths = [
     "packages/relic-core/src",
     "packages/relic-ingest/src",
-    "packages/relic-graph/src",
+    "packages/relic-engram/src",
     "packages/relic-serve/src",
     "packages/relic-cli/src",
 ]
@@ -68,7 +68,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
 markers = [
-    "e2e: full-loop tests against live FalkorDB + OpenAI; run via `just loop-smoke` (self-skipping without keys/db)",
+    "e2e: full-loop tests against a live Postgres; run via `just loop-smoke` (self-skipping without a db)",
 ]
 
 # import-linter is belt-and-suspenders: the package dependency graph already
@@ -78,11 +78,11 @@ markers = [
 root_package = "relic"
 
 [[tool.importlinter.contracts]]
-name = "ingest, graph, serve are independent siblings"
+name = "ingest, engram, serve are independent siblings"
 type = "independence"
 modules = [
     "relic.ingest",
-    "relic.graph",
+    "relic.engram",
     "relic.serve",
 ]
 
@@ -91,7 +91,7 @@ name = "subsystems never import the composition root"
 type = "forbidden"
 source_modules = [
     "relic.ingest",
-    "relic.graph",
+    "relic.engram",
     "relic.serve",
 ]
 forbidden_modules = ["relic.cli"]

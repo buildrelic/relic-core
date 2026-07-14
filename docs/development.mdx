@@ -14,9 +14,11 @@ import-linter (subsystem boundaries). CI runs all four, with ruff in check-only 
 - Python 3.12 (`.python-version` pins it)
 - [uv](https://docs.astral.sh/uv/)
 - [just](https://github.com/casey/just) (task runner)
-- Docker (for FalkorDB)
+- Docker (for Postgres, the engram store)
 - `gh` CLI logged in, or a `GITHUB_TOKEN`
-- An OpenAI API key for any live graph work
+
+No model API key is needed for development: ingest, recall, and the whole test
+suite run without one.
 
 ## Setup
 
@@ -33,9 +35,9 @@ just setup
 ```
 
 `just setup` installs Python 3.12 with uv, syncs the dev dependencies, creates
-`.env` from `.env.example` if you do not have one, starts FalkorDB and waits for
+`.env` from `.env.example` if you do not have one, starts Postgres and waits for
 it to report healthy, installs the pre-commit hook, then runs `relic doctor`. It
-is safe to re-run.
+is safe to re-run. The engram schema is applied automatically on first use.
 
 Missing keys show as missing in the doctor report. Fill them into `.env`, then run
 `just doctor` again. Run `just` with no arguments to list every recipe.
@@ -47,8 +49,9 @@ just                          # list every recipe
 just doctor                   # is the environment wired up?
 just check                    # lint, types, tests (what CI runs)
 just fmt                      # format with ruff
-just up                       # start FalkorDB, wait for healthy
-just down                     # stop FalkorDB, keep the volume
+just up                       # start Postgres, wait for healthy
+just down                     # stop Postgres, keep the volume
+just loop-smoke               # the e2e closed-loop smoke, against a real Postgres
 just serve                    # MCP server over stdio, for manual testing
 just ingest astral-sh/uv 20   # ingest a repo, capped at 20
 just recall "who reviews auth changes?"
@@ -56,8 +59,10 @@ just recall "who reviews auth changes?"
 
 `just check` runs ruff, pyright, pytest, and lint-imports, the same four CI runs.
 `just lint`, `just types`, `just test`, and `just imports` run them one at a time.
-`just reset-graph` and `just clean` are destructive: the first wipes the FalkorDB
-volume, the second removes local state under `data/`.
+`just test` excludes the `e2e` marker; run that deliberately with
+`just loop-smoke`. `just reset-db` and `just clean` are destructive: the first
+wipes the Postgres volume (every workspace's memories), the second removes local
+state under `data/` and keeps the volume.
 
 `just check` runs pyright and pytest as `uv run python -m ...` so they work
 regardless of the installed entry-point shebangs.
@@ -71,7 +76,8 @@ Tooling config is in [`pyproject.toml`](https://github.com/buildrelic/relic-core
   because it is ported verbatim and must not drift from the system-design doc.
 - **pyright.** Basic mode over `packages` and `tests`, against the `.venv`.
 - **pytest.** `asyncio_mode = "auto"` (async tests need no decorator), quiet
-  output, tests under `tests/`.
+  output, tests under `tests/`. One marker: `e2e`, the full-loop smoke, excluded
+  from `just test` and run via `just loop-smoke`.
 
 The house voice for all prose (docs, UI, errors, commit messages) is in
 [`AGENTS.md`](https://github.com/buildrelic/relic-core/blob/main/AGENTS.md). The short version: short declarative sentences, no em
@@ -94,54 +100,66 @@ We track work in Linear. From [`AGENTS.md`](https://github.com/buildrelic/relic-
 
 ## Tests
 
-The suite is fast and mostly offline. Live graph work (real Graphiti, real
-FalkorDB, real OpenAI) is exercised by hand, not in unit tests.
+The suite is 342 tests across 44 test files, fast and mostly offline. Three
+files run against a real Postgres and self-skip without one
+(`test_engram_store.py`, `test_ingest_integration.py`, `test_loop_smoke.py`);
+all three always run in CI via its Postgres service container. No test needs a
+model API key.
 
 | Test | Covers |
 |---|---|
 | [`test_ontology.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ontology.py) | ontology models round-trip, SkillIR schema |
 | [`test_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mappers.py) | deterministic payload to episode transforms |
 | [`test_contract_episode.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_contract_episode.py) | the typed episode-body contract: bodies validate, the citation URL resolves, the name stays version-free, and the body trims to budget |
+| [`test_derive.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_derive.py) | the pure body-to-row derivation, per artifact type: search_text contents, the rendered markdown, people roles, paths, and the degrade-never-fail rule |
 | [`test_raw_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_raw_store.py) | raw artifact paths and writes |
 | [`test_spool.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_spool.py) | the episode spool: round-trip, upsert by name, and chronological read order |
 | [`test_github_connector.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_connector.py) | the pure GitHub connector helpers (state, node parsing), no network |
 | [`test_github_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_github_fetch.py) | windowed GraphQL PR paging, node parsing, and issue windowing, no network |
-| [`test_ingest_integration.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_integration.py) | the fetch and map path with stubbed sources |
+| [`test_granola_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_granola_fetch.py), [`test_granola_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_granola_mappers.py), [`test_granola_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_granola_ingest.py) | the Granola source: fetch, meeting-to-episode mapping, and the per-owner-scope ingest path |
+| [`test_notion_fetch.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_notion_fetch.py), [`test_notion_mappers.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_notion_mappers.py), [`test_notion_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_notion_ingest.py) | the Notion source: fetch, page-to-episode mapping, and the per-workspace-scope ingest path |
 | [`test_cli_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_ingest.py) | the `ingest` command: gates, exit codes, and checkpoint wiring (sources stubbed) |
-| [`test_cli_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_load.py) | the `load` command and `ingest --no-load`: the capture/load split, gates, and exit codes (graph stubbed) |
-| [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-repo checkpoint ledger: append, load, skip, and `--fresh` clear |
-| [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, resume skipping |
-| [`test_graph_operations.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_graph_operations.py) | `recall`, `reviewers_of`, and `graph_stats` against a real seeded FalkorDB; gated on `RELIC_LIVE_TESTS=1` and a reachable FalkorDB (real LLM calls) |
+| [`test_cli_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_load.py) | the `load` command and `ingest --no-load`: the capture/load split, gates, and exit codes (store stubbed) |
+| [`test_cli_token_fallback.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_token_fallback.py) | the forwarded-user-token probe: falls back to the server token only on a definitive 401 |
+| [`test_checkpoint.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_checkpoint.py) | the per-scope checkpoint ledger: append, load, skip, content tokens, and `--fresh` clear |
+| [`test_load.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_load.py) | `load_episodes`: counts, per-episode failure handling, skip vs refresh off the token diff (against `FakeEngram`) |
+| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, and the `format_answer` block (against `FakeEngram`) |
+| [`test_engram_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram_store.py) | `EngramStore` against a real Postgres: schema, upsert supersession, FTS and the any-term fallback, people precedence, user-edit protection. Self-skips without a Postgres; always runs in CI |
+| [`test_ingest_integration.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_integration.py) | the episodic pipeline against a real Postgres: spec to `load_episodes` to `recall`/`reviewers_of`, plus refresh-in-place. Self-skips without a Postgres; always runs in CI |
+| [`test_loop_smoke.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_loop_smoke.py) | the e2e closed loop (marker `e2e`, `just loop-smoke`): real `relic load`, real `relic daemon`, inject with cited recall, capture with readback, edit-reingest supersession. Keyless, about two seconds, throwaway workspace |
+| [`test_daemon_app.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_daemon_app.py) | the daemon loopback surface: inject, recall, capture, status counters, token gating |
+| [`test_daemon_capture.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_daemon_capture.py) | the session distiller: Claude Code transcript JSONL to clean prose |
+| [`test_daemon_scope.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_daemon_scope.py) | per-session scoping: cwd git origin to repo scope, with the boot-default fallback |
 | [`test_ingest_timing.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_ingest_timing.py) | `format_ingest_timing`: the per-phase timing summary block, including the zero-total case |
-| [`test_engram.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_engram.py) | `make_engram` provider dispatch and the Gemini hybrid client builder |
-| [`test_schema.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_schema.py) | the flat Graphiti-facing ontology (`relic.graph.schema`): entity/edge registration invariants and the AgentSession artifact type wiring |
-| [`test_field_map.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_field_map.py) | the body→flat-node correspondence (`relic.graph.field_map`): every node field has a body source, every mapped body path resolves |
 | [`test_render.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_render.py) | SkillIR to SKILL.md, snapshot-style |
 | [`test_store.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_store.py) | registry upsert, status, lifecycle |
 | [`test_catalog.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_catalog.py) | the markdown catalog index |
 | [`test_emit.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_emit.py) | emit, prune, catalog reconciliation |
 | [`test_serve.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve.py) | MCP server: tools, resources, search |
 | [`test_mcp_e2e.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_mcp_e2e.py) | the MCP server end to end |
-| [`test_recall.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_recall.py) | recall facts, provenance, formatting, and the current-by-default filter (ADR-0006) |
-| [`test_scoped_memory.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scoped_memory.py) | `ScopedMemory` Zone enforcement: nonexistent out-of-Zone reads, global-spine passthrough, empty-scope fail-closed (ADR-0006) |
-| [`test_zone_integrity.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_zone_integrity.py) | write-time `require_episode_zone` refusal, mixed-Zone bulk refusal, and `audit_zone_integrity` over the introspection hatch (ADR-0006) |
-| [`test_falkordb_query.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_falkordb_query.py) | the query path and Cypher fallback |
+| [`test_serve_http_ingest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve_http_ingest.py) | `POST /v1/ingest`: source routing, token and `workspace` validation and threading, 202/409/400 |
+| [`test_serve_http_status.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_serve_http_status.py) | the connector-status and run-history providers over the on-disk checkpoints |
 | [`test_scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_scorecard.py) | eval scoring and summary |
-| [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report |
-| [`test_config.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_config.py) | settings: secret sanitization and the deprecated SEMAPHORE_LIMIT fallback |
+| [`test_doctor.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_doctor.py) | the health report: registry counts, the redacted engram DSN, firestore state, keys |
+| [`test_config.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_config.py) | settings: engram defaults, the secret sanitizer, and the Firebase PEM unescape |
 | [`test_obs.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs.py) | logging setup: stderr routing, scoped to the `relic` logger, idempotent |
 | [`test_obs_progress.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_obs_progress.py) | `relic.obs.load_progress`: disabled yields a no-op, enabled yields an `update(completed, counts)` callback |
 | [`test_cli.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli.py), [`test_cli_skills.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_cli_skills.py) | CLI wiring |
 | [`test_pipeline_slice.py`](https://github.com/buildrelic/relic-core/blob/main/tests/test_pipeline_slice.py) | draft to verify to emit to serve, end to end |
 
-Shared fixtures are in [`conftest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/conftest.py); `make_skill` builds
-`SkillIR` instances with overridable defaults.
+Shared fixtures are in [`conftest.py`](https://github.com/buildrelic/relic-core/blob/main/tests/conftest.py): `make_skill` builds
+`SkillIR` instances with overridable defaults, and `FakeEngram` is the one
+in-memory `EngramReader` + `EngramWriter` for store-shaped tests, so recall,
+queries, and the loader run without Postgres or Firestore. An autouse fixture
+nulls the connector secrets and pins `RELIC_WORKSPACE=test`, so a developer's
+`.env` can never point unit tests at live sources or a real workspace.
 
 ## CI
 
 [`.github/workflows/ci.yml`](https://github.com/buildrelic/relic-core/blob/main/.github/workflows/ci.yml) runs on push to `main`
-and on every PR. It spins up a FalkorDB service container, syncs the whole
-workspace with `uv`, then runs ruff (`ruff check`, lint only), pyright, lint-imports, and pytest in sequence. CI does not verify formatting; run `just fmt` locally. A red check on any of the four fails the build. `just check` runs the
+and on every PR. It spins up a `postgres:16` service container, syncs the whole
+workspace with `uv`, then runs ruff (`ruff check`, lint only), pyright, lint-imports, and pytest in sequence, with `DATABASE_URL` set on the pytest step so
+the Postgres-gated store tests always run. CI does not verify formatting; run `just fmt` locally. A red check on any of the four fails the build. `just check` runs the
 same four locally before you push.
 
 ## Documentation

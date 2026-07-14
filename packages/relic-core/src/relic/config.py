@@ -6,7 +6,7 @@ populated .env. Call `get_settings()` to read them.
 
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,82 +14,50 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str | None = None
-    gemini_api_key: str | None = None
-    openai_api_key: str | None = None
     github_token: str | None = None
     linear_api_key: str | None = None
     granola_api_key: str | None = None
     notion_api_key: str | None = None
 
-    graphiti_llm_provider: str = "openai"
-    # Model used when graphiti_llm_provider == "gemini". Configurable so a wrong or
-    # region-specific model id is an env change, not a code change. Flash-Lite is the
-    # fastest/cheapest Flash variant, suited to the high-volume extraction in a backfill.
-    gemini_model: str = "gemini-2.5-flash-lite"
-    falkordb_host: str = "localhost"
-    falkordb_port: int = 6379
-    falkordb_password: str | None = None
-    falkordb_database: str = "relic"
+    # The engram store. Postgres holds the relational memory tables; the schema is
+    # owned here and applied by EngramStore.ensure_schema(), so the URL is the only
+    # coordinate. The default matches docker-compose.yml.
+    database_url: str = "postgresql://relic:relic@localhost:5432/relic"
+    # The workspace every locally-ingested memory lands in. The web app writes with
+    # the Clerk scope (orgId ?? userId); the CLI and daemon write here.
+    relic_workspace: str = "local"
+
+    # Firestore document mirror (optional). Same env names the landing app uses, so
+    # one service account serves both sides. When unset, documents stay local-only:
+    # memories.body in Postgres remains authoritative and document_id stays NULL.
+    firebase_project_id: str | None = None
+    firebase_client_email: str | None = None
+    firebase_private_key: str | None = None
+
     registry_db_path: str = "./data/registry.db"
     target_repo: str | None = None
 
-    # Two distinct concurrency budgets, deliberately separate. The GitHub fetch wants a
-    # modest fan-out to stay under API rate limits; the Graphiti load wants a higher
-    # internal LLM concurrency (graphiti's own default is 20). A single shared knob would
-    # force one to compromise the other. ``semaphore_limit`` is the deprecated shared knob:
-    # when it is the only one a user set, ``_semaphore_limit_fallback`` applies it to the
-    # new knobs so an old ``SEMAPHORE_LIMIT=3`` still throttles rather than being ignored.
-    semaphore_limit: int = 10  # deprecated: use fetch_concurrency / graphiti_max_coroutines
-    fetch_concurrency: int = 10  # concurrent GitHub hydration requests (rate-limit safe)
-    graphiti_max_coroutines: int = 20  # graphiti internal LLM concurrency during load
-    # Concurrent episode extractions when the loader drains a spool (`relic load` /
-    # `relic ingest` on the sequential path). 1 keeps the deterministic oldest-first feed;
-    # raising it overlaps the LLM-bound extraction I/O across episodes. Distinct from
-    # graphiti_max_coroutines, which bounds the LLM fan-out *inside* one episode.
-    load_concurrency: int = 1
-    bulk_load: bool = False  # route the load through add_episode_bulk (see `relic ingest --bulk`)
-    bulk_batch_size: int = 10  # episodes per add_episode_bulk call; smaller = less TPM burst
+    # Concurrent GitHub hydration requests during fetch (rate-limit safe).
+    fetch_concurrency: int = 10
 
-    @model_validator(mode="after")
-    def _semaphore_limit_fallback(self) -> "Settings":
-        """Honor a deprecated, explicitly-set SEMAPHORE_LIMIT as the fallback for the split knobs.
+    @field_validator("firebase_private_key", mode="after")
+    @classmethod
+    def _unescape_private_key(cls, value: str | None) -> str | None:
+        """Unescape a PEM pasted with literal ``\\n`` sequences.
 
-        SEMAPHORE_LIMIT used to bound both phases; it is now FETCH_CONCURRENCY (fetch) and
-        GRAPHITI_MAX_COROUTINES (load). If someone still sets only SEMAPHORE_LIMIT (e.g. =3
-        to dodge rate limits), apply it to whichever new knob they did not set so their
-        intent isn't silently dropped, and tell them to migrate. ``model_fields_set`` carries
-        the fields an env/.env/init actually provided, so untouched defaults don't trigger it.
+        Service-account keys copied out of JSON carry ``\\n`` escapes instead of
+        newlines. PEMs legitimately contain whitespace, so this field deliberately
+        skips ``_clean_secret``; blank values are still treated as unset.
         """
-        if "semaphore_limit" not in self.model_fields_set:
-            return self
-        fell_back = [
-            name
-            for name in ("fetch_concurrency", "graphiti_max_coroutines")
-            if name not in self.model_fields_set
-        ]
-        for name in fell_back:
-            setattr(self, name, self.semaphore_limit)
-        from relic.obs import get_logger
-
-        log = get_logger("config")
-        if fell_back:
-            log.warning(
-                "SEMAPHORE_LIMIT is deprecated; applied it (%d) to %s. Set FETCH_CONCURRENCY "
-                "and GRAPHITI_MAX_COROUTINES instead.",
-                self.semaphore_limit,
-                ", ".join(fell_back),
-            )
-        else:
-            log.warning(
-                "SEMAPHORE_LIMIT is deprecated and ignored; FETCH_CONCURRENCY and "
-                "GRAPHITI_MAX_COROUTINES override it."
-            )
-        return self
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned or cleaned.startswith("#"):
+            return None
+        return cleaned.replace("\\n", "\n")
 
     @field_validator(
         "anthropic_api_key",
-        "gemini_api_key",
-        "openai_api_key",
         "github_token",
         "linear_api_key",
         "granola_api_key",

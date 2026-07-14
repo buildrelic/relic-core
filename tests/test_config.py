@@ -1,10 +1,9 @@
-"""Settings: the deprecated SEMAPHORE_LIMIT fallback to the split concurrency knobs.
+"""Settings: engram defaults, the secret sanitizer, and the Firebase PEM unescape.
 
-SEMAPHORE_LIMIT used to bound both phases; it is now FETCH_CONCURRENCY (fetch) and
-GRAPHITI_MAX_COROUTINES (load). To avoid silently dropping an old `SEMAPHORE_LIMIT=3`,
-the model validator applies it to whichever new knob the user did not set. These tests
-pin that behavior and that it keys off what was actually provided (model_fields_set),
-not off the values.
+The Firebase private key deliberately bypasses ``_clean_secret`` (PEMs contain
+whitespace) and gets its own normalizer instead; these pin both behaviors so a
+half-filled .env fails clean rather than sending a garbage credential, while a
+pasted service-account key still parses.
 """
 
 import pytest
@@ -14,34 +13,57 @@ from relic.config import Settings
 
 
 class _IsolatedSettings(Settings):
-    # Ignore any developer .env so the fallback is tested against inputs only.
+    # Ignore any developer .env so behavior is tested against inputs only.
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
 
 @pytest.fixture(autouse=True)
-def _clear_concurrency_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("SEMAPHORE_LIMIT", "FETCH_CONCURRENCY", "GRAPHITI_MAX_COROUTINES"):
+def _clear_engram_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in (
+        "DATABASE_URL",
+        "RELIC_WORKSPACE",
+        "FETCH_CONCURRENCY",
+        "FIREBASE_PROJECT_ID",
+        "FIREBASE_CLIENT_EMAIL",
+        "FIREBASE_PRIVATE_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_defaults_when_nothing_is_set() -> None:
+def test_engram_defaults() -> None:
     s = _IsolatedSettings()
-    assert (s.fetch_concurrency, s.graphiti_max_coroutines) == (10, 20)
+    assert s.database_url == "postgresql://relic:relic@localhost:5432/relic"
+    assert s.relic_workspace == "local"
+    assert s.fetch_concurrency == 10
 
 
-def test_semaphore_only_falls_back_to_both_knobs() -> None:
-    # The reviewer's scenario: a legacy .env with only SEMAPHORE_LIMIT=3 must still throttle.
-    s = _IsolatedSettings(semaphore_limit=3)
-    assert (s.fetch_concurrency, s.graphiti_max_coroutines) == (3, 3)
-
-
-def test_explicit_new_knob_wins_and_only_unset_falls_back() -> None:
-    s = _IsolatedSettings(semaphore_limit=3, fetch_concurrency=15)
-    assert (s.fetch_concurrency, s.graphiti_max_coroutines) == (15, 3)
-
-
-def test_semaphore_from_env_also_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Proves model_fields_set captures env-sourced fields, not just init kwargs.
-    monkeypatch.setenv("SEMAPHORE_LIMIT", "4")
+def test_workspace_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RELIC_WORKSPACE", "org_abc123")
     s = _IsolatedSettings()
-    assert (s.fetch_concurrency, s.graphiti_max_coroutines) == (4, 4)
+    assert s.relic_workspace == "org_abc123"
+
+
+def test_clean_secret_rejects_comment_and_whitespace_values() -> None:
+    # A `.env` copied from `.env.example` can leave an inline comment as the value.
+    assert _IsolatedSettings(github_token="# fill me in").github_token is None
+    assert _IsolatedSettings(github_token="ghp abc").github_token is None
+    assert _IsolatedSettings(github_token="  ").github_token is None
+    assert _IsolatedSettings(github_token="ghp_real").github_token == "ghp_real"
+
+
+def test_firebase_private_key_unescapes_newlines() -> None:
+    # Service-account keys copied out of JSON carry literal \n escapes.
+    pasted = "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----"
+    s = _IsolatedSettings(firebase_private_key=pasted)
+    assert s.firebase_private_key == "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+
+
+def test_firebase_private_key_keeps_real_newlines() -> None:
+    pem = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+    s = _IsolatedSettings(firebase_private_key=pem)
+    assert s.firebase_private_key == pem
+
+
+def test_firebase_private_key_blank_is_unset() -> None:
+    assert _IsolatedSettings(firebase_private_key="  ").firebase_private_key is None
+    assert _IsolatedSettings(firebase_private_key="# todo").firebase_private_key is None

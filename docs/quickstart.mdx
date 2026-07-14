@@ -1,12 +1,13 @@
 ---
 title: "Quickstart"
-description: "Clone the repo, populate the graph from a real repository, and get your first cited recall, then serve it to a coding agent over MCP."
+description: "Clone the repo, populate the engram from a real repository, and get your first cited recall, then serve it to a coding agent over MCP."
 icon: "rocket"
 ---
 
 This walks the core loop end to end: set up the workspace, ingest a repo's
-history into the graph, recall a grounded answer, and expose it to a coding agent
-over MCP. It takes about ten minutes, most of it the first ingest.
+history into the engram store, recall a grounded answer, and expose it to a
+coding agent over MCP. It takes a few minutes; the ingest itself is bounded by
+the GitHub fetch, since no LLM runs anywhere in the loop.
 
 ## Prerequisites
 
@@ -18,12 +19,13 @@ reports what is configured.
     - **Python 3.12** (`.python-version` pins it; `uv` installs it for you)
     - **[uv](https://docs.astral.sh/uv/)**, which installs Python and dependencies
     - **[just](https://github.com/casey/just)**, the task runner
-    - **Docker**, which runs the FalkorDB graph backend
+    - **Docker**, which runs Postgres, the engram store
   </Accordion>
   <Accordion title="Credentials" icon="key">
-    - **An OpenAI API key**, which Graphiti uses for extraction, embeddings, and recall
     - **`gh` CLI logged in, or a `GITHUB_TOKEN`**, to read GitHub history
-    - Optional: API keys for **Anthropic** (the Phase 4 compiler), **Gemini**, and **Linear** (a second source)
+    - Optional: API keys for **Linear**, **Granola**, and **Notion** (more
+      sources), and **Anthropic** (the Phase 4 compiler)
+    - No model API key is needed anywhere in the core loop
   </Accordion>
 </AccordionGroup>
 
@@ -38,9 +40,9 @@ reports what is configured.
     ```
 
     `just setup` installs Python 3.12 with uv, syncs dependencies, creates `.env`
-    from `.env.example`, starts the FalkorDB graph backend and waits for it to
-    report healthy, installs the pre-commit hook, then runs `relic doctor`. It is
-    safe to re-run.
+    from `.env.example`, starts Postgres and waits for it to report healthy,
+    installs the pre-commit hook, then runs `relic doctor`. It is safe to re-run.
+    The engram schema is applied automatically on first use.
   </Step>
 
   <Step title="Add your API keys">
@@ -51,44 +53,44 @@ reports what is configured.
     ```
 
     <Note>
-      `OPENAI_API_KEY` is required for `ingest`, `recall`, `query`, and `eval`.
       A `GITHUB_TOKEN` is needed for `ingest` unless `gh auth` is logged in.
-      Every key is optional at import time, so `relic --help` and `just doctor`
-      work on an empty `.env`. See [Configuration](/configuration) for the full
-      list.
+      That is the only credential the core loop uses. Every key is optional at
+      import time, so `relic --help` and `just doctor` work on an empty `.env`.
+      See [Configuration](/configuration) for the full list.
     </Note>
   </Step>
 
   <Step title="Ingest a repository">
-    Pull a repo's merged and closed PRs, reviews, and issues into the graph,
+    Pull a repo's merged and closed PRs, reviews, and issues into the engram,
     capped at the 20 most recent for a fast first run:
 
     ```bash
     just ingest astral-sh/uv 20
     ```
 
-    The path from source payload to episode is deterministic. Graphiti's LLM
-    enters only at extraction, where episodes become typed entities and edges in a
-    per-repo FalkorDB graph. The run is resumable: a re-run skips what already
-    landed. See [Ingestion](/ingestion) for the full pipeline.
+    The whole path is deterministic: fetch, map to typed episodes, then land
+    each as one Postgres row with derived title, search text, people, and paths.
+    No LLM runs, so the clock is the GitHub fetch. The run is resumable: a
+    re-run skips what already landed and refreshes what changed. See
+    [Ingestion](/ingestion) for the full pipeline.
 
     <Tip>
-      FalkorDB must be running. `just setup` starts it; `just up` and `just down`
-      control it afterward. Its browser UI is at `http://localhost:3000`.
+      Postgres must be running. `just setup` starts it; `just up` and `just down`
+      control it afterward.
     </Tip>
   </Step>
 
   <Step title="Recall a grounded answer">
-    Query the graph and get facts back, each carrying the PR or issue it came
+    Query the engram and get facts back, each carrying the PR or issue it came
     from:
 
     ```bash
     just recall "who usually reviews changes to the resolver?"
     ```
 
-    Recall runs hybrid retrieval (semantic, keyword, rerank) and never raises: if
-    search fails, it returns an empty answer rather than an error. See
-    [Memory & recall](/memory-and-recall).
+    Recall is Postgres full-text search with an any-term fallback for natural
+    language, and it never raises: if search fails, it returns an empty answer
+    rather than an error. See [Memory & recall](/memory-and-recall).
   </Step>
 
   <Step title="Serve it to a coding agent over MCP">
@@ -106,16 +108,16 @@ reports what is configured.
 
     The server exposes each verified skill as a tool and a `skill://<id>`
     resource, a `search_skills` tool, and a `recall_memory` tool. Recall is best
-    effort: if the graph is unreachable, `serve` logs to stderr and still serves
+    effort: if Postgres is unreachable, `serve` logs to stderr and still serves
     skills. See [Skills & serve](/skills).
   </Step>
 </Steps>
 
 ## Turn on the closed loop
 
-`relic serve` is pull-based: an agent recalls when it chooses to. The **daemon** is
-the active loop — it injects recalled context on every prompt and writes each finished
-session back into the engram, with no change to how you work.
+`relic serve` is pull-based: an agent recalls when it chooses to. The **daemon**
+is the active loop: it injects recalled context on every prompt and writes each
+finished session back into the engram, with no change to how you work.
 
 ```bash
 # wire the Claude Code hooks (UserPromptSubmit -> inject, SessionEnd -> capture)
@@ -125,13 +127,14 @@ uv run relic install-hooks
 uv run relic daemon --repo owner/name
 ```
 
-The daemon listens on `127.0.0.1:8788` (`/v1/daemon/status`, `inject`, `recall`,
-`capture`). It scopes **per session**: each inject/capture resolves the repo from the
-session's working directory (its git origin) and uses that repo's engram, so one
-daemon serves every repo you work in. It is best-effort by design: if the engram is
-down it boots degraded and the hooks never break a turn. Non-engineers can run and
-watch the loop from the [relic-desktop](https://github.com/buildrelic/relic-desktop)
-tray app instead of the CLI.
+The daemon listens on `127.0.0.1:8788` (`/v1/daemon/status`, `activity`,
+`inject`, `recall`, `capture`). It scopes **per session**: each inject/capture
+resolves the repo from the session's working directory (its git origin) and
+recalls and writes in that repo's scope, so one daemon serves every repo you
+work in. It is best-effort by design: if Postgres is down it boots degraded and
+the hooks never break a turn. Non-engineers can run and watch the loop from the
+[relic-desktop](https://github.com/buildrelic/relic-desktop) tray app instead of
+the CLI.
 
 ## Next steps
 

@@ -40,7 +40,8 @@
           "adr/0003-memory-seam",
           "adr/0004-memory-service-api",
           "adr/0005-tenant-zone-access-model",
-          "adr/0006-sound-graph-for-consumers"
+          "adr/0006-sound-graph-for-consumers",
+          "adr/0007-engram-store-pivot"
         ]
       },
       {

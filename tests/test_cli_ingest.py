@@ -1,15 +1,15 @@
 """CLI orchestration for `relic ingest`: gates, exit codes, and checkpoint wiring.
 
-These exercise _ingest without touching GitHub, OpenAI, or FalkorDB: the fetch,
-the engram, and the load are stubbed so the test pins the orchestration (preflight
-gate, exit codes, --fresh). The load loop itself is covered in test_load.py.
+These exercise _ingest without touching GitHub or Postgres: the fetch, the store,
+and the load are stubbed so the test pins the orchestration (preflight gate, exit
+codes, --fresh). The load loop itself is covered in test_load.py.
 """
 
 import pytest
 from typer.testing import CliRunner
 
 from relic.cli import app
-from relic.graph.load import LoadStats
+from relic.engram.load import LoadStats
 from relic.ingest.mappers import PullRequestRec, RepoBundle
 
 runner = CliRunner()
@@ -20,12 +20,12 @@ def test_repo_without_slash_exits_2() -> None:
     assert result.exit_code == 2
 
 
-def test_unreachable_graph_exits_1_before_fetching(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Preflight should stop the run before any GitHub call when the graph is down.
-    monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: False)
+def test_unreachable_store_exits_1_before_fetching(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Preflight should stop the run before any GitHub call when the store is down.
+    monkeypatch.setattr("relic.engram.postgres_reachable", lambda *a, **k: False)
 
     def _fail_token(*_a, **_k):
-        raise AssertionError("token resolution must not run when the graph is unreachable")
+        raise AssertionError("token resolution must not run when the store is unreachable")
 
     monkeypatch.setattr("relic.ingest.resolve_github_token", _fail_token)
 
@@ -41,7 +41,7 @@ class _FakeGH:
         return False
 
 
-class _FakeEngram:
+class _FakeStore:
     def __init__(self) -> None:
         self.closed = False
 
@@ -71,10 +71,14 @@ def _bundle() -> RepoBundle:
 
 def _patch_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path, *, stats: LoadStats) -> None:
     monkeypatch.chdir(tmp_path)  # data/raw and data/ingest land under tmp
-    monkeypatch.setattr("relic.graph.falkordb_reachable", lambda *a, **k: True)
+    monkeypatch.setattr("relic.engram.postgres_reachable", lambda *a, **k: True)
     monkeypatch.setattr("relic.ingest.resolve_github_token", lambda *a, **k: "tok")
     monkeypatch.setattr("relic.ingest.make_github", lambda *a, **k: _FakeGH())
-    monkeypatch.setattr("relic.graph.open_memory", lambda *a, **k: _FakeEngram())
+
+    async def _open_engram(*_a, **_k):
+        return _FakeStore()
+
+    monkeypatch.setattr("relic.engram.open_engram", _open_engram)
 
     async def _fetch_repo(*_a, **_k):
         return _bundle()
@@ -83,7 +87,7 @@ def _patch_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path, *, stats: LoadS
         return stats
 
     monkeypatch.setattr("relic.ingest.fetch_repo", _fetch_repo)
-    monkeypatch.setattr("relic.graph.load_episodes", _load)
+    monkeypatch.setattr("relic.engram.load_episodes", _load)
 
 
 def test_exit_1_when_every_episode_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -105,43 +109,6 @@ def test_exit_0_on_successful_load(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     _patch_happy_path(monkeypatch, tmp_path, stats=stats)
     result = runner.invoke(app, ["ingest", "--repo", "demo/repo"])
     assert result.exit_code == 0
-
-
-def _patch_loaders(monkeypatch: pytest.MonkeyPatch, stats: LoadStats) -> list[str]:
-    """Patch both loaders to record which one _ingest routes to. Returns the call log."""
-    called: list[str] = []
-
-    async def _bulk(*_a, **_k):
-        called.append("bulk")
-        return stats
-
-    async def _seq(*_a, **_k):
-        called.append("seq")
-        return stats
-
-    monkeypatch.setattr("relic.graph.load_episodes_bulk", _bulk)
-    monkeypatch.setattr("relic.graph.load_episodes", _seq)
-    return called
-
-
-def test_bulk_flag_routes_to_bulk_loader(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
-    _patch_happy_path(monkeypatch, tmp_path, stats=stats)
-    called = _patch_loaders(monkeypatch, stats)
-
-    result = runner.invoke(app, ["ingest", "--repo", "demo/repo", "--bulk"])
-    assert result.exit_code == 0
-    assert called == ["bulk"]
-
-
-def test_default_routes_to_sequential_loader(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    stats = LoadStats(group_id="demo__repo", attempted=1, loaded=1, failed=0, duration_s=0.1)
-    _patch_happy_path(monkeypatch, tmp_path, stats=stats)
-    called = _patch_loaders(monkeypatch, stats)
-
-    result = runner.invoke(app, ["ingest", "--repo", "demo/repo"])
-    assert result.exit_code == 0
-    assert called == ["seq"]
 
 
 def test_fresh_clears_the_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

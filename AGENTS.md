@@ -1,9 +1,9 @@
 # Relic
 
-Relic is an early, in-progress memory layer for AI-native teams, built on
-**Graphiti**. It is not finished and its shape is not settled. We are figuring
-out what it should be by using it ourselves and with a few friends who are
-building companies.
+Relic is an early, in-progress memory layer for AI-native teams, built on the
+**engram store** (Postgres plus a Firestore document mirror, ADR-0007). It is
+not finished and its shape is not settled. We are figuring out what it should
+be by using it ourselves and with a few friends who are building companies.
 
 This repo is the product. The marketing site lives elsewhere; its copy decisions
 do not bind anything here.
@@ -25,8 +25,9 @@ owns one subsystem and works inside it.
 
 - **Paris.** `relic-ingest`: the ingestion pipeline. GitHub and Linear connectors,
   raw store, mappers.
-- **Abhinav.** `relic-graph`: the memory and retrieval store. The Graphiti graph,
-  recall, and the procedure detector and compiler.
+- **Abhinav.** `relic-engram`: the memory and retrieval store. The Postgres
+  store, derive, recall, the Firestore document mirror, and the procedure
+  detector and compiler.
 - **Zidan.** `relic-serve` and `relic-cli`: the MCP server, the skill registry,
   render, and the composition-root CLI. The web app under `apps/` is his too, once
   it lands (the directory does not exist yet).
@@ -51,9 +52,9 @@ Subsystems talk through contracts, never through each other's internals.
    daemon and web app) builds the real implementation and hands it in.
 
 Recall is the worked example. `relic-serve` takes a `RecallFn` and never imports
-`relic-graph`; `relic.cli` builds the recall function from the graph and injects
+`relic-engram`; `relic.cli` builds the recall function from the store and injects
 it. `EpisodeSpec` lives in `relic.contracts` for the same reason: ingest produces
-it, graph consumes it, neither imports the other. Add new seams the same way.
+it, engram consumes it, neither imports the other. Add new seams the same way.
 
 `just check` runs ruff, pyright, pytest, and `lint-imports`. The last one fails
 the build if a subsystem reaches across a boundary.
@@ -62,25 +63,25 @@ the build if a subsystem reaches across a boundary.
 
 The loop we are exploring:
 
-1. **Capture.** Feed work into Graphiti as episodes (PRs, tickets, threads,
-   meeting notes from Notion, Slack, Linear, Granola, GitHub). Graphiti extracts
-   entities and relationships and tracks how they change over time. No manual
-   tagging or schema design.
-2. **Memory.** A temporal knowledge graph of what the team knows and decided.
-   Each edge traces back to the source episode it came from, so answers can cite
-   where they came from.
-3. **Recall.** Query the graph (semantic + keyword + graph traversal) and get an
-   answer with its sources. Likely two surfaces over one store: a typed API /
-   MCP for agents, and a wiki-style view for humans.
+1. **Capture.** Feed work into the engram as typed episodes (PRs, tickets,
+   meeting notes, pages, coding sessions from GitHub, Linear, Granola, Notion,
+   Claude Code). Each episode lands deterministically as one memory row plus
+   the people and paths it names. No manual tagging, no LLM extraction.
+2. **Memory.** Rows a human can see and correct: the web app's Drive-style
+   Memory workspace renders each memory's document and lets you edit it. Every
+   row keeps its source URL, so answers can cite where they came from.
+3. **Recall.** Search the store (Postgres full-text search) and get an answer
+   with its sources. Two surfaces over one store: a typed API / MCP for agents,
+   and the web workspace for humans.
 
 The MCP server is probably the keystone: connect over MCP, sit below the editor,
 so the same memory is reachable from whatever tool a team codes in. A strong
 hypothesis, not a settled fact.
 
-**Smallest useful slice (dogfood target):** one source in, Graphiti builds the
-graph, `recall` returns an answer with its sources, exposed as an MCP server we
-use ourselves every day. Get that loop good before auth, multi-tenancy, or a
-many-source ingestion pipeline.
+**Smallest useful slice (dogfood target):** one source in, the engram store
+holds the rows, `recall` returns an answer with its sources, exposed as an MCP
+server we use ourselves every day. Get that loop good before auth,
+multi-tenancy, or a many-source ingestion pipeline.
 
 ## Positioning — current hypothesis, expect it to move
 
@@ -184,21 +185,21 @@ Descriptions:
 
 ## Stack
 
-- **Layout.** A uv workspace: `relic-core`, `relic-ingest`, `relic-graph`,
+- **Layout.** A uv workspace: `relic-core`, `relic-ingest`, `relic-engram`,
   `relic-serve`, `relic-cli` under `packages/`, each an installable package with
   its own dependencies. Import paths stay `relic.*` (a namespace package).
   `just setup` syncs the whole workspace; `just check` runs the gate.
-- **Memory engine.** Graphiti (getzep/graphiti). Read its docs before touching
-  ingestion or retrieval: it moves fast, heed version notes.
-- **Graph DB.** FalkorDB. For now, while in dev, self-hosted via Docker
-  (`just up`, localhost:6379): a managed/hosted instance is the likely move once
-  we are past dogfooding. Chosen for its multi-tenant group_id partitioning
-  (per-repo graphs) and working full-text search. Connection is configured by
-  the `FALKORDB_*` env vars.
-- **Graphiti models.** OpenAI `gpt-4o-mini` for extraction and reranking, and
-  `text-embedding-3-small` for search (`packages/relic-graph/src/relic/graph/engram.py`).
-- **Relational DB.** Supabase (Postgres) is available for app/auth/relational
-  data, not the memory graph itself.
+- **Memory store.** Postgres 16 over asyncpg (ADR-0007). For now, while in dev,
+  self-hosted via Docker (`just up`, localhost:5432, `DATABASE_URL`); a hosted
+  instance (e.g. Neon) is the likely move once we are past dogfooding. The
+  schema is owned by relic-core and applied by `ensure_schema()`; the landing
+  web app reads and edits the same tables, so DDL changes are a cross-repo
+  contract change.
+- **Document mirror.** Firestore over firebase-admin, optional (`FIREBASE_*`,
+  the same service account as the landing app). Best-effort: it degrades the
+  web UI, never an ingest.
+- **Recall.** Postgres full-text search. No model API calls at ingest or
+  recall; `ANTHROPIC_API_KEY` is reserved for the Phase 4 compiler.
 - **Primary interface.** MCP server.
 - **Other libraries.** Everything else is open. Read the relevant docs before writing code.
 

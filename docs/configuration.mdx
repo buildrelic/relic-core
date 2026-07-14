@@ -1,7 +1,7 @@
 ---
 title: "Configuration"
 icon: "sliders"
-description: "Environment variables, the five stores, secret handling, and the doctor report."
+description: "Environment variables, the stores, secret handling, and the doctor report."
 ---
 
 All runtime configuration is environment variables, loaded from `.env` into a
@@ -20,11 +20,12 @@ optional, so importing config (and `relic --help`) never needs a populated `.env
     ```
     Copies `.env.example` to `.env` if missing. Fill in your keys.
   </Step>
-  <Step title="Start the graph">
+  <Step title="Start the store">
     ```bash
     just up
     ```
-    Starts FalkorDB on `localhost:6379`, with the browser UI on http://localhost:3000.
+    Starts Postgres on `localhost:5432`. The engram schema is applied
+    automatically on first use.
   </Step>
   <Step title="Confirm what is configured">
     ```bash
@@ -37,67 +38,58 @@ optional, so importing config (and `relic --help`) never needs a populated `.env
 
 | Variable | Default | Required for | What it does |
 |---|---|---|---|
-| `OPENAI_API_KEY` | none | `ingest`, `load`, `recall`, `query`, `eval`, `serve` recall | Graphiti extraction, embeddings, reranking |
+| `DATABASE_URL` | `postgresql://relic:relic@localhost:5432/relic` | `ingest`, `load`, `recall`, `query`, `eval`, the daemon | the engram store. The default matches `docker-compose.yml`; point it at a hosted Postgres later |
+| `RELIC_WORKSPACE` | `local` | none | the workspace every locally-ingested memory lands in. The web app writes with its Clerk scope (`orgId ?? userId`); the CLI and daemon write here |
+| `FIREBASE_PROJECT_ID` | none | Firestore mirror (optional) | the document mirror's project. All three `FIREBASE_*` vars must be set for the mirror to run |
+| `FIREBASE_CLIENT_EMAIL` | none | Firestore mirror (optional) | the service-account email; same env names the landing app uses |
+| `FIREBASE_PRIVATE_KEY` | none | Firestore mirror (optional) | the service-account PEM. Literal `\n` escapes (as copied from JSON) are unescaped on load |
 | `GITHUB_TOKEN` | none | `ingest` (or `gh auth`) | read GitHub history; falls back to `gh auth token` |
 | `LINEAR_API_KEY` | none | Linear ingest | enables the Linear source when set |
+| `GRANOLA_API_KEY` | none | Granola ingest | enables `relic ingest --source granola` when set |
+| `NOTION_API_KEY` | none | Notion ingest | enables `relic ingest --source notion` when set (an internal integration token) |
 | `ANTHROPIC_API_KEY` | none | Phase 4 compiler | skill compilation (not used yet) |
-| `GEMINI_API_KEY` | none | `ingest` when provider is `gemini` | Gemini key for extraction; the `gemini` provider is hybrid and **also** needs `OPENAI_API_KEY` for embeddings |
-| `GRAPHITI_LLM_PROVIDER` | `openai` | none | graph LLM provider: `openai` (default) or `gemini` (hybrid: Gemini LLM + OpenAI embeddings/rerank) |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | `gemini` provider | model used when `GRAPHITI_LLM_PROVIDER=gemini` |
-| `FALKORDB_HOST` | `localhost` | graph commands | FalkorDB host |
-| `FALKORDB_PORT` | `6379` | graph commands | FalkorDB port |
-| `FALKORDB_PASSWORD` | none | graph commands | leave unset for a local no-auth instance |
-| `FALKORDB_DATABASE` | `relic` | graph commands | default graph for ungrouped data |
 | `REGISTRY_DB_PATH` | `./data/registry.db` | skill commands | SQLite registry location |
-| `TARGET_REPO` | none | optional | default `owner/name` for `recall`, `query`, `eval` |
-| `RELIC_HTTP_TOKEN` | none | `serve-http` (optional) | when set in the environment, `serve-http` requires `Authorization: Bearer <token>` on its data routes; the `--token` flag overrides it. Leave unset for local dev |
+| `TARGET_REPO` | none | optional | default `owner/name` for `recall`, `query`, `serve`, and the daemon's fallback scope |
 | `FETCH_CONCURRENCY` | `10` | `ingest` | concurrent GitHub requests (rate-limit safe) |
-| `GRAPHITI_MAX_COROUTINES` | `20` | `ingest`, `load` | Graphiti internal LLM concurrency during load; lower to ~5 for the `gemini` provider (see note) |
-| `BULK_LOAD` | `false` | `ingest`, `load` | load via batched `add_episode_bulk` (also `--bulk`) |
-| `BULK_BATCH_SIZE` | `10` | `ingest`, `load` | episodes per bulk call; lower it to ease OpenAI rate limits |
-| `SEMAPHORE_LIMIT` | `10` | `ingest`, `load` | deprecated shared knob, superseded by the two above |
+| `RELIC_HTTP_TOKEN` | none | `serve-http` (optional) | when set in the environment, `serve-http` requires `Authorization: Bearer <token>` on its data routes; the `--token` flag overrides it. Leave unset for local dev |
+| `RELIC_DAEMON_TOKEN` | none | `daemon` (optional) | same bearer scheme for the daemon routes; `relic install-hooks` bakes it into the hook commands |
 
-Unknown keys in `.env` are ignored (`extra="ignore"`), so a leftover variable from
-an earlier version does no harm.
-
-### Tuning concurrency for the `gemini` provider
-
-The defaults (`GRAPHITI_MAX_COROUTINES=20`, `BULK_BATCH_SIZE=10`) are sized for OpenAI,
-whose rate-limiting naturally spreads out the graph writes. Gemini is fast enough that
-those same writes arrive at once and can overrun FalkorDB's query queue during `--bulk`
-(`ResponseError: Max pending queries exceeded`), which forces a slow per-episode
-fallback. Lowering both to ~5 keeps bulk under FalkorDB's cap, and is *faster* overall
-because nothing falls back:
-
-```bash
-GRAPHITI_LLM_PROVIDER=gemini GRAPHITI_MAX_COROUTINES=5 BULK_BATCH_SIZE=5 \
-  relic ingest --repo owner/name --bulk --fresh
-```
-
-The alternative is to raise FalkorDB's own limit (it accepts a higher
-`MAX_QUEUED_QUERIES` at startup) if you want to keep concurrency high.
+Unknown keys in `.env` are ignored (`extra="ignore"`), so a leftover variable
+from an earlier version does no harm. The graph-era variables (`FALKORDB_*`,
+`OPENAI_API_KEY`, `GEMINI_*`, `GRAPHITI_*`, `BULK_*`, `SEMAPHORE_LIMIT`) are
+gone with the graph ([ADR-0007](/adr/0007-engram-store-pivot)); a stale `.env`
+still loads clean.
 
 ## Secret sanitization
 
 <Warning>
-The secret fields (`anthropic_api_key`, `gemini_api_key`, `openai_api_key`,
-`github_token`, `linear_api_key`) are cleaned after load: a value that is blank,
-contains whitespace, or starts with `#` is treated as unset. The reason is that a
-`.env` copied from `.env.example` can leave an inline comment as the value
-(python-dotenv keeps `KEY=  # note`), and a real API token never contains
+The secret fields (`anthropic_api_key`, `github_token`, `linear_api_key`,
+`granola_api_key`, `notion_api_key`) are cleaned after load: a value that is
+blank, contains whitespace, or starts with `#` is treated as unset. The reason
+is that a `.env` copied from `.env.example` can leave an inline comment as the
+value (python-dotenv keeps `KEY=  # note`), and a real API token never contains
 whitespace or `#`. So `.env.example` keeps comments on their own lines, and a
 half-filled `.env` fails clean rather than sending a garbage credential.
+`FIREBASE_PRIVATE_KEY` is the exception: a PEM legitimately contains whitespace,
+so it only unescapes `\n` and treats blank as unset.
 </Warning>
 
 ## The stores
 
-Five stores, all under `./data/` by default (gitignored).
+Postgres holds the memory; everything else lives under `./data/` (gitignored)
+or, optionally, in Firestore.
 
 <CardGroup cols={2}>
-  <Card title="The graph (memory)" icon="brain" href="/memory-and-recall">
-    FalkorDB, addressed by `FALKORDB_*`. Not a local file: it is a networked service.
-    Per-repo graphs are named by `group_id`; the `FALKORDB_DATABASE` graph holds
-    ungrouped data.
+  <Card title="The engram store (memory)" icon="brain" href="/memory-and-recall">
+    Postgres, addressed by `DATABASE_URL`. Not a local file: it is a networked
+    service (`just up` runs it in Docker). Holds `workspaces`, `people`,
+    `memories`, `memory_people`, and `memory_paths`; the schema is applied by
+    `ensure_schema()` on first use.
+  </Card>
+  <Card title="The Firestore mirror (documents)" icon="file-lines" href="/memory-and-recall">
+    Optional, configured by the three `FIREBASE_*` vars. One document per memory
+    with rendered markdown, for the web workspace. Unconfigured, documents stay
+    local-only in `memories.body`.
   </Card>
   <Card title="The registry (skills)" icon="database" href="/skills">
     SQLite at `REGISTRY_DB_PATH`. Created on first write.
@@ -106,14 +98,14 @@ Five stores, all under `./data/` by default (gitignored).
     Plain JSON under `./data/raw/<source>/<id>.json`, written by `ingest`.
   </Card>
   <Card title="The episode spool" icon="layer-group" href="/ingestion">
-    Mapped episodes under `./data/spool/<group_id>/`, one JSON file per episode.
-    Written by capture (`ingest`), read by `relic load`. It decouples the fast,
-    no-LLM capture from the slow extraction.
+    Mapped episodes under `./data/spool/<scope>/`, one JSON file per episode.
+    Written by capture (`ingest`), read by `relic load`. It decouples capture
+    from the store write.
   </Card>
   <Card title="The ingest checkpoint" icon="list-check" href="/ingestion">
-    A per-repo ledger at `./data/ingest/<group_id>.log`, one landed episode name per
-    line. Lets a re-run skip what already loaded and resume a failed run.
-    `ingest --fresh` clears it.
+    A per-scope ledger at `./data/ingest/<scope>.log`, one landed episode name
+    plus its content token per line. Lets a re-run skip what already loaded and
+    refresh what changed. `ingest --fresh` clears it.
   </Card>
 </CardGroup>
 
@@ -139,11 +131,14 @@ so log lines render above the bar instead of corrupting it.
 
 | Key | Unlocks |
 |---|---|
-| openai | graph ingest, recall |
 | anthropic | skill compiler |
-| gemini | graph extraction (gemini provider, hybrid) |
 | github | github ingest |
 | linear | linear ingest |
+| granola | granola ingest |
+| notion | notion ingest |
+
+The core loop (ingest, recall, the daemon) needs no model API key at all: the
+store is deterministic end to end.
 
 ## Reading doctor
 
@@ -151,9 +146,9 @@ so log lines render above the bar instead of corrupting it.
 
 - **registry.** Path, whether it exists, and a count of skills by status. If it
   does not exist, it tells you to run `relic register`.
-- **graph.** The FalkorDB address (`falkordb://host:port/database`) and whether
-  the host and port are reachable (a 0.5s TCP probe). If reachable but
-  `OPENAI_API_KEY` is missing, it says recall and ingest still need the key.
+- **engram.** The Postgres DSN (redacted: no password) and whether the host and
+  port are reachable (a 0.5s TCP probe), plus whether the Firestore mirror is
+  configured or documents stay local-only.
 - **keys.** Each key, set or missing, and its purpose.
 
 It opens the registry only when the file already exists and never raises, so a

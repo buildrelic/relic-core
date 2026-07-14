@@ -1,7 +1,7 @@
 ---
 title: "Architecture"
 icon: "diagram-project"
-description: "The two halves, the SkillIR contract, the two stores, the system diagram, and the runtime model."
+description: "The two halves, the SkillIR contract, the stores, the system diagram, and the runtime model."
 ---
 
 Relic is two halves over one contract. The capture half builds memory from
@@ -13,23 +13,24 @@ output, the registry row, and the MCP tool schema, all one type.
 
 <CardGroup cols={2}>
   <Card title="Capture, memory, recall" icon="brain">
-    The graph side. Pull engineering history, structure it in a temporal knowledge
-    graph, and answer questions against it with sources attached. This is `ingest`,
-    `load`, `recall`, `query`, and `eval`. It is backed by Graphiti on FalkorDB and
-    uses OpenAI for extraction, embeddings, and reranking.
+    The engram side. Pull engineering history, land it as typed rows in the
+    engram store, and answer questions against it with sources attached. This is
+    `ingest`, `load`, `recall`, `query`, and `eval`. It is backed by Postgres
+    (full-text search) with an optional Firestore document mirror. No LLM at
+    ingest or recall.
   </Card>
   <Card title="Skills, serve" icon="screwdriver-wrench">
     The registry side. Hold typed skills, move them through a lifecycle, and deliver
     them to agents as files or over MCP. This is `register`, `list`, `show`,
     `verify`, `deprecate`, `emit`, `catalog`, and `serve`. It is backed by a SQLite
-    registry and has no graph or network dependency.
+    registry and has no store or network dependency.
   </Card>
 </CardGroup>
 
-The halves are deliberately decoupled. The serve side never imports the graph
+The halves are deliberately decoupled. The serve side never imports the engram
 side. The MCP server takes a recall function by injection rather than importing
 it ([`mcp_server.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/mcp_server.py)), so skills can be served
-even when the graph is unreachable.
+even when the store is unreachable.
 
 ## The one contract: SkillIR
 
@@ -47,13 +48,16 @@ cannot drift. The MCP tool's input schema is built directly from `SkillIR.inputs
 rendered from the same record by a deterministic Jinja template
 ([`render.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/render.py)).
 
-## The two stores
+## The stores
 
 Memory and skills live in separate stores on purpose.
 
-**The graph (memory).** A FalkorDB graph, accessed through Graphiti. It holds
-people, repos, pull requests, reviews, issues, and the edges between them,
-extracted from episodes. It is partitioned per repo by `group_id`. See
+**The engram store (memory).** Postgres, authoritative, addressed by
+`DATABASE_URL`. Relational tables (`workspaces`, `people`, `memories`,
+`memory_people`, `memory_paths`) hold one row per artifact, scoped by workspace
+and partitioned by `scope`. Firestore, when configured (`FIREBASE_*`), mirrors
+each memory as a document with rendered markdown for the web workspace;
+Postgres stays authoritative and the mirror is best-effort. See
 [Memory and recall](/memory-and-recall).
 
 **The registry (skills).** A SQLite database at `./data/registry.db`. It holds
@@ -71,22 +75,21 @@ flowchart TB
     subgraph sources [External sources]
         GH[GitHub: GraphQL PRs + REST issues]
         LN[Linear GraphQL]
-    end
-
-    subgraph models [External models]
-        OAI[OpenAI: gpt-4o-mini, text-embedding-3-small, reranker]
-        ANT[Anthropic: compiler, Phase 4]
+        GRN[Granola meetings]
+        NO[Notion pages]
     end
 
     subgraph capture [Capture / memory / recall]
         ING[ingest]
         MAP[mappers: deterministic records to episodes]
-        LOAD[load: add_episode per repo group_id]
+        LOAD[load: upsert per workspace + name]
+        DER[derive: title, search text, markdown, people, paths]
         REC[recall / query / eval]
     end
 
     subgraph stores [Stores]
-        FALKOR[(FalkorDB graph<br/>per-repo by group_id)]
+        PG[(Postgres engram<br/>DATABASE_URL)]
+        FS[(Firestore mirror<br/>optional)]
         RAW[(raw store<br/>./data/raw)]
         REG[(SQLite registry<br/>./data/registry.db)]
     end
@@ -98,15 +101,18 @@ flowchart TB
     end
 
     AGENT[coding agent]
+    ANT[Anthropic: compiler, Phase 4]
 
     GH --> ING
     LN --> ING
+    GRN --> ING
+    NO --> ING
     ING --> MAP -->|spool, then relic load| LOAD
     ING --> RAW
-    LOAD -->|OpenAI extraction| OAI
-    LOAD --> FALKOR
-    REC --> FALKOR
-    REC -->|search + rerank| OAI
+    LOAD --> DER
+    DER --> PG
+    DER -.->|best-effort markdown| FS
+    REC -->|Postgres FTS| PG
 
     LIFE --> REG
     EMIT --> REG
@@ -126,17 +132,18 @@ short-lived CLI invocations, over shared stores. See
 - **CLI commands** are one-shot. `ingest`, `recall`, `query`, `eval`, `emit`,
   and the rest run, do their work, and exit. The async ones
   (`ingest`/`load`/`recall`/`query`/`eval`/`serve`) wrap their body in `asyncio.run`.
-- **`relic serve`** is the one long-running process. It speaks MCP over stdio and
-  stays up for the life of the client connection.
-- **FalkorDB** is a persistent service, run locally via Docker
-  ([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml)) on `localhost:6379`. It must be
-  up before any graph command.
-- **OpenAI and Anthropic** are external HTTP APIs called per run.
+- **`relic serve`**, **`relic daemon`**, and **`relic serve-http`** are the
+  long-running processes: the MCP server over stdio, the closed-loop daemon on
+  `127.0.0.1:8788`, and the web app's HTTP surface on `127.0.0.1:8787`.
+- **Postgres** is a persistent service, run locally via Docker
+  ([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml)) on `localhost:5432` (`just up`). It must be
+  up before any store command.
+- **Anthropic** is an external HTTP API, reserved for the Phase 4 compiler.
 
 <Note>
 The CLI is import-light by design. Only typer and rich load at module import, so
 `relic --help` stays fast and needs no keys. Each command imports its heavy
-dependencies (Graphiti, the connectors) inside the command body
+dependencies (asyncpg, the connectors) inside the command body
 ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py)).
 </Note>
 
@@ -152,26 +159,27 @@ another only if it depends on it, and only that package's public API (its
 packages/
 ├── relic-core/       # shared, jointly owned: the interface layer
 │   └── src/relic/
-│       ├── contracts/  # EpisodeSpec, RecallFn, re-exported SkillIR: the seams
+│       ├── contracts/  # EpisodeSpec, episode bodies, RecallFn, SkillIR: the seams
 │       ├── ontology/   # the typed domain models (see data-model.md)
 │       ├── config.py   # pydantic-settings, loaded from .env
 │       └── obs.py      # logging to stderr + the shared ingest progress-bar wiring
 ├── relic-ingest/     # Paris: capture from sources (see ingestion.md)
-│   └── src/relic/ingest/   # github, linear, mappers, sessions, raw_store, checkpoint
-├── relic-graph/      # Abhinav: the memory/retrieval store (see memory-and-recall.md)
+│   └── src/relic/ingest/   # github, linear, granola, notion, mappers, sessions, raw_store, checkpoint
+├── relic-engram/     # Abhinav: the memory/retrieval store (see memory-and-recall.md)
 │   └── src/relic/
-│       ├── graph/      # engram, load, recall, queries
+│       ├── engram/     # store, derive, recall, load, queries, documents
 │       ├── compile/    # detect + compiler (Phase 4 stubs)
 │       ├── resolve/    # cross-source person resolution (Phase 3 stub)
 │       └── scorecard.py # recall eval against a gold set
 ├── relic-serve/      # Zidan: deliver skills (see skills.md)
 │   └── src/relic/
-│       ├── serve/      # mcp_server, emit_files, catalog, render (+ templates/)
+│       ├── serve/      # mcp_server, daemon_app, http_server, emit_files, catalog, render
 │       └── registry/   # SQLite skill store
 └── relic-cli/        # Zidan: the composition root
     └── src/relic/
         ├── cli.py      # typer CLI: wires the three subsystems together
         ├── doctor.py   # read-only health check
+        ├── hooks/      # the Claude Code hook shim (stdlib-only)
         └── __main__.py
 ```
 
@@ -180,7 +188,7 @@ The dependency graph (and the rule it encodes):
 ```
 relic-core                        pydantic, pydantic-settings, rich
   ^      ^      ^
-ingest  graph  serve              each depends on relic-core only; mutually independent
+ingest  engram  serve             each depends on relic-core only; mutually independent
   ^      ^      ^
        relic-cli                  the only package that depends on all three
 ```
@@ -188,53 +196,53 @@ ingest  graph  serve              each depends on relic-core only; mutually inde
 The three subsystems never import each other. They interact only through types in
 `relic.contracts`, and `relic.cli` (the composition root) builds the concrete
 implementations and injects them. The recall seam is the model: `relic-serve`
-takes a `RecallFn` and never imports `relic-graph`; `relic.cli` builds the recall
-function from the graph and injects it. `import-linter` contracts in the root
+takes a `RecallFn` and never imports `relic-engram`; `relic.cli` builds the recall
+function from the store and injects it. `import-linter` contracts in the root
 `pyproject.toml` fail the build if a subsystem reaches across a boundary.
 
-The **daemon** is now a composition root of its own (`relic daemon` in `relic-cli`).
-It builds the engram, injects a `RecallFn` and a capture function into a loopback HTTP
-surface ([`daemon_app.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/daemon_app.py),
+The **daemon** is a composition root of its own (`relic daemon` in `relic-cli`).
+It holds one lazily-built engram store (`_StoreHandle`, so the daemon boots even
+with Postgres down), injects a `RecallFn` and a capture function into a loopback
+HTTP surface ([`daemon_app.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/daemon_app.py),
 `build_daemon_app`), and closes the loop: Claude Code hooks call `inject` to recall
-context onto each prompt and `capture` to write the finished session back as a
-AgentSession episode (see the AgentSession amendment in
-[ADR-0001](/adr/0001-engram-graph-ontology)) through the same `load_episodes` ingest uses.
-The capture payload → `EpisodeSpec` mapping (transcript distillation plus the
+context onto each prompt and `capture` to write the finished session back as an
+AgentSession episode through the same `load_episodes` ingest uses. One store
+serves every scope, since scope is a column filter, not a connection (ADR-0007).
+The capture payload to `EpisodeSpec` mapping (transcript distillation plus the
 `AgentSession` body) is `relic.ingest.session_to_episode`, the peer of the
-GitHub/Linear/Granola mappers, so the composition root only wires it. Serve still carries
-no graph dependency — the daemon's surface, like the MCP server's, takes recall by
-injection.
+GitHub/Linear/Granola/Notion mappers, so the composition root only wires it.
+Serve still carries no store dependency: the daemon's surface, like the MCP
+server's, takes recall by injection.
 
 `pipeline/run.py` is the future full-run orchestrator (ingest, resolve, detect,
 compile). It raises `NotImplementedError` today, lands across Phases 4 to 8, and
-will live in `relic-cli` as a third composition root alongside `serve` and the daemon.
+will live in `relic-cli` as a composition root alongside `serve` and the daemon.
 
 ## Key design decisions
 
-**Deterministic-first ingestion.** GitHub and Linear are already structured, so
-the connectors and mappers build records with no LLM and no network beyond the
-source API ([`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py) is pure). The LLM
-enters only at the Graphiti extraction step, where episodes become typed graph
-entities. This keeps provenance clean and cost bounded.
+**Deterministic end to end.** GitHub, Linear, Granola, and Notion are already
+structured, so the connectors and mappers build records with no LLM and no
+network beyond the source API ([`mappers.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-ingest/src/relic/ingest/mappers.py) is pure). The store side is
+deterministic too: `derive` turns each typed body into its row columns with one
+pure function per artifact type, and recall is Postgres full-text search. There
+is no LLM at ingest or recall (ADR-0007). This keeps provenance clean and
+ingest cost at zero model spend.
 
 **The LLM goes in the compiler, not the detector.** When Phase 4 lands, procedure
-detection will be a deterministic graph query plus a support and confidence
+detection will be a deterministic query plus a support and confidence
 threshold. The LLM will only compile already-grounded evidence into a `SkillIR`.
 That is what makes the candidates trustworthy.
 
-**Three type layers, not one.** The rich ontology in `ontology/` is the source of
-truth for the typed domain. Graphiti needs flat scalar models, so `engram.py`
-holds a separate flat `*Node` layer. `SkillIR` is its own ported-verbatim
-contract. See [Data model](/data-model) for why.
+**Supersession is structural.** `memories` is unique on `(workspace_id, name)`
+and the write is an upsert, so a changed artifact replaces its row in place.
+There is no removal cascade and no way to fork.
 
-**Cheap model for the graph, frontier model for compilation.** Graphiti uses
-OpenAI `gpt-4o-mini` for extraction and reranking and `text-embedding-3-small`
-for search. The Phase 4 compiler will use Anthropic for the harder
-grounded-synthesis job.
+**User edits win.** The web workspace can edit a memory's title, search text,
+and markdown. An edited row keeps the human's text through every re-ingest.
 
-**Provenance is mandatory.** Every recalled fact carries its source episodes, and
-every source resolves to a PR or issue URL where possible
-([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)). Every skill carries citations. A
+**Provenance is mandatory.** Every recalled fact carries its source memory, and
+every source resolves to a PR, issue, page, or meeting URL where possible
+([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/recall.py)). Every skill carries citations. A
 fact or claim with no source is not the point of the system.
 
 ## The stack
@@ -242,16 +250,16 @@ fact or claim with no source is not the point of the system.
 | Concern | Choice |
 |---|---|
 | Language, runtime | Python 3.12, `uv` |
-| Memory engine | Graphiti `0.29.x` |
-| Graph DB | FalkorDB, self-hosted via Docker in dev |
-| Graph LLM, embeddings, rerank | OpenAI `gpt-4o-mini`, `text-embedding-3-small` |
+| Memory store | Postgres 16 (asyncpg), self-hosted via Docker in dev |
+| Recall | Postgres full-text search (`websearch_to_tsquery`, `ts_rank_cd`, `ts_headline`) |
+| Document mirror | Firestore (`firebase-admin`), optional |
 | Skill compiler (Phase 4) | Anthropic |
 | Registry | SQLite (Postgres later) |
 | Raw store | local files (R2 later) |
 | Serve | FastMCP 3.x over stdio, plus `.claude/skills/` files |
 | CLI | typer, rich |
 
-The graph DB was migrated from embedded Kuzu to FalkorDB. FalkorDB was chosen for
-multi-tenant `group_id` partitioning (per-repo graphs) and working full-text
-search. See [Memory and recall](/memory-and-recall) and
-[Roadmap](/roadmap).
+The memory store has moved twice: embedded Kuzu to FalkorDB (partitioning and
+full-text search), then FalkorDB to the Postgres engram store
+([ADR-0007](/adr/0007-engram-store-pivot)). See
+[Memory and recall](/memory-and-recall) and [Roadmap](/roadmap).

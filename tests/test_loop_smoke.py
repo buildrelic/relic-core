@@ -1,25 +1,27 @@
 """End-to-end closed-loop smoke: ingest -> daemon inject -> daemon capture -> readback.
 
-Proves the whole loop turns against a real FalkorDB with real OpenAI extraction:
+Proves the whole loop turns against a real Postgres:
 
 1. spool two contract-true fixture episodes (a PR and an issue) for a throwaway repo
-   and extract them with the real ``relic load`` CLI (the LLM half of ``relic ingest``,
+   and land them with the real ``relic load`` CLI (the store half of ``relic ingest``,
    minus the GitHub fetch -- there is no offline fetch path, and a live pull would make
    the smoke flake on network and rate limits)
 2. start ``relic daemon`` on a free port, scoped to the throwaway repo
 3. POST /v1/daemon/inject with a real query and a cwd whose git origin resolves to the
    fixture repo, and assert a cited recall comes back
 4. POST /v1/daemon/capture with a small session transcript, and assert the episode
-   lands: 202 + the ``captures`` status counter + an Episodic node in the graph
+   lands: 202 + the ``captures`` status counter + a memories row
 5. edit-reingest: respool the PR with an edited body and re-run ``relic load`` in a
-   fresh process, and assert the episode was superseded in place, not forked (REL-118;
-   regression for the loader opening the default graph instead of the group's own)
-6. tear down: kill the daemon and delete only the throwaway graph key
+   fresh process, and assert the row refreshed in place, not forked (the upsert on
+   (workspace_id, name) is the supersession mechanism now, ADR-0007)
+6. tear down: kill the daemon and delete only the throwaway workspace (the FK
+   cascade removes every row it owned)
 
-Everything runs in the throwaway per-repo graph ``loop-smoke__fixture-<run id>`` -- the
-FalkorDB instance may be shared, so teardown deletes that graph key only. Run it via
-``just loop-smoke``; it is marked ``e2e`` and skips itself without OPENAI_API_KEY or a
-reachable FalkorDB (``docker compose up -d falkordb``).
+Everything runs in the throwaway workspace ``loop-smoke-<run id>`` -- the Postgres
+may be shared, so teardown deletes that workspace only. Run it via ``just
+loop-smoke``; it is marked ``e2e`` and skips itself without a reachable Postgres
+(``docker compose up -d postgres``). No API keys needed: the load is a
+deterministic write now.
 """
 
 import json
@@ -38,34 +40,29 @@ import pytest
 
 from relic.config import get_settings
 
+_DSN = os.environ.get("DATABASE_URL", "postgresql://relic:relic@localhost:5432/relic")
 
-def _falkordb_reachable() -> bool:
-    settings = get_settings()
-    try:
-        with socket.create_connection((settings.falkordb_host, settings.falkordb_port), timeout=1):
-            return True
-    except OSError:
-        return False
+
+def _postgres_up() -> bool:
+    from relic.engram import postgres_reachable
+
+    return postgres_reachable(_DSN)
 
 
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
-        not os.environ.get("OPENAI_API_KEY"),
-        reason="needs OPENAI_API_KEY for live Graphiti extraction",
-    ),
-    pytest.mark.skipif(
-        not _falkordb_reachable(),
-        reason="needs a running FalkorDB (docker compose up -d falkordb)",
+        not _postgres_up(),
+        reason="needs a running Postgres (docker compose up -d postgres)",
     ),
 ]
 
 _RELIC = Path(sys.executable).parent / "relic"
 
-# The loop turns through live LLM extraction; each episode takes tens of seconds.
-_LOAD_TIMEOUT_S = 600
+# No LLM anywhere in the loop: these are generous bounds for process spawns only.
+_LOAD_TIMEOUT_S = 120
 _DAEMON_BOOT_TIMEOUT_S = 60
-_CAPTURE_TIMEOUT_S = 300
+_CAPTURE_TIMEOUT_S = 60
 
 
 def _fixture_episode_bodies(
@@ -141,27 +138,27 @@ def _fixture_episode_bodies(
     ]
 
 
-def _subprocess_env(settings) -> dict[str, str]:
+def _subprocess_env(workspace: str) -> dict[str, str]:
     """Env for the relic subprocesses: explicit settings, no .env in their cwd.
 
     The subprocesses run in a temp cwd (so ``data/`` spool/checkpoints/registry stay
     isolated), which means pydantic-settings finds no ``.env`` there -- everything they
-    need must arrive as env vars. Pin the provider to openai: OPENAI_API_KEY is the
-    smoke's gate, and the embedder/reranker are OpenAI under every provider anyway.
+    need must arrive as env vars. RELIC_WORKSPACE pins every write to this run's
+    throwaway workspace.
     """
     env = os.environ.copy()
     env.update(
         {
-            "OPENAI_API_KEY": settings.openai_api_key or "",
-            "GRAPHITI_LLM_PROVIDER": "openai",
-            "FALKORDB_HOST": settings.falkordb_host,
-            "FALKORDB_PORT": str(settings.falkordb_port),
+            "DATABASE_URL": _DSN,
+            "RELIC_WORKSPACE": workspace,
         }
     )
-    if settings.falkordb_password:
-        env["FALKORDB_PASSWORD"] = settings.falkordb_password
-    # The daemon must scope by --repo/cwd alone, not by a developer's TARGET_REPO.
-    env.pop("TARGET_REPO", None)
+    # The daemon must scope by --repo/cwd alone, not by a developer's TARGET_REPO,
+    # and documents must stay local-only (no Firestore mirror from a smoke run).
+    unwanted = ("TARGET_REPO", "FIREBASE_PROJECT_ID",
+                "FIREBASE_CLIENT_EMAIL", "FIREBASE_PRIVATE_KEY")
+    for var in unwanted:
+        env.pop(var, None)
     return env
 
 
@@ -207,7 +204,7 @@ def _tail(path: Path, lines: int = 30) -> str:
         return "<no output>"
 
 
-def _wait_for(condition, timeout_s: float, interval_s: float = 1.0) -> bool:
+def _wait_for(condition, timeout_s: float, interval_s: float = 0.5) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if condition():
@@ -245,55 +242,35 @@ def _relic_load(repo: str, cwd: Path, env: dict[str, str]) -> subprocess.Complet
     return result
 
 
-async def _drop_graph(settings, slug: str) -> None:
-    """Delete ONLY this run's throwaway graph key (the FalkorDB may be shared).
-
-    Best-effort: an early failure may mean the graph was never created, and a teardown
-    raise must not mask the assertion that got us here.
-    """
-    from contextlib import suppress
-
-    from falkordb.asyncio import FalkorDB
-
-    assert slug.startswith("loop-smoke__"), f"refusing to drop non-throwaway graph {slug}"
-    client = FalkorDB(
-        host=settings.falkordb_host,
-        port=settings.falkordb_port,
-        password=settings.falkordb_password,
-    )
-    try:
-        with suppress(Exception):
-            await client.select_graph(slug).delete()
-    finally:
-        await client.aclose()
-
-
 async def test_closed_loop_smoke(tmp_path: Path) -> None:
-    from relic.graph import open_memory
+    import asyncpg
+
     from relic.ingest import repo_group_id, spool_episodes
 
-    settings = get_settings()
+    get_settings()  # settings import sanity; the subprocesses carry their own env
     run_id = uuid.uuid4().hex[:8]
+    workspace = f"loop-smoke-{run_id}"
     repo = f"loop-smoke/fixture-{run_id}"
     slug = repo_group_id(repo)
-    env = _subprocess_env(settings)
+    env = _subprocess_env(workspace)
     daemon_log = tmp_path / "daemon.log"
     checkout = _git_checkout_for(repo, tmp_path / "checkout")
 
-    # -- 1. ingest: spool contract-true fixture episodes, extract with the real CLI --
+    # -- 1. ingest: spool contract-true fixture episodes, land them with the real CLI --
     specs = _specs_for(repo, slug)
     spool_episodes(specs, slug, base=tmp_path / "data" / "spool")
     _relic_load(repo, tmp_path, env)
 
     daemon: subprocess.Popen | None = None
-    engram = None
+    pool = await asyncpg.create_pool(_DSN, min_size=1, max_size=2)
     try:
-        engram = open_memory(database=slug, api_key=settings.openai_api_key)
-        episodic = await engram.execute_read(
-            "MATCH (e:Episodic {group_id: $g}) RETURN e.name AS name", g=slug
+        rows = await pool.fetch(
+            "SELECT name FROM memories WHERE workspace_id = $1 AND scope = $2",
+            workspace,
+            slug,
         )
-        assert {row["name"] for row in episodic} == {spec.name for spec in specs}, (
-            f"ingested episodes missing from graph {slug}: {episodic}"
+        assert {row["name"] for row in rows} == {spec.name for spec in specs}, (
+            f"ingested episodes missing from workspace {workspace}: {rows}"
         )
 
         # -- 2. daemon on a free port, scoped to the throwaway repo --
@@ -330,12 +307,13 @@ async def test_closed_loop_smoke(tmp_path: Path) -> None:
                 "num_results": 5,
                 "cwd": str(checkout),
             },
-            timeout=120,
+            timeout=30,
         )
         assert status == 200
         context = body.get("context", "")
         assert context and "No memory found" not in context, (
-            f"inject returned no recall from graph {slug}; daemon log:\n{_tail(daemon_log)}"
+            f"inject returned no recall from workspace {workspace}; daemon log:\n"
+            f"{_tail(daemon_log)}"
         )
         assert "source:" in context, f"recall came back uncited:\n{context}"
         assert f"https://github.com/{repo}" in context, (
@@ -344,7 +322,7 @@ async def test_closed_loop_smoke(tmp_path: Path) -> None:
         status, counters = _http_json("GET", f"{base}/v1/daemon/status")
         assert counters["injects"] == 1 and counters["inject_errors"] == 0, counters
 
-        # -- 4. capture: session transcript -> 202 -> counters -> graph readback --
+        # -- 4. capture: session transcript -> 202 -> counters -> row readback --
         session_id = f"loop-smoke-{run_id}"
         transcript = "\n".join(
             json.dumps(turn)
@@ -379,7 +357,7 @@ async def test_closed_loop_smoke(tmp_path: Path) -> None:
         )
         assert status == 202 and body == {"status": "accepted", "session_id": session_id}
 
-        # Write-back runs as a background task (LLM extraction); poll the loop counters.
+        # Write-back runs as a background task; poll the loop counters.
         def _captured() -> bool:
             _, counters = _http_json("GET", f"{base}/v1/daemon/status")
             if counters["capture_errors"]:
@@ -390,34 +368,35 @@ async def test_closed_loop_smoke(tmp_path: Path) -> None:
             f"capture never landed; daemon log:\n{_tail(daemon_log, 60)}"
         )
 
-        rows = await engram.execute_read(
-            "MATCH (e:Episodic {name: $name, group_id: $g}) RETURN e.content AS content",
-            name=f"AgentSession {session_id}",
-            g=slug,
+        rows = await pool.fetch(
+            "SELECT search_text, artifact_type FROM memories"
+            " WHERE workspace_id = $1 AND name = $2",
+            workspace,
+            f"AgentSession {session_id}",
         )
-        assert len(rows) == 1, f"captured episode missing from graph {slug}: {rows}"
-        assert "burst window" in (rows[0]["content"] or ""), (
+        assert len(rows) == 1, f"captured episode missing from workspace {workspace}: {rows}"
+        assert rows[0]["artifact_type"] == "agent_session"
+        assert "burst window" in (rows[0]["search_text"] or ""), (
             "captured episode lost the session transcript"
         )
 
-        # -- 5. edit-reingest: an edited body supersedes in place, never forks --
-        # A fresh `relic load` process supersedes before its first add, so this is the
-        # regression for the loader opening the default graph instead of the group's own
-        # (the removal would match nothing there and the re-add would fork a duplicate).
+        # -- 5. edit-reingest: an edited body refreshes in place, never forks --
+        # A fresh `relic load` process upserts on (workspace_id, name), so a changed
+        # body replaces its row; a second row for the same name would be a fork.
         edited_title = "swap the webhook rate limiter to a sliding window"
         edited_pr = _specs_for(repo, slug, pr_title=edited_title)[0]
         spool_episodes([edited_pr], slug, base=tmp_path / "data" / "spool")
         _relic_load(repo, tmp_path, env)
-        rows = await engram.execute_read(
-            "MATCH (e:Episodic {name: $name, group_id: $g}) RETURN e.content AS content",
-            name=edited_pr.name,
-            g=slug,
+        rows = await pool.fetch(
+            "SELECT title FROM memories WHERE workspace_id = $1 AND name = $2",
+            workspace,
+            edited_pr.name,
         )
         assert len(rows) == 1, (
-            f"edited episode forked instead of superseding: {len(rows)} copies of "
-            f"{edited_pr.name} in graph {slug}"
+            f"edited episode forked instead of refreshing: {len(rows)} copies of "
+            f"{edited_pr.name} in workspace {workspace}"
         )
-        assert edited_title in (rows[0]["content"] or ""), "superseded episode kept the stale body"
+        assert rows[0]["title"] == edited_title, "refreshed episode kept the stale body"
     finally:
         if daemon is not None:
             daemon.terminate()
@@ -425,6 +404,7 @@ async def test_closed_loop_smoke(tmp_path: Path) -> None:
                 daemon.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 daemon.kill()
-        if engram is not None:
-            await engram.close()
-        await _drop_graph(settings, slug)
+        # Delete ONLY this run's throwaway workspace (the Postgres may be shared);
+        # the FK cascade removes its memories, people, and join rows.
+        await pool.execute("DELETE FROM workspaces WHERE id = $1", workspace)
+        await pool.close()

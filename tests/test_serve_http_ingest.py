@@ -32,7 +32,7 @@ def _client(trigger, *, token=None):
 def test_post_ingest_passes_source_repo_token_to_trigger():
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["source"], seen["repo"], seen["token"] = source, repo, token
         return {"status": "running", "repo": repo}
 
@@ -45,7 +45,7 @@ def test_post_ingest_passes_source_repo_token_to_trigger():
 def test_post_ingest_without_token_is_none():
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["token"] = token
         return {"status": "running", "repo": repo}
 
@@ -57,7 +57,7 @@ def test_post_ingest_without_token_is_none():
 def test_post_ingest_blank_token_is_none():
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["token"] = token
         return {"status": "running", "repo": repo}
 
@@ -67,7 +67,7 @@ def test_post_ingest_blank_token_is_none():
 
 
 def test_post_ingest_already_running_is_409():
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         return {"status": "already_running", "repo": repo}
 
     resp = _client(trigger).post("/v1/ingest", json={"repo": "owner/name", "token": "x"})
@@ -75,7 +75,7 @@ def test_post_ingest_already_running_is_409():
 
 
 def test_post_ingest_token_still_behind_bearer_auth():
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         return {"status": "running", "repo": repo}
 
     client = _client(trigger, token="secret")
@@ -94,7 +94,7 @@ def test_post_ingest_github_missing_repo_is_400():
     """An explicit github source with no repo is a 400, never a run with an empty repo."""
     called = False
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         nonlocal called
         called = True
         return {"status": "running", "repo": repo}
@@ -107,7 +107,7 @@ def test_post_ingest_github_missing_repo_is_400():
 def test_post_ingest_unknown_source_is_400():
     called = False
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         nonlocal called
         called = True
         return {"status": "running"}
@@ -121,7 +121,7 @@ def test_post_ingest_granola_no_repo_routes_with_token():
     """Granola carries a token but no repo; the trigger is called with source=granola, repo=None."""
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["source"], seen["repo"], seen["token"] = source, repo, token
         return {"status": "running", "source": "granola"}
 
@@ -135,7 +135,7 @@ def test_post_ingest_granola_without_token_falls_back():
     """No grn_ key still triggers (the child falls back to the server's own GRANOLA_API_KEY)."""
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["source"], seen["token"] = source, token
         return {"status": "running", "source": "granola"}
 
@@ -145,7 +145,7 @@ def test_post_ingest_granola_without_token_falls_back():
 
 
 def test_post_ingest_granola_already_running_is_409():
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         return {"status": "already_running", "source": "granola"}
 
     resp = _client(trigger).post("/v1/ingest", json={"source": "granola", "token": "grn_x"})
@@ -165,7 +165,7 @@ def test_post_ingest_granola_rejects_malformed_token(bad):
     """A malformed grn_ key is a 400, never a silent run as the server identity."""
     called = False
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         nonlocal called
         called = True
         return {"status": "running", "source": "granola"}
@@ -189,7 +189,7 @@ def test_post_ingest_rejects_malformed_token(bad):
     """A malformed token is a 400, never a silent run as the server/host identity."""
     called = False
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         nonlocal called
         called = True
         return {"status": "running", "repo": repo}
@@ -203,7 +203,7 @@ def test_post_ingest_rejects_malformed_token(bad):
 def test_post_ingest_strips_and_accepts_padded_token():
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["token"] = token
         return {"status": "running", "repo": repo}
 
@@ -303,7 +303,7 @@ def test_post_ingest_notion_no_repo_routes_with_token():
     """Notion carries a token but no repo; the trigger is called with source=notion, repo=None."""
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["source"], seen["repo"], seen["token"] = source, repo, token
         return {"status": "running", "source": "notion"}
 
@@ -317,7 +317,7 @@ def test_post_ingest_notion_without_token_falls_back():
     """No token still triggers (the child falls back to the server's own NOTION_API_KEY)."""
     seen = {}
 
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         seen["source"], seen["token"] = source, token
         return {"status": "running", "source": "notion"}
 
@@ -327,7 +327,7 @@ def test_post_ingest_notion_without_token_falls_back():
 
 
 def test_post_ingest_notion_already_running_is_409():
-    async def trigger(source, repo, token):
+    async def trigger(source, repo, token, workspace=None):
         return {"status": "already_running", "source": "notion"}
 
     resp = _client(trigger).post("/v1/ingest", json={"source": "notion", "token": "ntn_x"})
@@ -387,3 +387,43 @@ def test_trigger_ingest_notion_no_token_inherits_env(monkeypatch):
     assert result == {"status": "running", "source": "notion"}
     assert captured["env"] is None
     assert "--source" in captured["args"] and "notion" in captured["args"]
+
+
+# --- the workspace field: the engram workspace a web-triggered run writes into ----
+
+
+def test_post_ingest_passes_workspace_to_trigger():
+    seen = {}
+
+    async def trigger(source, repo, token, workspace=None):
+        seen["workspace"] = workspace
+        return {"status": "running", "repo": repo}
+
+    resp = _client(trigger).post(
+        "/v1/ingest", json={"repo": "owner/name", "workspace": "org_abc123"}
+    )
+    assert resp.status_code == 202
+    assert seen["workspace"] == "org_abc123"
+
+
+def test_post_ingest_without_workspace_is_none():
+    seen = {}
+
+    async def trigger(source, repo, token, workspace=None):
+        seen["workspace"] = workspace
+        return {"status": "running", "repo": repo}
+
+    resp = _client(trigger).post("/v1/ingest", json={"repo": "owner/name"})
+    assert resp.status_code == 202
+    assert seen["workspace"] is None
+
+
+def test_post_ingest_malformed_workspace_is_400_and_never_reaches_trigger():
+    async def trigger(source, repo, token, workspace=None):
+        raise AssertionError("a malformed workspace must not reach the trigger")
+
+    client = _client(trigger)
+    for bad in ("has space", "#comment", "x" * 200):
+        resp = client.post("/v1/ingest", json={"repo": "owner/name", "workspace": bad})
+        assert resp.status_code == 400, bad
+        assert resp.json() == {"error": "invalid workspace"}

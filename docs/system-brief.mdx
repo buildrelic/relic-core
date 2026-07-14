@@ -6,54 +6,62 @@ description: "What Relic is, the core loop, the architecture, and the stack, in 
 
 ## What it is
 
-Relic is a memory layer for AI-native teams, built on
-[Graphiti](https://github.com/getzep/graphiti). It ingests a team's engineering
-history, structures it as a temporal knowledge graph, and serves two things to
-coding agents over MCP: grounded answers about past work, each citing its source,
-and compiled skills, the repeatable procedures an agent can follow. This repo,
-`relic-core`, is the prototype: about 5,400 lines of Python in a uv workspace of
-five owned packages, driven by a Typer CLI.
+Relic is a memory layer for AI-native teams. It ingests a team's engineering
+history into the **engram store** (relational rows in Postgres plus documents in
+Firestore) and serves two things to coding agents over MCP: grounded answers
+about past work, each citing its source, and compiled skills, the repeatable
+procedures an agent can follow. Humans see and correct the same memory through a
+Drive-style workspace in the web app. This repo, `relic-core`, is the prototype:
+about 8,500 lines of Python in a uv workspace of five owned packages, driven by
+a Typer CLI.
 
 ## Core loop
 
 ```
-GitHub / Linear ─► ingest ─► Graphiti extraction ─► FalkorDB graph ─► recall ─► facts + sources
-                                                                          │
-                                                                          ▼
-                                              (Phase 4) compile ─► SkillIR ─► SQLite registry
-                                                                          │
-                                                          register / verify / emit / serve
-                                                                          ▼
-                                              .claude/skills/  +  MCP tools  ─►  coding agent
+GitHub / Linear / Granola / Notion ─► ingest ─► derive ─► Postgres engram ─► recall ─► facts + sources
+                                                   │              ▲    │
+                                                   ▼   (edits)    │    ▼
+                                             Firestore docs ◄── web app │
+                                                                        ▼
+                                            (Phase 4) compile ─► SkillIR ─► SQLite registry
+                                                                        │
+                                                        register / verify / emit / serve
+                                                                        ▼
+                                            .claude/skills/  +  MCP tools  ─►  coding agent
 ```
 
 1. **Capture.** `ingest --repo owner/name` pulls merged PRs (title, description,
-   files, reviews, reviewers) and issues from GitHub, optionally Linear issues. It
-   writes the raw payloads to disk for citation and maps each record to a JSON
-   episode. `ingest --no-load` stops after capture and spools the episodes.
-   `relic load --repo owner/name` runs the LLM extraction half on demand.
-2. **Memory.** Episodes are added to Graphiti one at a time. An LLM extracts typed
-   entities and edges into a FalkorDB graph. Each repo is its own tenant, keyed by
-   `group_id`.
-3. **Recall.** `recall "..."` runs hybrid retrieval (semantic, keyword, rerank)
-   and returns ranked facts, each carrying its PR or issue url.
+   files, reviews, reviewers) and issues from GitHub, optionally Linear issues;
+   `ingest --source granola|notion` pulls meetings and pages. It writes the raw
+   payloads to disk for citation and maps each record to a typed JSON episode.
+   `ingest --no-load` stops after capture and spools the episodes;
+   `relic load` runs the store write on demand.
+2. **Memory.** Each episode lands as one row in Postgres: `derive` turns the
+   typed body into title, url, search text, rendered markdown, people (with
+   roles), and file paths, deterministically, with no LLM. The upsert on
+   `(workspace_id, name)` makes a changed artifact replace its row in place.
+   Firestore mirrors each document for the web workspace, best-effort.
+3. **Recall.** `recall "..."` runs Postgres full-text search (websearch
+   semantics with an any-term fallback) and returns ranked facts, each carrying
+   its source URL.
 4. **Skills.** Procedures become `SkillIR` records in a separate SQLite registry,
    promoted through a lifecycle, then emitted to a repo's `.claude/skills/` or
    served as MCP tools.
 
 ## Architecture
 
-**Two halves, one contract.** The graph side holds memory. The registry side
+**Two halves, one contract.** The engram side holds memory. The registry side
 holds skills. The seam is one Pydantic type, `SkillIR`. It is the compiler's
 output, the registry record, the SKILL.md render input, and the MCP tool schema.
 One type in four roles, so the served tool and the rendered document cannot drift.
 
-**Two stores.**
+**The stores.**
 
-| Store | Backend | Holds | Why separate |
+| Store | Backend | Holds | Why |
 |---|---|---|---|
-| Memory graph | FalkorDB (Redis protocol, Docker) | Entities, edges, episodes, partitioned per repo by `group_id` | Multi-tenant partitioning and full-text search |
-| Skill registry | SQLite (`./data/registry.db`) | `SkillIR` JSON documents plus denormalized columns | Skills are a typed catalog, not graph data |
+| Engram (memory) | Postgres 16 (Docker, `DATABASE_URL`) | `workspaces`, `people`, `memories`, `memory_people`, `memory_paths`; one row per artifact, scoped by workspace and source | Authoritative, queryable and editable by the web app, full-text search built in |
+| Document mirror | Firestore (optional, `FIREBASE_*`) | One document per memory with rendered markdown, at `engram/{workspaceId}/documents/{documentId}` | What the web workspace renders and lets a human edit; best-effort, never fails ingest |
+| Skill registry | SQLite (`./data/registry.db`) | `SkillIR` JSON documents plus denormalized columns | Skills are a typed catalog, not memory |
 
 **Subsystems.** A uv workspace of five packages under `packages/`. The three
 owned subsystems interact only through `relic.contracts`; `relic-core` holds the
@@ -61,57 +69,63 @@ shared contracts and `relic-cli` wires them. Import paths stay `relic.*`.
 
 | Module | Package (owner) | Role | Status |
 |---|---|---|---|
-| `ingest/` | relic-ingest (Paris) | GitHub (githubkit) and Linear (gql) connectors, raw-payload store, record-to-episode mappers | Wired |
-| `graph/` | relic-graph (Abhinav) | Graphiti + FalkorDB + OpenAI factory, episode loader, recall, reviewer query | Wired |
-| `compile/` | relic-graph (Abhinav) | Procedure detector and LLM compiler that turns graph evidence into a `SkillIR` | Stub (Phase 4) |
-| `serve/` | relic-serve (Zidan) | FastMCP stdio server, emit to `.claude/skills/`, catalog index, Jinja SKILL.md renderer | Wired |
+| `ingest/` | relic-ingest (Paris) | GitHub (githubkit), Linear (gql), Granola, and Notion connectors, raw-payload store, record-to-episode mappers, session capture | Wired |
+| `engram/` | relic-engram (Abhinav) | The Postgres store, derive, the loader, recall, the reviewer query, the Firestore mirror | Wired |
+| `compile/` | relic-engram (Abhinav) | Procedure detector and LLM compiler that turns evidence into a `SkillIR` | Stub (Phase 4) |
+| `serve/` | relic-serve (Zidan) | FastMCP stdio server, the daemon surface, the web HTTP surface, emit to `.claude/skills/`, catalog, Jinja SKILL.md renderer | Wired |
 | `registry/` | relic-serve (Zidan) | SQLite skill store and lifecycle (draft, verified, deprecated) | Wired |
-| `contracts/`, `ontology/` | relic-core (shared) | The interface seams (`EpisodeSpec`, `RecallFn`, `SkillIR`) and the rich typed domain models | Wired |
-| `resolve/` | relic-graph (Abhinav) | Cross-source person unification | Stub (Phase 3) |
+| `contracts/`, `ontology/` | relic-core (shared) | The interface seams (`EpisodeSpec`, episode bodies, `RecallFn`, `SkillIR`) and the rich typed domain models | Wired |
+| `resolve/` | relic-engram (Abhinav) | Cross-source person unification | Stub (Phase 3) |
 
 **MCP server.** `relic serve` exposes one stdio endpoint: each verified skill as a
 tool and a `skill://<id>` resource, a `search_skills` tool, and a `recall_memory`
-tool. Recall is injected, not imported, so `serve` has no graph dependency. If
-FalkorDB is unreachable, `serve` logs to stderr and still serves skills. stdout
+tool. Recall is injected, not imported, so `serve` has no store dependency. If
+Postgres is unreachable, `serve` logs to stderr and still serves skills. stdout
 carries the MCP transport.
+
+**The daemon.** `relic daemon` closes the loop: Claude Code hooks call it to
+inject recalled context onto every prompt and to capture each finished session
+back into the engram. `relic install-hooks` wires the hooks.
 
 ## Runtime and setup
 
-- `uv` runs Python on the host. Docker runs only FalkorDB. `just setup` takes a
+- `uv` runs Python on the host. Docker runs only Postgres. `just setup` takes a
   fresh clone to a verifiable state: installs Python 3.12, syncs deps, creates
-  `.env`, starts FalkorDB and waits for healthy, installs the pre-commit hook,
-  runs `relic doctor`.
-- Every command is a one-shot CLI except `serve`, which is long-running. The
-  `pipeline/run.py` orchestrator (ingest, resolve, detect, compile) is a stub that
-  raises `NotImplementedError`.
+  `.env`, starts Postgres and waits for healthy, installs the pre-commit hook,
+  runs `relic doctor`. The schema is applied automatically on first use.
+- Every command is a one-shot CLI except `serve`, `daemon`, and `serve-http`,
+  which are long-running. The `pipeline/run.py` orchestrator (ingest, resolve,
+  detect, compile) is a stub that raises `NotImplementedError`.
 - Config is a `pydantic-settings` model over `.env`. All API keys are optional, so
   `relic --help` and imports never need a populated env. A validator drops blank,
   whitespace-bearing, or `#`-commented secrets.
-- 16 CLI commands: 14 wired (`ingest`, `load`, `recall`, `query`, `eval`,
+- 19 CLI commands: 17 wired (`ingest`, `load`, `recall`, `query`, `eval`,
   `register`, `list`, `show`, `verify`, `deprecate`, `emit`, `catalog`, `serve`,
-  `doctor`) and 2 stubs (`resolve`, `compile`).
+  `doctor`, `daemon`, `install-hooks`, `serve-http`) and 2 stubs (`resolve`,
+  `compile`).
 
 ## Stack
 
-- Memory engine: Graphiti (`graphiti-core[falkordb]` 0.29.x).
-- Graph DB: FalkorDB, self-hosted via Docker. Chosen over embedded Kuzu for
-  `group_id` multi-tenancy and full-text search.
-- Models: OpenAI `gpt-4o-mini` for extraction and reranking,
-  `text-embedding-3-small` for embeddings. A `GRAPHITI_LLM_PROVIDER=gemini` hybrid
-  swaps Gemini Flash in for extraction (higher TPM) while keeping OpenAI for
-  embeddings and reranking.
-- Server: FastMCP (stdio). CLI: Typer and Rich. Schema: Pydantic v2. Rendering:
-  Jinja2.
-- Tooling: ruff (lint and format), pyright (basic), pytest. CI runs all three
-  against a FalkorDB service container.
+- Memory store: Postgres 16 over asyncpg. The schema is owned by relic-core and
+  applied by an idempotent `ensure_schema()`.
+- Recall: Postgres full-text search (`websearch_to_tsquery`, `ts_rank_cd`,
+  `ts_headline`). No LLM, no embeddings; a pgvector `memory_embeddings` table is
+  reserved in the DDL as the fast-follow.
+- Document mirror: Firestore over `firebase-admin`, optional.
+- Server: FastMCP (stdio), Starlette + uvicorn (daemon and HTTP surfaces).
+  CLI: Typer and Rich. Schema: Pydantic v2. Rendering: Jinja2.
+- Tooling: ruff (lint and format), pyright (basic), pytest, import-linter. CI
+  runs them against a Postgres service container.
 
 ## Status
 
-Built: capture, memory, recall, the SQLite registry and skill lifecycle,
-emit/catalog reconciliation, the MCP server, the recall scorecard, and doctor. The
-test suite is 29 files. 28 run offline against throwaway SQLite and in-memory
-fakes. Live integration tests are skip-gated on `OPENAI_API_KEY` or `RELIC_LIVE_TESTS=1`
-and a reachable FalkorDB.
+Built: capture (GitHub, Linear, Granola, Notion, agent sessions), the engram
+store, recall, the closed-loop daemon and hooks, the SQLite registry and skill
+lifecycle, emit/catalog reconciliation, the MCP server, the web HTTP surface,
+the recall scorecard, and doctor. The test suite is 342 tests across 44 files. The
+store integration tests self-skip without a reachable Postgres and always run in
+CI; the end-to-end loop smoke (`just loop-smoke`) runs against a real Postgres
+in about two seconds and needs no API keys.
 
 Pending: `resolve` (Phase 3, person identity across GitHub and Linear) and
 `compile` (Phase 4, procedure detection and grounded `SkillIR` generation). Until
@@ -119,21 +133,26 @@ Pending: `resolve` (Phase 3, person identity across GitHub and Linear) and
 
 ## Design decisions and risks
 
-- **Provenance is in the schema.** Every entity carries a canonical url and an
-  audit record. `SkillIR` carries typed citations. Recall cites the PR or issue
-  url, never the repo url.
-- **Graphiti compatibility shim.** `engram.py` monkeypatches a `graphiti-core`
-  ≤0.29.1 FalkorDB bug where empty full-text queries and hyphenated `group_id`s
-  produce invalid RediSearch syntax that aborts ingestion. Revisit on upgrade.
-- **Flat and rich models are duplicated.** Graphiti needs flat scalar models with
-  no reserved attribute names, so the graph-facing models in `engram.py` mirror
-  the rich `ontology/` models. Keep them in sync by hand.
-- **Cost controls.** `--months` windows the fetch (default 12), `--limit` caps PRs and
-  GitHub issues (most recent first), bot reviews are dropped and human reviews capped per
-  PR, and episode bodies are clipped to 2000 chars. Neither bound applies to Linear, which
-  always pulls all issues.
-- **Served recall is not repo-scoped.** CLI `recall` scopes to a repo's
-  `group_id`. The MCP `recall_memory` tool queries the default graph with no
-  `group_id`. Align this before multi-repo serving.
-- **Infra is transitional.** Comments point to a managed FalkorDB, the raw store
-  moving to R2, and the SQLite registry moving to Neon after dogfooding.
+- **No LLM at ingest or recall.** The pivot to the engram store (ADR-0007)
+  removed the extraction step that dominated ingest wall clock at roughly 99.5
+  percent. Ingest cost is now zero model spend and a backfill is bounded by
+  GitHub fetch time alone.
+- **The price is recall quality.** Full-text search does not do semantic
+  matching or multi-hop traversal. The scorecard (`relic eval`) is the ruler for
+  that trade; pgvector embeddings are the reserved next step if FTS falls short.
+- **Provenance is in the schema.** Every memory row carries a canonical url.
+  `SkillIR` carries typed citations. Recall cites the PR or issue url, never the
+  repo url.
+- **User edits win.** A workspace edit sets `user_edited`; re-ingest refreshes
+  the structured body but never the human's title or search text, and skips the
+  Firestore mirror for that row.
+- **The schema is a cross-repo contract.** The landing web app reads and edits
+  the same Postgres tables and Firestore documents. A change to the DDL or the
+  document shape is a contract change with that repo.
+- **Cost controls.** `--months` windows the fetch (default 12), `--limit` caps
+  items pulled (most recent first), bot reviews are dropped and human reviews
+  capped per PR, and episode bodies are clipped. Neither bound applies to
+  Linear, which always pulls all issues.
+- **Infra is transitional.** Comments point to a hosted Postgres (e.g. Neon),
+  the raw store moving to R2, and the SQLite registry moving to Postgres after
+  dogfooding.

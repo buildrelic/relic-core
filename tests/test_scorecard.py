@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from relic.graph.recall import RecallAnswer, RecalledFact, Source
+from relic.engram.recall import RecallAnswer, RecalledFact, Source
 from relic.scorecard import (
     EvalCase,
     issue_url,

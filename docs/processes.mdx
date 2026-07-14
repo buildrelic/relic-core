@@ -8,32 +8,35 @@ Relic is a set of processes over shared stores, not one running service. This do
 catalogs every process: what triggers it, what it reads and writes, what it
 depends on, and how long it lives.
 
-Most processes are one-shot CLI commands. One process is a long-running server.
-Two are external services the platform talks to. A few are stubs that land in
-later phases.
+Most processes are one-shot CLI commands. Three are long-running servers
+(`serve`, `daemon`, `serve-http`). One is a persistent service the platform runs
+(Postgres). A few are stubs that land in later phases.
 
 Every command is a subcommand of the `relic` CLI in the `relic-cli` package, the
 composition root: it imports each subsystem's public API (`relic.ingest`,
-`relic.graph`, `relic.serve`) and wires them together. The subsystems never call
+`relic.engram`, `relic.serve`) and wires them together. The subsystems never call
 each other directly. See [Architecture](/architecture).
 
 ## At a glance
 
 | Process | Kind | Lifetime | Reads | Writes | Hard deps |
 |---|---|---|---|---|---|
-| FalkorDB | service | persistent | graph | graph | Docker |
-| `relic serve` | server | per connection | registry, graph | nothing | registry; graph optional |
-| `relic ingest` | CLI | one-shot | GitHub, Linear | graph, raw store, spool | GitHub token, OpenAI, FalkorDB |
-| `relic load` | CLI | one-shot | spool, graph | graph, checkpoint | OpenAI, FalkorDB |
-| `relic recall` | CLI | one-shot | graph | nothing | OpenAI, FalkorDB |
-| `relic query` | CLI | one-shot | graph | nothing | OpenAI, FalkorDB |
-| `relic eval` | CLI | one-shot | graph, gold set | nothing | OpenAI, FalkorDB |
+| Postgres | service | persistent | engram store | engram store | Docker |
+| `relic serve` | server | per connection | registry, engram | nothing | registry; engram optional |
+| `relic daemon` | server | until stopped | engram, session payloads | engram | none (degrades without Postgres) |
+| `relic serve-http` | server | until stopped | ingest checkpoints, run ledger | spawns `relic ingest` | none for status routes |
+| `relic ingest` | CLI | one-shot | GitHub, Linear, Granola, Notion | engram, raw store, spool, checkpoint | source credential, Postgres |
+| `relic load` | CLI | one-shot | spool | engram, checkpoint | Postgres |
+| `relic recall` | CLI | one-shot | engram | nothing | Postgres |
+| `relic query` | CLI | one-shot | engram | nothing | Postgres |
+| `relic eval` | CLI | one-shot | engram, gold set | nothing | Postgres |
 | `relic register` | CLI | one-shot | a JSON file | registry | none |
 | `relic list` / `show` | CLI | one-shot | registry | nothing | none |
 | `relic verify` / `deprecate` | CLI | one-shot | registry | registry | none |
 | `relic emit` | CLI | one-shot | registry | target `.claude/skills/` | none |
 | `relic catalog` | CLI | one-shot | registry | stdout | none |
 | `relic doctor` | CLI | one-shot | registry, settings | nothing | none |
+| `relic install-hooks` | CLI | one-shot | Claude Code settings.json | Claude Code settings.json | none |
 | `relic resolve` | CLI | stub | none | none | Phase 3 |
 | `relic compile` | CLI | stub | none | none | Phase 4 |
 | `pipeline/run.py` | script | stub | none | none | Phases 4 to 8 |
@@ -44,94 +47,131 @@ is fast and key-free ([`cli.py`](https://github.com/buildrelic/relic-core/blob/m
 
 ## Service processes
 
-### FalkorDB
+### Postgres
 
-The graph database. Relic runs it locally as a Docker container
-([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml)).
+The engram store. Relic runs it locally as a Docker container
+([`docker-compose.yml`](https://github.com/buildrelic/relic-core/blob/main/docker-compose.yml),
+`postgres:16-alpine`).
 
-- **Start.** `just up` runs `docker compose up -d --wait falkordb`, blocking
+- **Start.** `just up` runs `docker compose up -d --wait postgres`, blocking
   until the healthcheck passes. `just down` stops it, `just logs` tails it.
-- **Ports.** `6379` for the graph protocol (`FALKORDB_PORT`), `3000` for the
-  FalkorDB Browser UI at `http://localhost:3000`.
-- **Persistence.** A Docker named volume, `falkordb-data`, mounted at `/data`.
-- **Restart policy.** `unless-stopped`.
-- **Required by.** `ingest`, `recall`, `query`, `eval`, and `serve` when recall
-  is enabled. Start it before any of them.
+- **Port.** `5432`, addressed by `DATABASE_URL` (the default matches compose).
+- **Schema.** Owned by relic-core, applied by the idempotent `ensure_schema()`
+  on every store open. No migrations to run by hand.
+- **Persistence.** A Docker named volume, `postgres-data`. `just reset-db` wipes
+  it (every workspace's memories, not one).
+- **Required by.** `ingest`, `load`, `recall`, `query`, `eval`, and `serve` when
+  recall is enabled. Start it before any of them. The daemon boots without it
+  and degrades per-request.
 
-In production this becomes a managed or hosted FalkorDB instance. See
+In production this becomes a hosted Postgres instance (e.g. Neon). See
 [Roadmap](/roadmap).
 
 ### relic serve
 
-The MCP server. The one long-running process Relic itself runs. It exposes a
-team's verified skills and its memory to any MCP client over stdio.
+The MCP server. It exposes a team's verified skills and its memory to any MCP
+client over stdio.
 
 - **Invocation.** `relic serve`. Stays up for the life of the client connection
   (`server.run_stdio_async()`).
 - **Exposes.** Each verified skill as a tool (call it for the steps) and as a
-  resource at `skill://<id>`; a `search_skills` tool; and, when the graph is
+  resource at `skill://<id>`; a `search_skills` tool; and, when the store is
   reachable, a `recall_memory` tool.
-- **Reads.** The SQLite registry for skills. The graph for `recall_memory`.
+- **Reads.** The SQLite registry for skills. The engram store for `recall_memory`.
 - **Writes.** Nothing.
-- **Recall is optional.** The server builds an engram client for recall. If that
-  fails (no OpenAI key, FalkorDB down), it logs to stderr and serves skills
-  anyway. Diagnostics go to stderr because stdout is the MCP transport and any
-  stray bytes corrupt the stream ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py),
+- **Recall is optional.** The server opens the engram store for recall. If that
+  fails (Postgres down), it logs to stderr and serves skills anyway. Diagnostics
+  go to stderr because stdout is the MCP transport and any stray bytes corrupt
+  the stream ([`cli.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/cli.py),
   `_serve`).
 - **Client config.** Point any MCP client at it over stdio. For Claude Code, add
   it to `.mcp.json`. See [Skills](/skills).
+
+### relic daemon
+
+The closed-loop server. A loopback HTTP surface the Claude Code hooks call on
+every turn: inject recalled context onto the prompt, capture the finished
+session back into the engram.
+
+- **Invocation.** `relic daemon [--repo owner/name] [--host] [--port] [--token]`.
+  Listens on `127.0.0.1:8788`.
+- **Routes.** `GET /v1/daemon/status` and `activity`; `POST /v1/daemon/inject`,
+  `recall`, and `capture`. See [CLI reference](/cli-reference#relic-daemon).
+- **Reads and writes.** The engram store, scoped per session: each call resolves
+  the repo from the session's working directory (its git origin), falling back
+  to `--repo` or `TARGET_REPO`.
+- **Degrades, never breaks a turn.** The store is built lazily, so the daemon
+  boots with Postgres down and errors per-request instead.
+- **Install.** `relic install-hooks` merges the two Claude Code hooks
+  (`UserPromptSubmit` to inject, `SessionEnd` to capture) into settings.json.
+
+### relic serve-http
+
+The web app's control plane: connector status, ingest run history, and the
+ingest trigger, on `127.0.0.1:8787`.
+
+- **Invocation.** `relic serve-http [--host] [--port] [--token]`.
+- **Reads.** The ingest checkpoints and the run ledger
+  (`data/ingest/runs.jsonl`) on disk. The status routes need no store.
+- **Writes.** Nothing directly; `POST /v1/ingest` spawns a `relic ingest`
+  subprocess (which needs Postgres and the source keys), forwarding an optional
+  per-user token and `workspace`. See [Web app HTTP contract](/web-contract).
 
 ## Capture and memory processes
 
 ### relic ingest
 
-The capture pipeline. Pulls engineering history into the graph.
+The capture pipeline. Pulls a source's history into the engram store.
 
-- **Invocation.** `relic ingest --repo owner/name [--limit N] [--months M] [--bulk] [--fresh] [--no-progress] [--no-load]`.
+- **Invocation.** `relic ingest --repo owner/name [--source github|granola|notion] [--limit N] [--months M] [--fresh] [--no-progress] [--no-load]`.
 - **Reads.** GitHub GraphQL (merged PRs with files and reviews, batched per page) and
   GitHub REST (non-PR issues); both windowed to the last `--months`. Linear GraphQL when
-  `LINEAR_API_KEY` is set; the per-repo checkpoint ledger.
-- **Writes.** The FalkorDB graph (one episode per PR and per issue, landed under
-  the repo's `group_id`); the raw store at `./data/raw/<source>/<id>.json`; the
-  episode spool at `./data/spool/<group_id>/`; the checkpoint at
-  `./data/ingest/<group_id>.log`.
-- **Depends on.** A GitHub token (from `GITHUB_TOKEN` or `gh auth token`),
-  `OPENAI_API_KEY` (Graphiti extraction and embeddings), and FalkorDB.
-- **Two halves.** A fast, deterministic capture (fetch, map, raw store, spool) with
-  no LLM, then the LLM-heavy extraction into the graph. `--no-load` runs only the
-  first half and stops, leaving the episodes spooled for a later `relic load`.
-- **Flow.** Probe the graph, fetch the window (PRs in one batched GraphQL query per page),
-  dump raw, map to deterministic episodes, then add episodes to Graphiti: sequentially by
-  default so later episodes resolve entities from earlier ones, or batched via `--bulk`.
-- **Resumable.** The checkpoint records each episode that lands, so a re-run skips
-  what already loaded and a failed run resumes where it stopped. `--fresh` clears
-  it and reloads everything.
+  `LINEAR_API_KEY` is set. `--source granola` and `--source notion` pull meetings
+  and pages instead. Plus the per-scope checkpoint ledger.
+- **Writes.** The engram store (one memory row per artifact, landed under the
+  workspace and the scope slug); the raw store at `./data/raw/<source>/<id>.json`;
+  the episode spool at `./data/spool/<scope>/`; the checkpoint at
+  `./data/ingest/<scope>.log`. The Firestore document mirror when configured,
+  best-effort.
+- **Depends on.** The source credential (a GitHub token from `GITHUB_TOKEN` or
+  `gh auth token`, else the granola or notion key) and Postgres. No model API key.
+- **Two halves.** A deterministic capture (fetch, map, raw store, spool), then
+  the engram write. `--no-load` runs only the first half and stops, leaving the
+  episodes spooled for a later `relic load`.
+- **Flow.** Probe Postgres, fetch the window (PRs in one batched GraphQL query
+  per page), dump raw, map to typed episodes, then land each episode: derive the
+  row fields and upsert on `(workspace_id, name)`. Sequential, milliseconds per
+  episode; there is no bulk path because there is no extraction I/O to overlap.
+- **Resumable.** The checkpoint records each landed episode with its content
+  token, so a re-run skips unchanged episodes and refreshes changed ones in
+  place. `--fresh` clears it and re-presents everything (the upsert makes that
+  safe).
 - **Observable.** Logs the fetch counts and timing, per-episode failures, and a
-  final loaded/skipped/failed summary, all to stderr. `relic --verbose ingest`
-  adds debug detail.
-- **`--limit`.** Caps PRs and issues pulled, most recent first, to bound API and
-  per-episode LLM cost on a large repo.
+  final loaded/refreshed/skipped/failed summary, all to stderr.
+  `relic --verbose ingest` adds debug detail.
+- **`--limit`.** Caps items pulled, most recent first, to bound API cost on a
+  large repo.
 
 Full detail in [Ingestion](/ingestion).
 
 ### relic load
 
-The LLM-heavy half of ingest, run on demand. Extracts spooled episodes into the
-graph.
+The engram write, run on demand: the second half of ingest.
 
-- **Invocation.** `relic load --repo owner/name [--limit N] [--bulk] [--fresh] [--no-progress]`.
-- **Reads.** The episode spool at `./data/spool/<group_id>/`, written by a prior
-  `relic ingest` (or `relic ingest --no-load`); the per-repo checkpoint ledger; the
-  graph.
-- **Writes.** The FalkorDB graph (one episode per PR and per issue); the checkpoint
-  at `./data/ingest/<group_id>.log`.
-- **Depends on.** `OPENAI_API_KEY` (Graphiti extraction and embeddings) and
-  FalkorDB. No GitHub token: it reads the spool, not the network.
-- **Resumable.** Shares the checkpoint with `ingest`, so it skips episodes already
-  loaded and a re-run only extracts what is new. An empty spool is a no-op.
-- **`--limit`.** Extracts at most N not-yet-loaded episodes for case-by-case
-  loading. Re-run to drain the rest. `--fresh` ignores the checkpoint and reloads
-  every spooled episode.
+- **Invocation.** `relic load --repo owner/name [--source github|granola|notion] [--limit N] [--fresh] [--no-progress]`.
+- **Reads.** The episode spool at `./data/spool/<scope>/`, written by a prior
+  `relic ingest` (or `relic ingest --no-load`); the per-scope checkpoint ledger.
+- **Writes.** The engram store (one memory row per artifact, upserted in place);
+  the checkpoint at `./data/ingest/<scope>.log`; the Firestore mirror when
+  configured.
+- **Depends on.** Postgres. No source credential: it reads the spool, not the
+  network.
+- **Resumable.** Shares the checkpoint with `ingest`, so it skips unchanged
+  episodes and a re-run only lands what is new or changed. An empty spool is a
+  no-op.
+- **`--limit`.** Lands at most N not-yet-loaded episodes for case-by-case
+  loading. Re-run to drain the rest. `--fresh` ignores the checkpoint and
+  re-presents every spooled episode.
 
 Full detail in [Ingestion](/ingestion).
 
@@ -140,22 +180,25 @@ Full detail in [Ingestion](/ingestion).
 General memory recall. Returns facts with their sources.
 
 - **Invocation.** `relic recall "question" [--repo owner/name] [--num-results N]`.
-- **Reads.** The graph, scoped to a repo's `group_id` (defaults to `TARGET_REPO`).
+- **Reads.** The engram store, narrowed to a repo's scope (defaults to
+  `TARGET_REPO`; workspace-wide without one).
 - **Writes.** Nothing. Prints a cited, human-readable block.
-- **Depends on.** `OPENAI_API_KEY` (search and rerank) and FalkorDB.
+- **Depends on.** Postgres. The search is full-text (`websearch_to_tsquery` with
+  an any-term fallback); no model API call.
 - **Never raises.** If search fails, it returns an empty answer rather than an
-  error ([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/graph/recall.py)).
+  error ([`recall.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/engram/recall.py)).
 
 ### relic query
 
 A narrower, people-focused query. Finds people connected to work matching the
-text, with a deterministic Cypher fallback if hybrid search comes back empty.
+text: one SQL query over the `memory_people` roles, the `memory_paths` table,
+and full-text search.
 
 - **Invocation.** `relic query "text" [--repo owner/name]`.
-- **Reads.** The graph, scoped to a repo's `group_id`.
+- **Reads.** The engram store, narrowed to a repo's scope.
 - **Writes.** Nothing. Prints each person, their relation, the fact, profile URL,
-  and source episodes, de-duplicated by name.
-- **Depends on.** `OPENAI_API_KEY` and FalkorDB.
+  and source memories, de-duplicated by name.
+- **Depends on.** Postgres.
 
 ### relic eval
 
@@ -165,18 +208,19 @@ holds each answer.
 - **Invocation.** `relic eval [--path eval/github_recall.json] [--num-results N]
   [--json out.json]`.
 - **Reads.** A gold set JSON (questions plus the PR or issue numbers that answer
-  them); the graph.
+  them); the engram store.
 - **Writes.** Nothing by default. Prints three metrics (hit rate, MRR, coverage)
   plus a per-case pass or miss line; with `--json`, also writes the run as
   machine-readable JSON for tracking metrics across runs.
-- **Depends on.** `OPENAI_API_KEY` and FalkorDB.
+- **Depends on.** Postgres.
 - **No LLM judge.** Scoring is a deterministic URL match, so the ruler itself
   costs nothing beyond the recall calls it measures
-  ([`scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/scorecard.py)).
+  ([`scorecard.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/scorecard.py)).
 
 ## Skill and registry processes
 
-These read and write the SQLite registry. None touches the graph or the network.
+These read and write the SQLite registry. None touches the engram store or the
+network.
 
 ### relic register
 
@@ -228,38 +272,44 @@ Print the browsable markdown index of verified skills to stdout (the same index
 ### relic doctor
 
 A read-only health check. Reports where the registry lives and how many skills it
-holds by status, whether FalkorDB is reachable, and which API keys are
-configured. It creates nothing and never raises: a broken setup still produces a
-readable report ([`doctor.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/doctor.py)).
+holds by status, whether the engram store is reachable and its Firestore mirror
+configured, and which API keys are configured. It creates nothing and never
+raises: a broken setup still produces a readable report
+([`doctor.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-cli/src/relic/doctor.py)).
 
 - **Invocation.** `relic doctor`.
 - **Reads.** The registry (only if the file exists), settings, and a TCP probe of
-  the FalkorDB host and port.
+  the Postgres host and port (the DSN is printed with the password redacted).
 - **Writes.** Nothing.
 
 ## External processes the platform calls
 
 These run outside Relic, invoked per command as HTTP calls.
 
-- **OpenAI.** Graphiti's LLM (`gpt-4o-mini` for extraction and reranking) and
-  embeddings (`text-embedding-3-small`). Used by `ingest`, `recall`, `query`,
-  `eval`, and `serve` (recall).
 - **GitHub.** Source for `ingest`, via `githubkit`: merged and closed PRs come from the GraphQL API in one batched query per page, non-PR issues from the REST list endpoint.
 - **Linear GraphQL.** Optional source for `ingest`, via `gql`, guarded behind
   `LINEAR_API_KEY`.
-- **Anthropic.** The Phase 4 skill compiler. Not called yet.
+- **Granola.** Optional source (`ingest --source granola`), guarded behind
+  `GRANOLA_API_KEY`.
+- **Notion.** Optional source (`ingest --source notion`), guarded behind
+  `NOTION_API_KEY`.
+- **Firestore.** The optional document mirror, via `firebase-admin`, guarded
+  behind the `FIREBASE_*` service account. Best-effort: an outage never fails an
+  ingest.
+- **Anthropic.** The Phase 4 skill compiler. Not called yet. No model API is
+  called at ingest or recall.
 
 ## Pending processes
 
 These are stubs today. See [Roadmap](/roadmap).
 
 - **`relic resolve` (Phase 3).** Unify a person across GitHub and Linear into one
-  `Person` node. Prints "not implemented yet" and exits 1.
+  `Person` row. Prints "not implemented yet" and exits 1.
 - **`relic compile` (Phase 4).** Detect a recurring procedure and compile it into
   a grounded `SkillIR`. Invoked as `relic compile --skill <archetype>`. Prints
   "not implemented yet" and exits 1. The detector
-  ([`detect.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/detect.py)) and compiler
-  ([`compiler.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-graph/src/relic/compile/compiler.py)) are docstring-only stubs;
+  ([`detect.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/compile/detect.py)) and compiler
+  ([`compiler.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-engram/src/relic/compile/compiler.py)) are docstring-only stubs;
   the renderer ([`render.py`](https://github.com/buildrelic/relic-core/blob/main/packages/relic-serve/src/relic/serve/render.py)) is already wired.
 - **`pipeline/run.py` (Phases 4 to 8).** The full-run orchestrator (ingest,
   resolve, detect, compile), the eventual Cloud Run Job entry point. Raises

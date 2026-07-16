@@ -47,6 +47,12 @@ jobs:
           fetch-depth: 0
       # Deliberately no uv sync. The script is stdlib only, so this job reports
       # in seconds and goes red long before the slow jobs finish installing.
+      # Python is still pinned: the script needs tomllib, which is 3.11+, and
+      # inheriting whatever the runner ships is how you get a gate that works
+      # until the day the image changes.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Fetch the base branch
         run: git fetch --no-tags origin ${{ github.base_ref }}
       - name: Check
@@ -72,6 +78,9 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Fetch the base branch
         run: git fetch --no-tags origin ${{ github.base_ref }}
       # This syncs a second venv, in a worktree of the merge base. That is the

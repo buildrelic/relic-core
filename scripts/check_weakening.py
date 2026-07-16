@@ -52,6 +52,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeGuard
@@ -405,6 +406,14 @@ def main() -> int:
     except CannotCheck as exc:
         print(f"weakening: COULD NOT CHECK. {exc}", file=sys.stderr)
         print("weakening: exiting 2. This is not a pass.", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        # Anything unexpected is a fact we could not establish, so it is a 2. An
+        # uncaught traceback would exit 1, which reads as "this PR is bad" when it
+        # means "this script is". Guessing wrong in that direction wastes an hour.
+        traceback.print_exc()
+        print(f"weakening: COULD NOT CHECK. Unexpected {type(exc).__name__}.", file=sys.stderr)
+        print("weakening: exiting 2. This is not a pass, and it is not the PR's fault.")
         return 2
 
 

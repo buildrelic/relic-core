@@ -51,6 +51,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -406,6 +407,14 @@ def main() -> int:
         return 2
     except subprocess.TimeoutExpired as exc:
         print(f"red-first: COULD NOT CHECK. Timed out: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        # Anything unexpected is a fact we could not establish, so it is a 2. An
+        # uncaught traceback would exit 1, which reads as "this PR is bad" when it
+        # means "this script is". Guessing wrong in that direction wastes an hour.
+        traceback.print_exc()
+        print(f"red-first: COULD NOT CHECK. Unexpected {type(exc).__name__}.", file=sys.stderr)
+        print("red-first: exiting 2. This is not a pass, and it is not the PR's fault.")
         return 2
 
 

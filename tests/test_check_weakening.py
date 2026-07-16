@@ -248,6 +248,15 @@ def test_allow_weakening_needs_a_real_reason(repo: Path) -> None:
     assert cw.run("main", "ALLOW-WEAKENING: x\n") == 1
 
 
+def test_allow_weakening_rejects_our_own_placeholder(repo: Path) -> None:
+    """Pasting the failure message back into the PR body must not bypass the gate.
+
+    The placeholder we print is 31 characters, so a length floor alone lets it in.
+    """
+    change(repo, {THING: "def add(a, b):\n    return a + b  # type: ignore\n"})
+    assert cw.run("main", "ALLOW-WEAKENING: <reason, at least 10 characters>\n") == 1
+
+
 def test_missing_base_ref_exits_2_not_0(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     """The whole point of a three-way exit: could-not-check is not a pass."""
     monkeypatch.setattr(sys, "argv", ["check_weakening.py", "--base", "origin/nope"])

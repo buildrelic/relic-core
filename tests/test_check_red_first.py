@@ -203,6 +203,11 @@ def test_declared_na_rejects_a_token_reason() -> None:
     assert rf.declared_na("RED-FIRST: n/a -- x") is None
 
 
+def test_declared_na_rejects_our_own_placeholder() -> None:
+    """Pasting the failure message back into the PR body must not bypass the gate."""
+    assert rf.declared_na("RED-FIRST: n/a -- <reason, at least 10 characters>") is None
+
+
 def test_declared_na_ignores_an_unrelated_body() -> None:
     assert rf.declared_na("Fixes a bug.\n\nSome prose about the change.") is None
 

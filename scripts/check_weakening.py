@@ -329,13 +329,24 @@ def scan_gate_config(base: str, files: list[tuple[str, str]]) -> list[Finding]:
     return findings
 
 
+def real_reason(raw: str) -> str | None:
+    """A declared reason, or None if it is not one a human wrote.
+
+    The length floor stops "ALLOW-WEAKENING: x". The angle-bracket check stops the
+    likelier accident: our own failure message spells the line out as
+    `<reason, at least 10 characters>`, which is 31 characters and would sail past
+    a length check if someone pasted the error into the PR body.
+    """
+    reason = raw.strip()
+    if len(reason) < MIN_REASON or "<" in reason or ">" in reason:
+        return None
+    return reason
+
+
 def allowance(body: str) -> str | None:
     """The declared reason from the PR body, if it is a real one."""
     m = ALLOW_RE.search(body or "")
-    if not m:
-        return None
-    reason = m.group(1).strip()
-    return reason if len(reason) >= MIN_REASON else None
+    return real_reason(m.group(1)) if m else None
 
 
 def warn_if_dirty() -> None:

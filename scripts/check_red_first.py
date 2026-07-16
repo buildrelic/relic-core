@@ -302,11 +302,20 @@ def parse_outcomes(report: str, tests: list[TestId]) -> dict[str, str]:
 
 
 def declared_na(body: str) -> str | None:
+    """The declared n/a reason, or None if it is not one a human wrote.
+
+    The length floor stops "RED-FIRST: n/a -- x". The angle-bracket check stops the
+    likelier accident: our own failure message spells the line out as
+    `<reason, at least 10 characters>`, which is 31 characters and would sail past
+    a length check if someone pasted the error into the PR body.
+    """
     m = NA_RE.search(body or "")
     if not m:
         return None
     reason = m.group(1).strip()
-    return reason if len(reason) >= MIN_REASON else None
+    if len(reason) < MIN_REASON or "<" in reason or ">" in reason:
+        return None
+    return reason
 
 
 def warn_if_dirty() -> None:

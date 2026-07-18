@@ -74,6 +74,22 @@ loop-smoke: up
 imports:
     uv run lint-imports
 
+# Gate: did this branch silence a check instead of satisfying it? Reads the diff
+# only, stdlib only, so it is instant. PR-only in CI. Exit 2 means "could not
+# check", which is not a pass.
+weakening BASE="origin/main":
+    uv run python scripts/check_weakening.py --base {{BASE}}
+
+# Gate: would this branch's new tests have failed before the change? Runs them
+# against a worktree of the merge base, so it pays for a second uv sync and takes
+# a couple of minutes. Refactors declare `RED-FIRST: n/a -- <reason>` in the PR body.
+red-first BASE="origin/main":
+    uv run python scripts/check_red_first.py --base {{BASE}}
+
+# Both diff gates, the way CI runs them on a PR. Not part of `just check`: these
+# need a base branch to diff against, and `check` has to work on a bare checkout.
+gates BASE="origin/main": (weakening BASE) (red-first BASE)
+
 # Run the MCP server over stdio. Mainly manual testing; the real consumer is an MCP client via .mcp.json.
 serve:
     uv run relic serve

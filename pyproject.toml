@@ -34,6 +34,7 @@ src = [
     "packages/relic-graph/src",
     "packages/relic-serve/src",
     "packages/relic-cli/src",
+    "scripts",
     "tests",
 ]
 
@@ -48,13 +49,14 @@ known-first-party = ["relic"]
 "packages/relic-core/src/relic/ontology/skill_ir.py" = ["UP"]
 
 [tool.pyright]
-include = ["packages", "tests"]
+include = ["packages", "scripts", "tests"]
 extraPaths = [
     "packages/relic-core/src",
     "packages/relic-ingest/src",
     "packages/relic-graph/src",
     "packages/relic-serve/src",
     "packages/relic-cli/src",
+    "scripts",
 ]
 pythonVersion = "3.12"
 venvPath = "."
@@ -67,6 +69,9 @@ reportMissingModuleSource = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+# The CI gates under scripts/ are standalone (stdlib only, no uv sync, so they can
+# run before the install finishes). This puts them on the path for their tests.
+pythonpath = ["scripts"]
 markers = [
     "e2e: full-loop tests against live FalkorDB + OpenAI; run via `just loop-smoke` (self-skipping without keys/db)",
 ]

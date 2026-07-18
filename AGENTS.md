@@ -151,6 +151,31 @@ PRs are de-emphasized. Lean on `/code-review` for a lightweight check instead of
 heavy PR walkthrough. Save real review for contract changes in `relic-core` and
 edits that cross a package boundary.
 
+### The two diff gates
+
+`just check` asks whether the code is green. On a PR, two more jobs ask whether the
+change earned its green. They exist because an unattended worker can satisfy every
+check in `just check` without doing the work: silence the linter, or write a test
+that asserts whatever the code already does. Both leave a diff that reads like
+progress, and neither is reliably visible on a skim.
+
+- `just weakening` reads the diff and fails on edits whose only purpose is to stop
+  an existing gate firing: a type-ignore or noqa comment, an unconditional skip or
+  xfail, a test deleted, a ruff rule dropped, pyright downgraded, an import-linter
+  contract removed, a rerun plugin added. `skipif` is not flagged: the live tests
+  are built on it.
+- `just red-first` takes the PR's tests, runs them against a worktree of the merge
+  base, and fails if none of them go red there. A test that cannot fail on the old
+  code is not testing the change.
+
+Both can be overridden, and the override is the point: it puts the choice in the PR
+body where you see it while skimming, instead of nowhere. The failure message tells
+you the exact line to add. A refactor is the honest case for overriding red-first,
+since REL-112 through REL-116 change structure and not behavior.
+
+Exit 2 from either means "could not check", which is not a pass. If you see it, the
+gate is broken, not the PR.
+
 ### Issues
 
 We track work in Linear, but only concrete work. Clear out stale and vague issues;

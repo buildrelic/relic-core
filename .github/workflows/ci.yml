@@ -30,3 +30,64 @@ jobs:
         run: uv run lint-imports
       - name: Pytest
         run: uv run python -m pytest
+
+  # Two gates that only make sense against a diff, so they are PR-only. They ask
+  # a different question from the `check` job: not "is the code green?" but "did
+  # this change earn its green?" An unattended worker can satisfy `check` by
+  # silencing it, and can satisfy a coverage number by testing what the code
+  # already does. These catch both, and both exit 2 rather than 0 when they
+  # cannot establish the facts.
+  weakening:
+    name: Weakening (did the diff silence a gate?)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Deliberately no uv sync. The script is stdlib only, so this job reports
+      # in seconds and goes red long before the slow jobs finish installing.
+      # Python is still pinned: the script needs tomllib, which is 3.11+, and
+      # inheriting whatever the runner ships is how you get a gate that works
+      # until the day the image changes.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch the base branch
+        run: git fetch --no-tags origin ${{ github.base_ref }}
+      - name: Check
+        run: python3 scripts/check_weakening.py --base origin/${{ github.base_ref }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+
+  red-first:
+    name: Red first (would the new tests have failed before?)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch the base branch
+        run: git fetch --no-tags origin ${{ github.base_ref }}
+      # This syncs a second venv, in a worktree of the merge base. That is the
+      # cost of the gate: the editable installs here point at absolute paths in
+      # this checkout, so reusing them would run the base's tests against HEAD's
+      # source and pass vacuously forever.
+      - name: Check
+        run: python3 scripts/check_red_first.py --base origin/${{ github.base_ref }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
